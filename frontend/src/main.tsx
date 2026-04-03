@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
+import { BrowserRouter, Route, Routes } from "react-router";
 import App from "./App";
 import "./styles.css";
 
@@ -11,6 +12,11 @@ if (!rootElement) {
 
 ReactDOM.createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<App />} />
+        <Route path="/thread/:threadId" element={<App />} />
+      </Routes>
+    </BrowserRouter>
   </StrictMode>,
 );

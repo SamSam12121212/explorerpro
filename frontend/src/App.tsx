@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { useNavigate, useParams } from "react-router";
 import { apiGet } from "./api";
 import { REASONING_OPTIONS } from "./constants";
 import type {
@@ -115,6 +116,23 @@ function Sidebar({
         )}
       </div>
 
+    </div>
+  );
+}
+
+function MidPanel() {
+  return (
+    <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
+      <div className="flex items-center border-b border-[#333] px-4 py-2">
+        <span className="text-xs font-semibold uppercase tracking-widest text-[#888]">
+          Explorer
+        </span>
+      </div>
+      <div className="flex min-h-0 flex-1 items-center justify-center">
+        <p className="max-w-xs text-center text-sm text-[#555]">
+          Select a document or resource to view here.
+        </p>
+      </div>
     </div>
   );
 }
@@ -351,6 +369,9 @@ function ChatPanel({
 }
 
 export default function App() {
+  const { threadId: urlThreadId } = useParams<"threadId">();
+  const navigate = useNavigate();
+
   const {
     messages,
     draft,
@@ -371,7 +392,6 @@ export default function App() {
 
   const [threads, setThreads] = useState<ThreadEntry[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(true);
-  const lastLoadedThreadIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -404,39 +424,54 @@ export default function App() {
     };
   }, [threadId]);
 
+  // Sync URL → useChat: load thread when URL param changes
   useEffect(() => {
-    if (!threadId || threadId === lastLoadedThreadIdRef.current) {
-      return;
+    if (urlThreadId && urlThreadId !== threadId) {
+      void loadThread(urlThreadId);
+    } else if (!urlThreadId && threadId) {
+      resetConversation();
     }
-    if (!threads.some((thread) => thread.id === threadId)) {
-      return;
-    }
-    if (messages.length > 0) {
-      return;
-    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlThreadId]);
 
-    lastLoadedThreadIdRef.current = threadId;
-    void loadThread(threadId);
-  }, [loadThread, messages.length, threadId, threads]);
+  // Sync useChat → URL: update URL when a new thread is created
+  useEffect(() => {
+    if (threadId && threadId !== urlThreadId) {
+      navigate(`/thread/${threadId}`, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId]);
+
+  const handleSelectThread = (id: string) => {
+    navigate(`/thread/${id}`);
+  };
+
+  const handleNewChat = () => {
+    resetConversation();
+    navigate("/");
+  };
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[#181818]">
       <Group className="h-full w-full min-w-0" orientation="horizontal">
-        <Panel className="min-w-0" defaultSize={22} minSize={18}>
+        <Panel className="min-w-0" defaultSize={18} minSize={14}>
           <Sidebar
             activeThreadId={threadId}
-            onNewChat={resetConversation}
-            onSelectThread={(id) => {
-              lastLoadedThreadIdRef.current = id;
-              void loadThread(id);
-            }}
+            onNewChat={handleNewChat}
+            onSelectThread={handleSelectThread}
             threads={threads}
           />
         </Panel>
 
         <Separator className="resize-handle" />
 
-        <Panel className="min-w-0" defaultSize={78} minSize={40}>
+        <Panel className="min-w-0" defaultSize={50} minSize={20}>
+          <MidPanel />
+        </Panel>
+
+        <Separator className="resize-handle" />
+
+        <Panel className="min-w-0" defaultSize={32} minSize={22}>
           <ChatPanel
             addPendingFiles={addPendingFiles}
             busy={busy}
@@ -444,7 +479,7 @@ export default function App() {
             messages={messages}
             pendingImages={pendingImages}
             reasoningEffort={reasoningEffort}
-            resetConversation={resetConversation}
+            resetConversation={handleNewChat}
             sendMessage={sendMessage}
             setDraft={setDraft}
             setPendingImages={setPendingImages}
@@ -455,6 +490,7 @@ export default function App() {
           />
         </Panel>
       </Group>
+
       {threadsLoading && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
           <div className="border border-[#333] bg-[#202020] px-3 py-1 text-[0.7rem] text-[#777]">
