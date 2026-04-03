@@ -1,0 +1,12 @@
+.DS_Store
+*.md
+.cache/
+bin/
+dist/
+.env
+.env.local
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+blob-storage/*
+!blob-storage/.gitkeep

@@ -1,0 +1,741 @@
+package worker
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"explorer/internal/agentcmd"
+	"explorer/internal/blobstore"
+	"explorer/internal/openaiws"
+	"explorer/internal/threadstore"
+)
+
+func TestWrapRawItemAsArray(t *testing.T) {
+	raw, err := wrapRawItemAsArray([]byte(`{"type":"function_call_output","call_id":"call_123"}`))
+	if err != nil {
+		t.Fatalf("wrapRawItemAsArray() error = %v", err)
+	}
+
+	if got := string(raw); got != `[{"type":"function_call_output","call_id":"call_123"}]` {
+		t.Fatalf("wrapRawItemAsArray() = %s", got)
+	}
+}
+
+func TestAggregateSpawnOutputItem(t *testing.T) {
+	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
+		ID:           "sg_123",
+		ParentCallID: "call_parent",
+	}, []threadstore.SpawnChildResult{
+		{
+			ChildThreadID:   "thread_child_1",
+			Status:          "completed",
+			ChildResponseID: "resp_1",
+			AssistantText:   "Auth paths look healthy.",
+			ResultRef:       "blob://child-results/1.json",
+		},
+		{
+			ChildThreadID: "thread_child_2",
+			Status:        "failed",
+			ErrorRef:      "blob://child-results/2-error.json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("aggregateSpawnOutputItem() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if decoded["type"] != "function_call_output" {
+		t.Fatalf("type = %v, want function_call_output", decoded["type"])
+	}
+
+	output, ok := decoded["output"].(string)
+	if !ok {
+		t.Fatalf("output = %#v, want string", decoded["output"])
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(output) error = %v", err)
+	}
+
+	if parsed["spawn_group_id"] != "sg_123" {
+		t.Fatalf("spawn_group_id = %v, want sg_123", parsed["spawn_group_id"])
+	}
+
+	children, ok := parsed["children"].([]any)
+	if !ok || len(children) != 2 {
+		t.Fatalf("children = %#v, want 2 entries", parsed["children"])
+	}
+
+	firstChild, ok := children[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first child = %#v, want object", children[0])
+	}
+	if firstChild["assistant_text"] != "Auth paths look healthy." {
+		t.Fatalf("assistant_text = %v, want %q", firstChild["assistant_text"], "Auth paths look healthy.")
+	}
+}
+
+func TestValidateCommandPreconditions(t *testing.T) {
+	t.Parallel()
+
+	meta := threadstore.ThreadMeta{
+		ID:               "thread_123",
+		Status:           threadstore.ThreadStatusWaitingTool,
+		LastResponseID:   "resp_123",
+		SocketGeneration: 7,
+	}
+
+	if err := validateCommandPreconditions(agentcmd.Command{
+		ExpectedStatus:           "waiting_tool",
+		ExpectedLastResponseID:   "resp_123",
+		ExpectedSocketGeneration: 7,
+	}, meta); err != nil {
+		t.Fatalf("validateCommandPreconditions() unexpected error: %v", err)
+	}
+
+	err := validateCommandPreconditions(agentcmd.Command{
+		ExpectedSocketGeneration: 8,
+	}, meta)
+	if !errors.Is(err, errCommandPrecond) {
+		t.Fatalf("expected errCommandPrecond, got %v", err)
+	}
+}
+
+func TestExtractResponseCreatePayload(t *testing.T) {
+	t.Parallel()
+
+	payload, err := extractResponseCreatePayload([]byte(`{
+		"type":"response.create",
+		"event_id":"cmd_123",
+		"model":"gpt-5.4",
+		"previous_response_id":"resp_prev",
+		"store":true
+	}`))
+	if err != nil {
+		t.Fatalf("extractResponseCreatePayload() error = %v", err)
+	}
+
+	if payload["model"] != "gpt-5.4" {
+		t.Fatalf("model = %v, want gpt-5.4", payload["model"])
+	}
+	if payload["previous_response_id"] != "resp_prev" {
+		t.Fatalf("previous_response_id = %v, want resp_prev", payload["previous_response_id"])
+	}
+}
+
+func TestExtractResponseCreatePayloadLegacyNestedShape(t *testing.T) {
+	t.Parallel()
+
+	payload, err := extractResponseCreatePayload([]byte(`{
+		"type":"response.create",
+		"event_id":"cmd_legacy",
+		"response":{
+			"model":"gpt-5.4",
+			"store":true
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("extractResponseCreatePayload() error = %v", err)
+	}
+
+	if payload["model"] != "gpt-5.4" {
+		t.Fatalf("model = %v, want gpt-5.4", payload["model"])
+	}
+}
+
+func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
+	t.Parallel()
+
+	payload, err := buildResponseCreatePayload(threadstore.ThreadMeta{
+		MetadataJSON:   `{"tenant":"acme"}`,
+		IncludeJSON:    `["reasoning.encrypted_content"]`,
+		ToolsJSON:      `[{"type":"function","name":"spawn_subagents"}]`,
+		ToolChoiceJSON: `{"type":"function","name":"spawn_subagents"}`,
+	}, map[string]any{
+		"model": "gpt-5.4",
+		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	if payload["metadata"] == nil {
+		t.Fatalf("metadata missing from payload")
+	}
+	if payload["include"] == nil {
+		t.Fatalf("include missing from payload")
+	}
+	if payload["tools"] == nil {
+		t.Fatalf("tools missing from payload")
+	}
+	if payload["tool_choice"] == nil {
+		t.Fatalf("tool_choice missing from payload")
+	}
+}
+
+func TestEnsureRequiredResponseIncludeAddsEncryptedContent(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"model": "gpt-5.4",
+	}
+
+	if err := ensureRequiredResponseInclude(payload); err != nil {
+		t.Fatalf("ensureRequiredResponseInclude() error = %v", err)
+	}
+
+	include, ok := payload["include"].([]string)
+	if !ok {
+		t.Fatalf("include = %#v, want []string", payload["include"])
+	}
+	if len(include) != 1 || include[0] != agentcmd.RequiredIncludeReasoningEncryptedContent {
+		t.Fatalf("include = %v, want [%q]", include, agentcmd.RequiredIncludeReasoningEncryptedContent)
+	}
+}
+
+func TestNormalizeInputItemsString(t *testing.T) {
+	t.Parallel()
+
+	raw, err := normalizeInputItems(json.RawMessage(`"review section 1"`))
+	if err != nil {
+		t.Fatalf("normalizeInputItems() error = %v", err)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(items))
+	}
+	if items[0]["type"] != "message" {
+		t.Fatalf("items[0].type = %v, want message", items[0]["type"])
+	}
+}
+
+func TestLowerResponseCreatePayloadConvertsImageRef(t *testing.T) {
+	t.Parallel()
+
+	store, err := blobstore.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+
+	pngBytes, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1EAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+
+	ref := store.Ref("images", "img_test", "source.png")
+	if err := store.WriteRef(context.Background(), ref, pngBytes); err != nil {
+		t.Fatalf("WriteRef() error = %v", err)
+	}
+
+	actor := &threadActor{
+		ctx:  context.Background(),
+		blob: store,
+	}
+
+	original := map[string]any{
+		"model": "gpt-5.4",
+		"input": []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "describe this image",
+					},
+					map[string]any{
+						"type":         "image_ref",
+						"image_ref":    ref,
+						"content_type": "image/png",
+					},
+				},
+			},
+		},
+	}
+
+	lowered, stats, err := actor.lowerResponseCreatePayload(original)
+	if err != nil {
+		t.Fatalf("lowerResponseCreatePayload() error = %v", err)
+	}
+	if stats.InputItemsCount != 1 {
+		t.Fatalf("InputItemsCount = %d, want 1", stats.InputItemsCount)
+	}
+	if stats.LoweredImageInputs != 1 {
+		t.Fatalf("LoweredImageInputs = %d, want 1", stats.LoweredImageInputs)
+	}
+	if stats.LoweredBlobRefs != 1 {
+		t.Fatalf("LoweredBlobRefs = %d, want 1", stats.LoweredBlobRefs)
+	}
+
+	items, ok := lowered["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("input = %#v, want one item", lowered["input"])
+	}
+
+	message, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("item = %#v, want object", items[0])
+	}
+
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("content = %#v, want two parts", message["content"])
+	}
+
+	imagePart, ok := content[1].(map[string]any)
+	if !ok {
+		t.Fatalf("image part = %#v, want object", content[1])
+	}
+	if imagePart["type"] != "input_image" {
+		t.Fatalf("type = %v, want input_image", imagePart["type"])
+	}
+
+	imageURL, _ := imagePart["image_url"].(string)
+	if !strings.HasPrefix(imageURL, "data:image/png;base64,") {
+		t.Fatalf("image_url = %q, want data:image/png;base64,...", imageURL)
+	}
+
+	originalItems, ok := original["input"].([]any)
+	if !ok {
+		t.Fatalf("original input = %#v, want []any", original["input"])
+	}
+	originalMessage, ok := originalItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("original item = %#v, want object", originalItems[0])
+	}
+	originalContent, ok := originalMessage["content"].([]any)
+	if !ok {
+		t.Fatalf("original content = %#v, want []any", originalMessage["content"])
+	}
+	originalImagePart, ok := originalContent[1].(map[string]any)
+	if !ok {
+		t.Fatalf("original image part = %#v, want object", originalContent[1])
+	}
+	if originalImagePart["type"] != "image_ref" {
+		t.Fatalf("original type = %v, want image_ref", originalImagePart["type"])
+	}
+}
+
+func TestFilterSubagentToolsRemovesSpawnTool(t *testing.T) {
+	t.Parallel()
+
+	filtered, err := filterSubagentTools(`[{"type":"function","name":"spawn_subagents"},{"type":"function","name":"lookup"}]`)
+	if err != nil {
+		t.Fatalf("filterSubagentTools() error = %v", err)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal([]byte(filtered), &tools); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(tools) != 1 || tools[0]["name"] != "lookup" {
+		t.Fatalf("tools = %v, want only lookup", tools)
+	}
+}
+
+func TestResolveBranchPreviousResponseID(t *testing.T) {
+	t.Parallel()
+
+	parent := threadstore.ThreadMeta{
+		ID:             "thread_parent",
+		LastResponseID: "resp_parent_latest",
+	}
+
+	got, err := resolveBranchPreviousResponseID(spawnRequest{
+		SpawnMode: spawnModeWarmBranch,
+	}, parent)
+	if err != nil {
+		t.Fatalf("resolveBranchPreviousResponseID() error = %v", err)
+	}
+	if got != "resp_parent_latest" {
+		t.Fatalf("resolveBranchPreviousResponseID() = %q, want %q", got, "resp_parent_latest")
+	}
+
+	got, err = resolveBranchPreviousResponseID(spawnRequest{
+		SpawnMode:              spawnModeWarmBranch,
+		BranchPreviousResponse: "resp_explicit",
+	}, parent)
+	if err != nil {
+		t.Fatalf("resolveBranchPreviousResponseID() explicit error = %v", err)
+	}
+	if got != "resp_explicit" {
+		t.Fatalf("resolveBranchPreviousResponseID() explicit = %q, want %q", got, "resp_explicit")
+	}
+}
+
+func TestResolveBranchPreviousResponseIDMissingParentResponse(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveBranchPreviousResponseID(spawnRequest{
+		SpawnMode: spawnModeWarmBranch,
+	}, threadstore.ThreadMeta{})
+	if err == nil {
+		t.Fatal("expected error for missing branch parent response id")
+	}
+}
+
+func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
+	t.Parallel()
+
+	merged, err := mergeMetadataJSON(`{"tenant":"acme"}`, map[string]any{
+		"spawn_mode":                spawnModeWarmBranch,
+		"branch_parent_thread_id":   "thread_parent",
+		"branch_parent_response_id": "resp_parent",
+		"branch_index":              2,
+	}, true)
+	if err != nil {
+		t.Fatalf("mergeMetadataJSON() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(merged), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if decoded["tenant"] != "acme" {
+		t.Fatalf("tenant = %v, want acme", decoded["tenant"])
+	}
+	if decoded["spawn_mode"] != spawnModeWarmBranch {
+		t.Fatalf("spawn_mode = %v, want %s", decoded["spawn_mode"], spawnModeWarmBranch)
+	}
+	if decoded["branch_parent_response_id"] != "resp_parent" {
+		t.Fatalf("branch_parent_response_id = %v, want resp_parent", decoded["branch_parent_response_id"])
+	}
+}
+
+func TestEnsureSessionReusesConnectedSessionWithoutPing(t *testing.T) {
+	t.Parallel()
+
+	cfg := testOpenAIConfig()
+	conn := &actorTestConn{}
+	session := openaiws.NewSession(cfg, &actorTestDialer{conn: conn})
+	if err := session.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	actor := &threadActor{
+		threadID:       "thread_test",
+		logger:         testActorLogger(),
+		cfg:            cfg,
+		ctx:            context.Background(),
+		session:        session,
+		sessionFactory: func() *openaiws.Session { t.Fatal("sessionFactory should not be called"); return nil },
+	}
+
+	if err := actor.ensureSession(); err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+
+	if conn.pings != 0 {
+		t.Fatalf("pings = %d, want 0", conn.pings)
+	}
+}
+
+func TestSendResponseCreateReconnectsAfterStaleSocket(t *testing.T) {
+	t.Parallel()
+
+	cfg := testOpenAIConfig()
+	staleConn := &actorTestConn{writeErr: errors.New("broken pipe")}
+	freshConn := &actorTestConn{}
+	staleSession := openaiws.NewSession(cfg, &actorTestDialer{conn: staleConn})
+	if err := staleSession.Connect(context.Background()); err != nil {
+		t.Fatalf("staleSession.Connect() error = %v", err)
+	}
+
+	factoryCalls := 0
+	actor := &threadActor{
+		threadID: "thread_test",
+		logger:   testActorLogger(),
+		cfg:      cfg,
+		ctx:      context.Background(),
+		session:  staleSession,
+		sessionFactory: func() *openaiws.Session {
+			factoryCalls++
+			return openaiws.NewSession(cfg, &actorTestDialer{conn: freshConn})
+		},
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("evt_retry", map[string]any{"model": "gpt-5.4"})
+	if err != nil {
+		t.Fatalf("NewResponseCreateEvent() error = %v", err)
+	}
+
+	if err := actor.sendResponseCreate(event); err != nil {
+		t.Fatalf("sendResponseCreate() error = %v", err)
+	}
+
+	if factoryCalls != 1 {
+		t.Fatalf("sessionFactory calls = %d, want 1", factoryCalls)
+	}
+	if len(staleConn.writes) != 0 {
+		t.Fatalf("stale writes = %d, want 0", len(staleConn.writes))
+	}
+	if !staleConn.closed {
+		t.Fatal("expected stale connection to be closed")
+	}
+	if len(freshConn.writes) != 1 {
+		t.Fatalf("fresh writes = %d, want 1", len(freshConn.writes))
+	}
+}
+
+func TestTransientCommandRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		deliveries uint64
+		want       time.Duration
+	}{
+		{deliveries: 0, want: 2 * time.Second},
+		{deliveries: 1, want: 2 * time.Second},
+		{deliveries: 2, want: 4 * time.Second},
+		{deliveries: 3, want: 8 * time.Second},
+		{deliveries: 4, want: 16 * time.Second},
+		{deliveries: 5, want: 30 * time.Second},
+		{deliveries: 9, want: 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		if got := transientCommandRetryDelay(tt.deliveries); got != tt.want {
+			t.Fatalf("transientCommandRetryDelay(%d) = %s, want %s", tt.deliveries, got, tt.want)
+		}
+	}
+}
+
+func TestIsTransientCommandError(t *testing.T) {
+	t.Parallel()
+
+	if !isTransientCommandError(&net.DNSError{Err: "no such host", Name: "api.openai.com"}) {
+		t.Fatal("expected dns error to be transient")
+	}
+
+	if !isTransientCommandError(context.DeadlineExceeded) {
+		t.Fatal("expected deadline exceeded to be transient")
+	}
+
+	if !isTransientCommandError(errors.New("dial responses websocket: dial tcp: lookup api.openai.com: no such host")) {
+		t.Fatal("expected dial tcp dns failure to be transient")
+	}
+
+	if isTransientCommandError(context.Canceled) {
+		t.Fatal("did not expect context cancellation to be transient")
+	}
+
+	if isTransientCommandError(errors.New("openai returned a permanent error")) {
+		t.Fatal("did not expect arbitrary permanent error to be transient")
+	}
+}
+
+func TestShouldDropMissingThreadCommand(t *testing.T) {
+	t.Parallel()
+
+	if !shouldDropMissingThreadCommand(threadstore.ErrThreadNotFound) {
+		t.Fatal("expected bare thread-not-found to be droppable")
+	}
+
+	wrapped := errors.New("wrapped: " + threadstore.ErrThreadNotFound.Error())
+	if shouldDropMissingThreadCommand(wrapped) {
+		t.Fatal("did not expect plain string match to be droppable")
+	}
+
+	if !shouldDropMissingThreadCommand(fmt.Errorf("load thread: %w", threadstore.ErrThreadNotFound)) {
+		t.Fatal("expected wrapped thread-not-found to be droppable")
+	}
+}
+
+func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_retry"] = threadstore.ThreadMeta{
+		ID:               "thread_retry",
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 3,
+		SocketExpiresAt:  time.Now().UTC().Add(time.Minute),
+		ActiveResponseID: "resp_active",
+	}
+
+	conn := &actorTestConn{}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadID = "thread_retry"
+	actor.setMeta(store.threads["thread_retry"])
+
+	if err := actor.failThreadAfterRetryExhaustion("thread_retry"); err != nil {
+		t.Fatalf("failThreadAfterRetryExhaustion() error = %v", err)
+	}
+
+	meta := store.threads["thread_retry"]
+	if meta.Status != threadstore.ThreadStatusFailed {
+		t.Fatalf("status = %s, want failed", meta.Status)
+	}
+	if meta.ActiveResponseID != "" {
+		t.Fatalf("active response id = %q, want empty", meta.ActiveResponseID)
+	}
+	if meta.OwnerWorkerID != "" {
+		t.Fatalf("owner worker id = %q, want empty", meta.OwnerWorkerID)
+	}
+	if !meta.SocketExpiresAt.IsZero() {
+		t.Fatalf("socket expires at = %s, want zero", meta.SocketExpiresAt)
+	}
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_retry" {
+		t.Fatalf("releasedThreads = %#v, want [thread_retry]", store.releasedThreads)
+	}
+	if !conn.closed {
+		t.Fatal("expected session to be closed")
+	}
+}
+
+func TestShouldReleaseTerminalChildResources(t *testing.T) {
+	t.Parallel()
+
+	if !shouldReleaseTerminalChildResources(threadstore.ThreadMeta{
+		ParentThreadID: "thread_parent",
+		Status:         threadstore.ThreadStatusCompleted,
+	}) {
+		t.Fatal("expected completed child thread to release resources")
+	}
+
+	if shouldReleaseTerminalChildResources(threadstore.ThreadMeta{
+		Status: threadstore.ThreadStatusReady,
+	}) {
+		t.Fatal("expected parent ready thread to keep reusable resources")
+	}
+
+	if shouldReleaseTerminalChildResources(threadstore.ThreadMeta{
+		ParentThreadID: "thread_parent",
+		Status:         threadstore.ThreadStatusWaitingChildren,
+	}) {
+		t.Fatal("expected non-terminal child thread to keep active resources")
+	}
+}
+
+func TestExtractAssistantTextFromItemPayload(t *testing.T) {
+	t.Parallel()
+
+	text, err := extractAssistantTextFromItemPayload(json.RawMessage(`{
+		"type":"message",
+		"content":[
+			{"type":"output_text","text":"First paragraph."},
+			{"type":"output_text","text":"Second paragraph."}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("extractAssistantTextFromItemPayload() error = %v", err)
+	}
+
+	if text != "First paragraph.\n\nSecond paragraph." {
+		t.Fatalf("text = %q, want joined output text", text)
+	}
+}
+
+func testOpenAIConfig() openaiws.Config {
+	return openaiws.Config{
+		APIKey:             "test-key",
+		BaseURL:            "https://api.openai.com/v1",
+		ResponsesSocketURL: "wss://api.openai.com/v1/responses",
+		DialTimeout:        50 * time.Millisecond,
+		ReadTimeout:        50 * time.Millisecond,
+		WriteTimeout:       50 * time.Millisecond,
+		PingInterval:       50 * time.Millisecond,
+		MaxMessageBytes:    1024,
+	}
+}
+
+func testActorLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type actorTestDialer struct {
+	conn openaiws.Conn
+}
+
+func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {
+	return d.conn, nil
+}
+
+type actorTestConn struct {
+	mu          sync.Mutex
+	reads       [][]byte
+	writes      [][]byte
+	writeErr    error
+	pings       int
+	closed      bool
+	closeCode   openaiws.CloseCode
+	closeReason string
+	closedCh    chan struct{}
+}
+
+func (c *actorTestConn) Read(_ context.Context) ([]byte, error) {
+	c.mu.Lock()
+	if c.closedCh == nil {
+		c.closedCh = make(chan struct{})
+	}
+	if len(c.reads) > 0 {
+		payload := append([]byte(nil), c.reads[0]...)
+		c.reads = c.reads[1:]
+		c.mu.Unlock()
+		return payload, nil
+	}
+	closedCh := c.closedCh
+	c.mu.Unlock()
+
+	<-closedCh
+	return nil, context.Canceled
+}
+
+func (c *actorTestConn) Write(_ context.Context, payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.writeErr != nil {
+		return c.writeErr
+	}
+	c.writes = append(c.writes, append([]byte(nil), payload...))
+	return nil
+}
+
+func (c *actorTestConn) Ping(_ context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pings++
+	return nil
+}
+
+func (c *actorTestConn) Close(code openaiws.CloseCode, reason string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.closed = true
+	c.closeCode = code
+	c.closeReason = reason
+	if c.closedCh == nil {
+		c.closedCh = make(chan struct{})
+	}
+	select {
+	case <-c.closedCh:
+	default:
+		close(c.closedCh)
+	}
+	return nil
+}

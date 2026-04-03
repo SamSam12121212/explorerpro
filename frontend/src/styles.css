@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(136, 136, 136, 0.4) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgba(136, 136, 136, 0.4);
+    border: none;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgba(136, 136, 136, 0.6);
+  }
+
+  *::-webkit-scrollbar,
+  *::-webkit-scrollbar-thumb,
+  *::-webkit-scrollbar-track {
+    border-radius: 0 !important;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: #181818;
+    color: #d4d4d4;
+    font-family: var(--font-sans);
+  }
+
+  button,
+  textarea,
+  input {
+    font: inherit;
+    color: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgba(55, 148, 255, 0.35);
+  }
+}
+
+@layer components {
+  /* Resize handle between panels */
+  .resize-handle {
+    @apply relative flex w-2 shrink-0 items-stretch justify-center outline-none;
+    cursor: col-resize;
+  }
+
+  .resize-handle::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: #333;
+    transition: background 120ms ease;
+  }
+
+  .resize-handle:hover::before,
+  .resize-handle[data-separator="active"]::before {
+    background: #007acc;
+  }
+
+  /* Typing dots animation */
+  .typing-dot {
+    animation: typing-pulse 1.1s infinite;
+  }
+}
+
+@keyframes typing-pulse {
+  0%,
+  70%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+
+  35% {
+    transform: translateY(-0.2rem);
+    opacity: 1;
+  }
+}

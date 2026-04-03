@@ -1,0 +1,137 @@
+name: explorer-local
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      VITE_PROXY_TARGET: http://api:8080
+      VITE_HMR_HOST: localhost
+      VITE_HMR_CLIENT_PORT: "${FRONTEND_PORT:-5173}"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.12.5-alpine
+    command:
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "--http_port=8222"
+    ports:
+      - "${NATS_CLIENT_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats_data:/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.6.1-alpine
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--save"
+      - "60"
+      - "1000"
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:18.3
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-explorer}"
+      POSTGRES_USER: "${POSTGRES_USER:-explorer}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-explorer}"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres18_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build: .
+    entrypoint: ["api"]
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      APP_ENV: development
+      SERVICE_NAME: explorer-api
+      PORT: "8080"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-api
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
+      BLOB_STORAGE_DIR: /data/blob-storage
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_RESPONSES_WS_URL: "${OPENAI_RESPONSES_WS_URL:-wss://api.openai.com/v1/responses}"
+      OPENAI_ORG_ID: "${OPENAI_ORG_ID:-}"
+      OPENAI_PROJECT_ID: "${OPENAI_PROJECT_ID:-}"
+    volumes:
+      - ./blob-storage:/data/blob-storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build: .
+    entrypoint: ["worker"]
+    environment:
+      APP_ENV: development
+      SERVICE_NAME: explorer-worker
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      WORKER_ID: "${WORKER_ID:-worker-docker-1}"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-worker
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
+      BLOB_STORAGE_DIR: /data/blob-storage
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_RESPONSES_WS_URL: "${OPENAI_RESPONSES_WS_URL:-wss://api.openai.com/v1/responses}"
+      OPENAI_ORG_ID: "${OPENAI_ORG_ID:-}"
+      OPENAI_PROJECT_ID: "${OPENAI_PROJECT_ID:-}"
+    volumes:
+      - ./blob-storage:/data/blob-storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:
+  nats_data:
+  redis_data:
+  postgres18_data:
