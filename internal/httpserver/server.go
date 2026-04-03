@@ -34,6 +34,7 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 		})
 	})
 	mux.HandleFunc("/images", api.handleImages)
+	mux.HandleFunc("/images/", api.handleImageServe)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.HTTP.HealthTimeout)
 		defer cancel()

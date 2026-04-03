@@ -65,6 +65,22 @@ function extractMessageText(item: NonNullable<ThreadItemsResponse["items"]>[numb
     .join("\n\n");
 }
 
+function blobRefToUrl(ref: string): string {
+  return "/" + ref.replace("blob://", "");
+}
+
+function extractMessageImages(item: NonNullable<ThreadItemsResponse["items"]>[number]): UploadedImage[] {
+  return (item.payload?.content ?? [])
+    .filter((c) => c.type === "image_ref" && c.image_ref)
+    .map((c) => ({
+      image_id: c.image_ref!.split("/").at(-2) ?? crypto.randomUUID(),
+      image_ref: c.image_ref!,
+      content_type: c.content_type,
+      filename: c.filename,
+      preview_url: blobRefToUrl(c.image_ref!),
+    }));
+}
+
 function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage[] {
   const messages: ChatMessage[] = [];
 
@@ -74,8 +90,9 @@ function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage
     }
 
     const text = extractMessageText(item);
+    const images = extractMessageImages(item);
 
-    if (!text) {
+    if (!text && images.length === 0) {
       continue;
     }
 
@@ -88,6 +105,7 @@ function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage
       id: item.cursor ?? crypto.randomUUID(),
       role,
       text,
+      images: images.length > 0 ? images : undefined,
     });
   }
 

@@ -13,6 +13,28 @@ import (
 
 const maxImageUploadBytes = 20 << 20
 
+func (a *commandAPI) handleImageServe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	subPath := strings.TrimPrefix(r.URL.Path, "/")
+	ref := "blob://" + subPath
+
+	data, err := a.runtime.Blob().ReadRef(r.Context(), ref)
+	if err != nil {
+		writeErrorJSON(w, http.StatusNotFound, "image not found")
+		return
+	}
+
+	contentType := http.DetectContentType(data)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func (a *commandAPI) handleImages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)

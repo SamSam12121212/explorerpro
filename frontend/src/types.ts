@@ -55,6 +55,8 @@ export interface ThreadItemsResponse {
         type?: string;
         text?: string;
         image_ref?: string;
+        content_type?: string;
+        filename?: string;
       }[];
     };
   }[];
