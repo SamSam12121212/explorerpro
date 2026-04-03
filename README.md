@@ -1,4 +1,4 @@
-# Explorer
+# ExplorerPRO
 
 An agent runtime built on the OpenAI Responses API with WebSocket mode. Not considered production-ready.
 
