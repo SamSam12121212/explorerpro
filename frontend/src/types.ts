@@ -2,6 +2,11 @@ export type MessageRole = "user" | "assistant" | "status" | "error";
 export type HealthState = "checking" | "online" | "degraded" | "offline";
 export type ReasoningEffort = "low" | "medium" | "high";
 
+export interface ModelOption {
+  value: string;
+  label: string;
+}
+
 export interface UploadedImage {
   image_id: string;
   image_ref: string;
@@ -26,6 +31,7 @@ export interface ThreadResponse {
   thread?: {
     id?: string;
     status?: string;
+    model?: string;
   };
 }
 
@@ -38,6 +44,7 @@ export interface ThreadListResponse {
     id?: string;
     label?: string;
     preview_text?: string;
+    model?: string;
     created_at?: string;
     updated_at?: string;
   }[];

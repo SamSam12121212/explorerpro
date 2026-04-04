@@ -37,6 +37,10 @@
     border-radius: 0 !important;
   }
 
+  html {
+    font-size: 125%;
+  }
+
   html,
   body,
   #root {
@@ -45,7 +49,7 @@
   }
 
   body {
-    background: #181818;
+    background: #1e1e1e;
     color: #d4d4d4;
     font-family: var(--font-sans);
   }
@@ -71,6 +75,7 @@
   .resize-handle {
     @apply relative flex w-2 shrink-0 items-stretch justify-center outline-none;
     cursor: col-resize;
+    background: #1e1e1e;
   }
 
   .resize-handle::before {

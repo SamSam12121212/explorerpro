@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost, checkHealthApi, uploadImage } from "./api";
-import { DEFAULT_INSTRUCTIONS, EXPLORER_TOOLS } from "./constants";
+import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "./constants";
 import type {
   ChatMessage,
   HealthState,
@@ -70,15 +70,16 @@ function blobRefToUrl(ref: string): string {
 }
 
 function extractMessageImages(item: NonNullable<ThreadItemsResponse["items"]>[number]): UploadedImage[] {
-  return (item.payload?.content ?? [])
-    .filter((c) => c.type === "image_ref" && c.image_ref)
-    .map((c) => ({
-      image_id: c.image_ref!.split("/").at(-2) ?? crypto.randomUUID(),
-      image_ref: c.image_ref!,
+  return (item.payload?.content ?? []).flatMap((c) => {
+    if (c.type !== "image_ref" || !c.image_ref) return [];
+    return [{
+      image_id: c.image_ref.split("/").at(-2) ?? crypto.randomUUID(),
+      image_ref: c.image_ref,
       content_type: c.content_type,
       filename: c.filename,
-      preview_url: blobRefToUrl(c.image_ref!),
-    }));
+      preview_url: blobRefToUrl(c.image_ref),
+    }];
+  });
 }
 
 function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage[] {
@@ -121,6 +122,7 @@ export function useChat() {
   const [lastItemCursor, setLastItemCursor] = useState<string | null>(null);
   const [pendingImages, setPendingImages] = useState<UploadedImage[]>([]);
   const [apiStatus, setApiStatus] = useState<HealthState>("checking");
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [reasoningEffort, setReasoningEffort] =
     useState<ReasoningEffort>("medium");
   const previewUrlsRef = useRef(new Set<string>());
@@ -209,10 +211,10 @@ export function useChat() {
     return payload;
   }
 
-  async function disconnectSocket(targetThreadId: string) {
-    apiPost(`/threads/${targetThreadId}/commands`, {
+  function disconnectSocket(targetThreadId: string) {
+    void apiPost(`/threads/${targetThreadId}/commands`, {
       kind: "thread.disconnect_socket",
-    }).catch(() => {});
+    }).catch(() => undefined);
   }
 
   async function loadThread(nextThreadId: string) {
@@ -223,10 +225,14 @@ export function useChat() {
     }
 
     try {
-      const payload = await apiGet<ThreadItemsResponse>(
-        `/threads/${nextThreadId}/items?limit=200`,
-      );
+      const [threadInfo, payload] = await Promise.all([
+        apiGet<ThreadResponse>(`/threads/${nextThreadId}`),
+        apiGet<ThreadItemsResponse>(
+          `/threads/${nextThreadId}/items?limit=200`,
+        ),
+      ]);
       setThreadId(nextThreadId);
+      setModel(threadInfo.thread?.model ?? DEFAULT_MODEL);
       setLastItemCursor(payload.page?.last_cursor ?? payload.page?.last_stream_id ?? null);
       setMessages(buildMessagesFromItems(payload));
       setPendingImages([]);
@@ -278,7 +284,7 @@ export function useChat() {
 
       if (!currentThreadId) {
         const created = await apiPost<ThreadCreateResponse>("/threads", {
-          model: "gpt-5.4",
+          model,
           instructions: DEFAULT_INSTRUCTIONS,
           input: inputItems,
           tools: EXPLORER_TOOLS,
@@ -327,6 +333,7 @@ export function useChat() {
     setThreadId(null);
     setLastItemCursor(null);
     setPendingImages([]);
+    setModel(DEFAULT_MODEL);
     setReasoningEffort("medium");
   }
 
@@ -343,6 +350,8 @@ export function useChat() {
     pendingImages,
     setPendingImages,
     apiStatus,
+    model,
+    setModel,
     reasoningEffort,
     setReasoningEffort,
     sendMessage,

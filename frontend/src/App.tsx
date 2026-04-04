@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useNavigate, useParams } from "react-router";
+import { LuChevronDown, LuImage } from "react-icons/lu";
 import { apiGet } from "./api";
-import { REASONING_OPTIONS } from "./constants";
+import { MODEL_OPTIONS, REASONING_OPTIONS } from "./constants";
 import type {
   ChatMessage,
   MessageRole,
@@ -31,10 +32,12 @@ interface ChatPanelProps {
   busy: boolean;
   draft: string;
   messages: ChatMessage[];
+  model: string;
   pendingImages: UploadedImage[];
   reasoningEffort: ReasoningEffort;
   sendMessage: (text: string, images: UploadedImage[]) => Promise<void>;
   setDraft: (value: string) => void;
+  setModel: (value: string) => void;
   setPendingImages: Dispatch<SetStateAction<UploadedImage[]>>;
   setReasoningEffort: (value: ReasoningEffort) => void;
   submitDisabled: boolean;
@@ -72,7 +75,7 @@ function Sidebar({
   onNewChat,
 }: SidebarProps) {
   return (
-    <div className="flex h-full w-full min-w-0 flex-col bg-[#181818]">
+    <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
       <div className="flex items-center justify-between border-b border-[#333] px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-widest text-[#888]">
           Threads
@@ -98,7 +101,7 @@ function Sidebar({
                   : "bg-transparent text-[#b2b2b2] hover:bg-[#252525] hover:text-[#d4d4d4]"
               }`}
               key={thread.id}
-              onClick={() => onSelectThread(thread.id)}
+              onClick={() => { onSelectThread(thread.id); }}
               type="button"
             >
               <span className="truncate text-sm font-medium">{thread.label}</span>
@@ -141,10 +144,12 @@ function ChatPanel({
   busy,
   draft,
   messages,
+  model,
   pendingImages,
   reasoningEffort,
   sendMessage,
   setDraft,
+  setModel,
   setPendingImages,
   setReasoningEffort,
   submitDisabled,
@@ -190,7 +195,7 @@ function ChatPanel({
                     : "text-[#888] hover:text-[#d4d4d4]"
                 }`}
                 key={opt.value}
-                onClick={() => setReasoningEffort(opt.value)}
+                onClick={() => { setReasoningEffort(opt.value); }}
                 type="button"
               >
                 {opt.label}
@@ -276,11 +281,11 @@ function ChatPanel({
               </div>
               <button
                 className="text-xs text-[#888] hover:text-[#f44747]"
-                onClick={() =>
+                onClick={() => {
                   setPendingImages((cur) =>
                     cur.filter((e) => e.image_id !== img.image_id),
-                  )
-                }
+                  );
+                }}
                 type="button"
               >
                 ✕
@@ -320,7 +325,7 @@ function ChatPanel({
 
           <textarea
             className="min-h-[2.5rem] max-h-52 w-full resize-none border border-[#333] bg-[#252525] px-3 py-2 text-sm text-[#d4d4d4] outline-none placeholder:text-[#555] focus:border-[#007acc]"
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { setDraft(e.target.value); }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -345,14 +350,34 @@ function ChatPanel({
           />
 
           <div className="flex items-center justify-between">
-            <button
-              className="text-xs text-[#888] transition hover:text-[#d4d4d4] disabled:opacity-40"
-              disabled={busy || uploadCount > 0}
-              onClick={() => fileInputRef.current?.click()}
-              type="button"
-            >
-              + Image
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                className="text-[#888] hover:text-[#d4d4d4] disabled:opacity-40"
+                disabled={busy || uploadCount > 0}
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach image"
+                type="button"
+              >
+                <LuImage className="h-4 w-4" />
+              </button>
+
+              <label className={`relative inline-flex cursor-pointer items-center gap-0.5 text-xs text-[#888] hover:text-[#d4d4d4] ${threadId ? "cursor-not-allowed opacity-50" : ""}`}>
+                <span>{MODEL_OPTIONS.find((o) => o.value === model)?.label ?? model}</span>
+                <LuChevronDown className="h-3 w-3" />
+                <select
+                  className="absolute inset-0 cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
+                  disabled={!!threadId}
+                  onChange={(e) => { setModel(e.target.value); }}
+                  value={model}
+                >
+                  {MODEL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
 
             <button
               className="bg-[#007acc] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#1b8de4] disabled:cursor-not-allowed disabled:opacity-40"
@@ -381,6 +406,8 @@ export default function App() {
     threadId,
     pendingImages,
     setPendingImages,
+    model,
+    setModel,
     reasoningEffort,
     setReasoningEffort,
     sendMessage,
@@ -403,11 +430,11 @@ export default function App() {
 
         setThreads(
           (payload.threads ?? [])
-            .filter((thread) => Boolean(thread?.id))
+            .filter((thread) => Boolean(thread.id))
             .map((thread) => ({
               id: thread.id ?? "",
-              label: thread.label?.trim() || "New thread",
-              previewText: thread.preview_text?.trim() || "",
+              label: thread.label?.trim() ?? "New thread",
+              previewText: thread.preview_text?.trim() ?? "",
               updatedAt: thread.updated_at ?? thread.created_at ?? "",
             })),
         );
@@ -437,22 +464,22 @@ export default function App() {
   // Sync useChat → URL: update URL when a new thread is created
   useEffect(() => {
     if (threadId && threadId !== urlThreadId) {
-      navigate(`/thread/${threadId}`, { replace: true });
+      void navigate(`/thread/${threadId}`, { replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
   const handleSelectThread = (id: string) => {
-    navigate(`/thread/${id}`);
+    void navigate(`/thread/${id}`);
   };
 
   const handleNewChat = () => {
     resetConversation();
-    navigate("/");
+    void navigate("/");
   };
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#181818]">
+    <div className="h-screen w-screen overflow-hidden bg-[#1e1e1e]">
       <Group className="h-full w-full min-w-0" orientation="horizontal">
         <Panel className="min-w-0" defaultSize={18} minSize={14}>
           <Sidebar
@@ -477,11 +504,13 @@ export default function App() {
             busy={busy}
             draft={draft}
             messages={messages}
+            model={model}
             pendingImages={pendingImages}
             reasoningEffort={reasoningEffort}
             resetConversation={handleNewChat}
             sendMessage={sendMessage}
             setDraft={setDraft}
+            setModel={setModel}
             setPendingImages={setPendingImages}
             setReasoningEffort={setReasoningEffort}
             submitDisabled={submitDisabled}

@@ -1,4 +1,12 @@
-import type { ReasoningEffort } from "./types";
+import type { ModelOption, ReasoningEffort } from "./types";
+
+export const MODEL_OPTIONS: ModelOption[] = [
+  { value: "gpt-5.4", label: "GPT-5.4" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
+  { value: "gpt-5.4-nano", label: "GPT-5.4 Nano" },
+];
+
+export const DEFAULT_MODEL = "gpt-5.4";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
