@@ -606,6 +606,106 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 	}
 }
 
+func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_idle"] = threadstore.ThreadMeta{
+		ID:               "thread_idle",
+		Status:           threadstore.ThreadStatusReady,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 5,
+		SocketExpiresAt:  time.Now().UTC().Add(time.Minute),
+	}
+
+	conn := &actorTestConn{}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadID = "thread_idle"
+	actor.setMeta(store.threads["thread_idle"])
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_disconnect_1",
+		Kind:     agentcmd.KindThreadDisconnectSocket,
+		ThreadID: "thread_idle",
+	}
+
+	if err := actor.handleDisconnectSocket(cmd); err != nil {
+		t.Fatalf("handleDisconnectSocket() error = %v", err)
+	}
+
+	if !conn.closed {
+		t.Fatal("expected session to be closed")
+	}
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_idle" {
+		t.Fatalf("releasedThreads = %#v, want [thread_idle]", store.releasedThreads)
+	}
+
+	meta := store.threads["thread_idle"]
+	if meta.Status != threadstore.ThreadStatusReady {
+		t.Fatalf("status = %s, want ready (unchanged)", meta.Status)
+	}
+}
+
+func TestHandleDisconnectSocketRejectsNonIdleThread(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_running"] = threadstore.ThreadMeta{
+		ID:               "thread_running",
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 3,
+	}
+
+	actor := newActorRecoveryHarness(t, store, nil)
+	actor.threadID = "thread_running"
+	actor.setMeta(store.threads["thread_running"])
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_disconnect_2",
+		Kind:     agentcmd.KindThreadDisconnectSocket,
+		ThreadID: "thread_running",
+	}
+
+	err := actor.handleDisconnectSocket(cmd)
+	if !errors.Is(err, errCommandPrecond) {
+		t.Fatalf("expected errCommandPrecond, got %v", err)
+	}
+	if len(store.releasedThreads) != 0 {
+		t.Fatalf("releasedThreads = %#v, want empty", store.releasedThreads)
+	}
+}
+
+func TestHandleDisconnectSocketNoopsWithoutSession(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_nosess"] = threadstore.ThreadMeta{
+		ID:               "thread_nosess",
+		Status:           threadstore.ThreadStatusReady,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 2,
+	}
+
+	actor := newActorRecoveryHarness(t, store, nil)
+	actor.threadID = "thread_nosess"
+	actor.setMeta(store.threads["thread_nosess"])
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_disconnect_3",
+		Kind:     agentcmd.KindThreadDisconnectSocket,
+		ThreadID: "thread_nosess",
+	}
+
+	if err := actor.handleDisconnectSocket(cmd); err != nil {
+		t.Fatalf("handleDisconnectSocket() error = %v", err)
+	}
+
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_nosess" {
+		t.Fatalf("releasedThreads = %#v, want [thread_nosess]", store.releasedThreads)
+	}
+}
+
 func TestShouldReleaseTerminalChildResources(t *testing.T) {
 	t.Parallel()
 
