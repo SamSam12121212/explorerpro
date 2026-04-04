@@ -24,6 +24,7 @@ const (
 	KindThreadChildCompleted   Kind = "thread.child_completed"
 	KindThreadChildFailed      Kind = "thread.child_failed"
 	KindThreadCancel           Kind = "thread.cancel"
+	KindThreadDisconnectSocket Kind = "thread.disconnect_socket"
 	KindThreadRotateSocket     Kind = "thread.rotate_socket"
 	KindThreadReconcile        Kind = "thread.reconcile"
 	KindThreadAdopt            Kind = "thread.adopt"

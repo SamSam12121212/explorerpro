@@ -209,8 +209,18 @@ export function useChat() {
     return payload;
   }
 
+  async function disconnectSocket(targetThreadId: string) {
+    apiPost(`/threads/${targetThreadId}/commands`, {
+      kind: "thread.disconnect_socket",
+    }).catch(() => {});
+  }
+
   async function loadThread(nextThreadId: string) {
     setBusy(true);
+
+    if (threadId && threadId !== nextThreadId) {
+      disconnectSocket(threadId);
+    }
 
     try {
       const payload = await apiGet<ThreadItemsResponse>(
@@ -309,6 +319,9 @@ export function useChat() {
   }
 
   function resetConversation() {
+    if (threadId) {
+      disconnectSocket(threadId);
+    }
     setMessages([]);
     setDraft("");
     setThreadId(null);

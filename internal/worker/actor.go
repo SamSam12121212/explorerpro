@@ -445,6 +445,8 @@ func (a *threadActor) processCommand(cmd agentcmd.Command) error {
 		return a.handleReconcile(cmd)
 	case agentcmd.KindThreadCancel:
 		return a.handleCancel(cmd)
+	case agentcmd.KindThreadDisconnectSocket:
+		return a.handleDisconnectSocket(cmd)
 	default:
 		return fmt.Errorf("%w: %s", errUnsupportedKind, cmd.Kind)
 	}
@@ -986,6 +988,30 @@ func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
 			return err
 		}
 	}
+
+	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
+}
+
+func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
+	meta, err := a.store.LoadThread(a.ctx, cmd.ThreadID)
+	if err != nil {
+		return err
+	}
+	if err := validateCommandPreconditions(cmd, meta); err != nil {
+		return err
+	}
+	if !statusSupportsIdleSocket(meta.Status) {
+		return fmt.Errorf("%w: cannot disconnect socket for thread in status %s", errCommandPrecond, meta.Status)
+	}
+
+	a.logger.Info("disconnecting idle socket",
+		"thread_id", meta.ID,
+		"socket_generation", meta.SocketGeneration,
+	)
+
+	a.stopIdleLoop()
+	a.stopLeaseLoop()
+	a.resetSession()
 
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }

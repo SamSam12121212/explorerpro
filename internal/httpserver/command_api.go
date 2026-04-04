@@ -947,6 +947,8 @@ func normalizeCommandBody(kind agentcmd.Kind, raw json.RawMessage) (json.RawMess
 		return raw, nil
 	case agentcmd.KindThreadCancel:
 		return normalizeOptionalBody(raw)
+	case agentcmd.KindThreadDisconnectSocket:
+		return normalizeOptionalBody(raw)
 	case agentcmd.KindThreadAdopt:
 		return normalizeOptionalBody(raw)
 	case agentcmd.KindThreadChildCompleted, agentcmd.KindThreadChildFailed:
