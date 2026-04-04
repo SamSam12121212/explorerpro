@@ -92,7 +92,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		AppEnv:      getEnv("APP_ENV", defaultAppEnv),
 		ServiceName: getEnv("SERVICE_NAME", defaultServiceName),
-		LogLevel:    parseLogLevel(getEnv("LOG_LEVEL", "info")),
+		LogLevel:    ParseLogLevel(getEnv("LOG_LEVEL", "info")),
 		HTTP: HTTPConfig{
 			Port:          getEnv("PORT", defaultPort),
 			ReadTimeout:   defaultReadTimeout,
@@ -271,7 +271,7 @@ func int64FromEnv(key string, fallback int64) (int64, error) {
 	return value, nil
 }
 
-func parseLogLevel(raw string) slog.Level {
+func ParseLogLevel(raw string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "debug":
 		return slog.LevelDebug

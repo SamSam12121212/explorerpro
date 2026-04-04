@@ -17,8 +17,12 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 	if err := natsbootstrap.EnsureAgentCommandStream(runtime.NATS().JetStream()); err != nil {
 		return nil, fmt.Errorf("bootstrap agent command stream: %w", err)
 	}
+	if err := natsbootstrap.EnsureGitCommandStream(runtime.NATS().JetStream()); err != nil {
+		return nil, fmt.Errorf("bootstrap git command stream: %w", err)
+	}
 
 	api := newCommandAPI(cfg, logger, runtime)
+	repos := newRepoAPI(logger, runtime)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +39,7 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 	})
 	mux.HandleFunc("/images", api.handleImages)
 	mux.HandleFunc("/images/", api.handleImageServe)
+	mux.HandleFunc("/repos", repos.handleRepos)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.HTTP.HealthTimeout)
 		defer cancel()

@@ -50,6 +50,28 @@ export interface ThreadListResponse {
   }[];
 }
 
+export interface RepoEntry {
+  id: string;
+  url: string;
+  ref: string;
+  name: string;
+  status: string;
+  error?: string;
+  commit_sha?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RepoListResponse {
+  repos: RepoEntry[];
+  count: number;
+}
+
+export interface RepoAddResponse {
+  repo: RepoEntry;
+  cmd_id: string;
+}
+
 export interface ThreadItemsResponse {
   items?: {
     cursor?: string;

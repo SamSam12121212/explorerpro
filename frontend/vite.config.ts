@@ -26,6 +26,10 @@ export default defineConfig({
         target: proxyTarget,
         changeOrigin: true,
       },
+      "/repos": {
+        target: proxyTarget,
+        changeOrigin: true,
+      },
       "/threads": {
         target: proxyTarget,
         changeOrigin: true,
