@@ -4,6 +4,8 @@ An agent runtime built on the OpenAI Responses API with WebSocket mode. Not cons
 
 OpenAI-native by design. No provider abstraction layer.
 
+![Screenshot](docs/Screenshot%202026-04-07%20at%2000.15.44.png)
+
 ## Aims
 
 - Thread execution with persistent worker-owned WebSockets and response continuity via `previous_response_id`
@@ -38,13 +40,3 @@ make run-api
 OPENAI_API_KEY=... make run-worker
 ```
 
-## API
-
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /threads` | Create a thread |
-| `POST /threads/{id}/commands` | Send a command |
-| `GET /threads/{id}` | Thread snapshot |
-| `GET /threads/{id}/items` | Item log |
-| `GET /threads/{id}/events` | Event log |
-| `GET /threads/{id}/spawn-groups` | Spawn group inspection |
