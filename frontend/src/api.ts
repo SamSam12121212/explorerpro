@@ -49,3 +49,15 @@ export async function checkHealthApi(): Promise<"online" | "degraded"> {
   const payload = await apiGet<HealthResponse>("/healthz");
   return payload.status === "ok" ? "online" : "degraded";
 }
+
+export function buildWebSocketUrl(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${normalizedPath}`;
+}
+
+export function buildStreamWebSocketUrl(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/stream${normalizedPath}`;
+}

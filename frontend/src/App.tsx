@@ -144,23 +144,17 @@ function MidPanel() {
   const [urlInput, setUrlInput] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   const fetchRepos = useCallback(async () => {
     try {
       const data = await apiGet<RepoListResponse>("/repos");
       setRepos(data.repos);
     } catch {
-      /* swallow fetch errors on poll */
+      /* swallow fetch errors */
     }
   }, []);
 
   useEffect(() => {
     void fetchRepos();
-    pollRef.current = setInterval(() => { void fetchRepos(); }, 3000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
   }, [fetchRepos]);
 
   const handleAdd = async () => {

@@ -130,8 +130,51 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  wsserver:
+    build: .
+    entrypoint: ["wsserver"]
+    ports:
+      - "${WS_PORT:-8081}:8081"
+    environment:
+      SERVICE_NAME: explorer-wsserver
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      PORT: "8081"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-wsserver
+      REDIS_URL: redis://redis:6379/0
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+  git:
+    build: .
+    entrypoint: ["gitservice"]
+    environment:
+      SERVICE_NAME: explorer-git
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-git
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
+      GIT_DATA_DIR: /data/git
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    volumes:
+      - git_data:/data/git
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   frontend_node_modules:
   nats_data:
   redis_data:
   postgres18_data:
+  git_data:

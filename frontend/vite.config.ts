@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 
 const proxyTarget = process.env.VITE_PROXY_TARGET ?? "http://api:8080";
+const wsTarget = process.env.VITE_WS_TARGET ?? "http://wsserver:8081";
 const hmrHost = process.env.VITE_HMR_HOST ?? "localhost";
 const hmrClientPort = Number(process.env.VITE_HMR_CLIENT_PORT ?? 5173);
 
@@ -33,6 +34,12 @@ export default defineConfig({
       "/threads": {
         target: proxyTarget,
         changeOrigin: true,
+      },
+      "/stream": {
+        target: wsTarget,
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path: string) => path.replace(/^\/stream/, ""),
       },
     },
     hmr: {

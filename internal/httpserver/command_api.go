@@ -124,6 +124,12 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		a.handleListEvents(w, r, route.ThreadID)
+	case "connect":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		a.handleThreadConnect(w, r, route.ThreadID)
 	case "responses":
 		if route.ResourceID == "" {
 			http.NotFound(w, r)

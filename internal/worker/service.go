@@ -17,6 +17,7 @@ import (
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -79,6 +80,9 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 
 func (s *Service) Run(ctx context.Context) error {
 	if err := natsbootstrap.EnsureAgentCommandStream(s.runtime.NATS().JetStream()); err != nil {
+		return err
+	}
+	if err := natsbootstrap.EnsureThreadEventsStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
 
@@ -221,6 +225,7 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,
 		Publish:        s.publishCommand,
+		PublishEvent:   s.publishThreadEvent,
 		SessionFactory: func() *openaiws.Session { return openaiws.NewSession(s.openAIConfig, s.dialer) },
 	})
 
@@ -280,6 +285,33 @@ func rawJSONToAny(raw json.RawMessage) (any, error) {
 	}
 
 	return decoded, nil
+}
+
+func (s *Service) publishThreadEvent(_ context.Context, threadID string, socketGeneration uint64, eventSeq int, eventType string, raw json.RawMessage) {
+	env := threadevents.EventEnvelope{
+		ThreadID:         threadID,
+		EventType:        eventType,
+		SocketGeneration: socketGeneration,
+		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
+		Payload:          raw,
+	}
+
+	data, err := threadevents.Encode(env)
+	if err != nil {
+		s.logger.Warn("failed to encode thread event for nats", "thread_id", threadID, "error", err)
+		return
+	}
+
+	msg := &nats.Msg{
+		Subject: threadevents.Subject(threadID),
+		Header:  nats.Header{},
+		Data:    data,
+	}
+	msg.Header.Set("Nats-Msg-Id", threadevents.MsgID(threadID, socketGeneration, eventSeq))
+
+	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
+		s.logger.Warn("failed to publish thread event to nats", "thread_id", threadID, "event_type", eventType, "error", err)
+	}
 }
 
 func (s *Service) publishCommand(ctx context.Context, subject string, cmd agentcmd.Command) error {

@@ -44,6 +44,7 @@ type threadActorConfig struct {
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	PublishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, eventSeq int, eventType string, raw json.RawMessage)
 	SessionFactory func() *openaiws.Session
 }
 
@@ -70,13 +71,14 @@ type actorStore interface {
 }
 
 type threadActor struct {
-	threadID string
-	workerID string
-	logger   *slog.Logger
-	store    actorStore
-	blob     *blobstore.LocalStore
-	cfg      openaiws.Config
-	publish  func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	threadID     string
+	workerID     string
+	logger       *slog.Logger
+	store        actorStore
+	blob         *blobstore.LocalStore
+	cfg          openaiws.Config
+	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, eventSeq int, eventType string, raw json.RawMessage)
 
 	sessionFactory func() *openaiws.Session
 
@@ -111,6 +113,7 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
 		publish:        cfg.Publish,
+		publishEvent:   cfg.PublishEvent,
 		sessionFactory: cfg.SessionFactory,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -1346,6 +1349,10 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
+	if a.publishEvent != nil {
+		a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, 0, "client.response.create", rawEvent)
+	}
+
 	return a.streamUntilTerminal(meta)
 }
 
@@ -1564,6 +1571,10 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			CreatedAt:        time.Now().UTC(),
 		}); err != nil {
 			return err
+		}
+
+		if a.publishEvent != nil {
+			a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, eventCount, string(event.Type), event.Raw)
 		}
 
 		if responsePayload := event.ResponsePayload(); len(responsePayload) > 0 {

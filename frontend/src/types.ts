@@ -95,3 +95,34 @@ export interface ThreadItemsResponse {
     last_stream_id?: string;
   };
 }
+
+export interface ThreadStreamSnapshotMessage {
+  type: "thread.snapshot";
+  thread_id: string;
+  thread?: ThreadResponse["thread"];
+}
+
+export interface ThreadStreamItemsDeltaMessage {
+  type: "thread.items.delta";
+  thread_id: string;
+  items?: ThreadItemsResponse["items"];
+  page?: ThreadItemsResponse["page"];
+}
+
+export interface ThreadStreamEventsDeltaMessage {
+  type: "thread.events.delta";
+  thread_id: string;
+  events?: Record<string, unknown>[];
+}
+
+export interface ThreadStreamHeartbeatMessage {
+  type: "thread.heartbeat";
+  thread_id: string;
+  time?: string;
+}
+
+export type ThreadStreamMessage =
+  | ThreadStreamSnapshotMessage
+  | ThreadStreamItemsDeltaMessage
+  | ThreadStreamEventsDeltaMessage
+  | ThreadStreamHeartbeatMessage;
