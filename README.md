@@ -1,8 +1,8 @@
 # ExplorerPRO
 
-An agent runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready.
+An agent runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready, and has loads of bugs.
 
-OpenAI-native by design. No provider abstraction layer.
+OpenAI-native by design wih no provider abstraction layer yet and not planned atm.
 
 ![Screenshot](docs/Screenshot%202026-04-07%20at%2000.15.44.png)
 
