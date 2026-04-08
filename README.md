@@ -1,6 +1,6 @@
 # ExplorerPRO
 
-An agent runtime built on the OpenAI Responses API with WebSocket mode. Not considered production-ready.
+An agent runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready.
 
 OpenAI-native by design. No provider abstraction layer.
 
@@ -19,7 +19,7 @@ OpenAI-native by design. No provider abstraction layer.
 
 ## Stack
 
-Go, NATS + JetStream, Redis, Postgres, OpenAI Responses API (WebSocket mode)
+Go, NATS + JetStream, Redis, Postgres, OpenAI Responses API ([WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode))
 
 ## Running
 
