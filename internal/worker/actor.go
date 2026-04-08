@@ -586,7 +586,7 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	}
 
 	if meta.LastResponseID == "" {
-		return fmt.Errorf("thread %s has no last_response_id for resume", meta.ID)
+		return fmt.Errorf("%w: thread %s has no last_response_id for resume", errCommandPrecond, meta.ID)
 	}
 
 	meta.OwnerWorkerID = a.workerID
@@ -630,7 +630,7 @@ func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
 	}
 
 	if meta.LastResponseID == "" {
-		return fmt.Errorf("thread %s has no last_response_id for tool output", meta.ID)
+		return fmt.Errorf("%w: thread %s has no last_response_id for tool output", errCommandPrecond, meta.ID)
 	}
 
 	if meta.Status != threadstore.ThreadStatusWaitingTool && meta.Status != threadstore.ThreadStatusReady {

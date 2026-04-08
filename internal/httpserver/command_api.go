@@ -338,6 +338,11 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	if isTerminalThreadStatus(meta.Status) && requiresActiveThread(req.Kind) {
+		writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %s is in terminal status %s", threadID, meta.Status))
+		return
+	}
+
 	body, err := normalizeCommandBody(req.Kind, req.Body)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -1405,5 +1410,23 @@ func eventPageBounds(events []threadstore.EventRecord) pageBounds {
 		LastCursor:    strconv.FormatInt(events[len(events)-1].EventSeq, 10),
 		FirstStreamID: events[0].StreamID,
 		LastStreamID:  events[len(events)-1].StreamID,
+	}
+}
+
+func isTerminalThreadStatus(status threadstore.ThreadStatus) bool {
+	switch status {
+	case threadstore.ThreadStatusCompleted, threadstore.ThreadStatusFailed, threadstore.ThreadStatusCancelled, threadstore.ThreadStatusIncomplete:
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresActiveThread(kind agentcmd.Kind) bool {
+	switch kind {
+	case agentcmd.KindThreadResume, agentcmd.KindThreadSubmitToolOutput:
+		return true
+	default:
+		return false
 	}
 }

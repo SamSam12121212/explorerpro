@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost, buildStreamWebSocketUrl, checkHealthApi, uploadImage } from "./api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "./constants";
 import type {
@@ -236,7 +236,7 @@ export function useChat() {
     }).catch(() => undefined);
   }
 
-  const handleThreadSnapshot = useEffectEvent((payload: ThreadResponse) => {
+  const handleThreadSnapshot = useCallback((payload: ThreadResponse) => {
     const nextStatus = payload.thread?.status ?? null;
     const previousStatus = lastThreadStatusRef.current;
     lastThreadStatusRef.current = nextStatus;
@@ -250,9 +250,9 @@ export function useChat() {
     ) {
       appendMessage("error", `Thread ended with status: ${nextStatus}`);
     }
-  });
+  }, []);
 
-  const handleThreadStreamMessage = useEffectEvent((payload: ThreadStreamMessage) => {
+  const handleThreadStreamMessage = useCallback((payload: ThreadStreamMessage) => {
     if (!activeThreadIdRef.current || payload.thread_id !== activeThreadIdRef.current) {
       return;
     }
@@ -282,9 +282,9 @@ export function useChat() {
       default:
         break;
     }
-  });
+  }, [handleThreadSnapshot]);
 
-  const disconnectThreadStream = useEffectEvent(() => {
+  const disconnectThreadStream = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -299,9 +299,9 @@ export function useChat() {
     threadStreamRef.current = null;
     closingThreadStreamRef.current = socket;
     socket.close();
-  });
+  }, []);
 
-  const connectThreadStream = useEffectEvent((nextThreadId: string, afterCursor: string | null) => {
+  const connectThreadStream = useCallback((nextThreadId: string, afterCursor: string | null) => {
     disconnectThreadStream();
 
     const query = new URLSearchParams();
@@ -320,7 +320,7 @@ export function useChat() {
 
     socket.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data) as ThreadStreamMessage;
+        const payload = JSON.parse(event.data as string) as ThreadStreamMessage;
         console.log("[ws event]", payload.type, payload);
         handleThreadStreamMessage(payload);
       } catch {
@@ -356,7 +356,7 @@ export function useChat() {
         }
       }, retryDelay);
     };
-  });
+  }, [disconnectThreadStream, handleThreadStreamMessage]);
 
   async function loadThread(nextThreadId: string) {
     setBusy(true);
@@ -426,7 +426,11 @@ export function useChat() {
 
     try {
       const inputItems = buildUserInputItems(text, images);
+      const terminalStatuses = ["failed", "incomplete", "cancelled"];
       let currentThreadId = threadId;
+      if (currentThreadId && terminalStatuses.includes(lastThreadStatusRef.current ?? "")) {
+        currentThreadId = null;
+      }
 
       if (!currentThreadId) {
         const created = await apiPost<ThreadCreateResponse>("/threads", {
