@@ -16,9 +16,12 @@ export const DEFAULT_INSTRUCTIONS = [
 ].join(" ");
 
 export const REASONING_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+  { value: "none", label: "None" },
+  { value: "minimal", label: "Minimal" },
   { value: "low", label: "Low" },
-  { value: "medium", label: "Med" },
+  { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
 ];
 
 export const EXPLORER_TOOLS = [

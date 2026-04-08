@@ -62,6 +62,7 @@ type StartBody struct {
 
 type ResumeBody struct {
 	InputItems json.RawMessage `json:"input_items"`
+	Reasoning  json.RawMessage `json:"reasoning,omitempty"`
 }
 
 type SubmitToolOutputBody struct {

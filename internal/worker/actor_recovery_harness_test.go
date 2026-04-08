@@ -87,9 +87,16 @@ func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID, _ string,
 	return nil
 }
 
-func (s *fakeActorStore) AppendItem(_ context.Context, entry threadstore.ItemLogEntry) error {
+func (s *fakeActorStore) AppendItem(_ context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
 	s.appendedItems = append(s.appendedItems, entry)
-	return nil
+	return threadstore.ItemRecord{
+		Seq:        int64(len(s.appendedItems)),
+		ResponseID: entry.ResponseID,
+		ItemType:   entry.ItemType,
+		Direction:  entry.Direction,
+		Payload:    json.RawMessage(entry.PayloadJSON),
+		CreatedAt:  entry.CreatedAt,
+	}, nil
 }
 
 func (s *fakeActorStore) AppendEvent(_ context.Context, entry threadstore.EventLogEntry) error {

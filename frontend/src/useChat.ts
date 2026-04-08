@@ -91,19 +91,48 @@ function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage
   return messages;
 }
 
+function sameImageRefs(left?: UploadedImage[], right?: UploadedImage[]) {
+  if ((left?.length ?? 0) !== (right?.length ?? 0)) {
+    return false;
+  }
+  return (left ?? []).every((image, index) => image.image_ref === right?.[index]?.image_ref);
+}
+
+function sameMessageContent(left: ChatMessage, right: ChatMessage) {
+  return left.role === right.role &&
+    left.text === right.text &&
+    sameImageRefs(left.images, right.images);
+}
+
 function mergeMessages(current: ChatMessage[], incoming: ChatMessage[]) {
   if (incoming.length === 0) {
     return current;
   }
 
   const merged = [...current];
-  const seen = new Set(current.map((message) => message.id));
+  const seen = new Set(
+    current
+      .filter((message) => !message.optimistic)
+      .map((message) => message.id),
+  );
 
   for (const message of incoming) {
     if (seen.has(message.id)) {
       continue;
     }
     seen.add(message.id);
+    if (message.role === "user") {
+      const optimisticIndex = merged.findIndex(
+        (candidate) =>
+          candidate.optimistic &&
+          candidate.role === "user" &&
+          sameMessageContent(candidate, message),
+      );
+      if (optimisticIndex >= 0) {
+        merged[optimisticIndex] = message;
+        continue;
+      }
+    }
     merged.push(message);
   }
 
@@ -180,6 +209,25 @@ export function useChat() {
       ...current,
       { id: crypto.randomUUID(), role, text, images },
     ]);
+  }
+
+  function appendOptimisticUserMessage(text: string, images: UploadedImage[]) {
+    const id = `optimistic-${crypto.randomUUID()}`;
+    setMessages((current) => [
+      ...current,
+      {
+        id,
+        role: "user",
+        text,
+        images: images.length > 0 ? images : undefined,
+        optimistic: true,
+      },
+    ]);
+    return id;
+  }
+
+  function removeMessage(messageId: string) {
+    setMessages((current) => current.filter((message) => message.id !== messageId));
   }
 
   function disconnectSocket(targetThreadId: string) {
@@ -374,6 +422,7 @@ export function useChat() {
     if (!text && images.length === 0) return;
 
     setBusy(true);
+    const optimisticMessageId = appendOptimisticUserMessage(text, images);
 
     try {
       const inputItems = buildUserInputItems(text, images);
@@ -395,7 +444,6 @@ export function useChat() {
         activeThreadIdRef.current = currentThreadId;
         setThreadId(currentThreadId);
         setLastItemCursor(null);
-        setMessages([]);
         connectThreadStream(currentThreadId, null);
       } else {
         if (!threadStreamRef.current) {
@@ -407,6 +455,7 @@ export function useChat() {
         });
       }
     } catch (error) {
+      removeMessage(optimisticMessageId);
       setBusy(false);
       appendMessage(
         "error",

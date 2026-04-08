@@ -21,13 +21,10 @@ import (
 )
 
 const (
-	batchMaxEvents       = 10
-	batchFlushInterval   = 50 * time.Millisecond
-	snapshotInterval     = 2 * time.Second
-	itemsPollInterval    = 1 * time.Second
-	heartbeatInterval    = 20 * time.Second
-	fallbackPollInterval = 350 * time.Millisecond
-	itemsBatchLimit      = int64(200)
+	batchMaxEvents     = 10
+	batchFlushInterval = 50 * time.Millisecond
+	heartbeatInterval  = 20 * time.Second
+	itemsBatchLimit    = int64(200)
 )
 
 var wsOriginPatterns = []string{
@@ -77,16 +74,14 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sub, err := c.cfg.js.Subscribe(
+	sub, err := c.cfg.js.SubscribeSync(
 		threadevents.Subject(c.cfg.threadID),
-		func(_ *nats.Msg) {},
 		nats.DeliverNew(),
 		nats.AckExplicit(),
 		nats.AckWait(30*time.Second),
 	)
 	if err != nil {
-		c.cfg.logger.Warn("nats subscribe failed, falling back to polling", "error", err)
-		c.runPollLoop(ctx, conn, preferPostgres)
+		c.cfg.logger.Warn("nats subscribe failed", "error", err)
 		return
 	}
 	defer func() { _ = sub.Unsubscribe() }()
@@ -96,12 +91,6 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 
 // runEventLoop is the primary NATS-driven loop.
 func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *nats.Subscription, preferPostgres bool) {
-	snapshotTicker := time.NewTicker(snapshotInterval)
-	defer snapshotTicker.Stop()
-
-	itemsTicker := time.NewTicker(itemsPollInterval)
-	defer itemsTicker.Stop()
-
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 
@@ -112,6 +101,11 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 	afterItem := c.cfg.afterItem
 	var batch []json.RawMessage
 	batchActive := false
+
+	if err := c.writeItemsDelta(ctx, conn, &afterItem, preferPostgres); err != nil {
+		c.logStreamError(err)
+		return
+	}
 
 	for {
 		select {
@@ -128,32 +122,11 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 				return
 			}
 
-		case <-snapshotTicker.C:
-			meta, _, err := c.loadThread(ctx)
-			if err != nil {
-				c.logStreamError(err)
-				return
-			}
-			if err := c.writeSnapshot(ctx, conn, meta); err != nil {
-				c.logStreamError(err)
-				return
-			}
-
-		case <-itemsTicker.C:
-			if err := c.writeItemsDelta(ctx, conn, &afterItem, preferPostgres); err != nil {
-				c.logStreamError(err)
-				return
-			}
-
 		case <-batchTimer.C:
-			if len(batch) > 0 {
-				if err := c.flushEventBatch(ctx, conn, batch); err != nil {
-					c.logStreamError(err)
-					return
-				}
-				batch = batch[:0]
+			if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
+				c.logStreamError(err)
+				return
 			}
-			batchActive = false
 
 		default:
 			msg, err := sub.NextMsg(50 * time.Millisecond)
@@ -176,80 +149,39 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 				continue
 			}
 
-			batch = append(batch, env.Payload)
-
-			if !batchActive {
-				batchTimer.Reset(batchFlushInterval)
-				batchActive = true
-			}
-
-			isTerminal := isTerminalEventType(env.EventType)
-			if len(batch) >= batchMaxEvents || isTerminal {
-				if !batchTimer.Stop() {
-					select {
-					case <-batchTimer.C:
-					default:
-					}
-				}
-				if err := c.flushEventBatch(ctx, conn, batch); err != nil {
+			switch env.EventType {
+			case threadevents.EventTypeThreadItem:
+				if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
 					c.logStreamError(err)
 					return
 				}
-				batch = batch[:0]
-				batchActive = false
+				if err := c.writeStreamItem(ctx, conn, &afterItem, env.Payload); err != nil {
+					c.logStreamError(err)
+					return
+				}
+			case threadevents.EventTypeThreadSnapshot:
+				if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
+					c.logStreamError(err)
+					return
+				}
+				if err := c.writeStreamSnapshot(ctx, conn, env.Payload); err != nil {
+					c.logStreamError(err)
+					return
+				}
+			default:
+				batch = append(batch, env.Payload)
 
-				if isTerminal {
-					// Send final items and snapshot after terminal event.
-					_ = c.writeItemsDelta(ctx, conn, &afterItem, preferPostgres)
-					if meta, _, err := c.loadThread(ctx); err == nil {
-						_ = c.writeSnapshot(ctx, conn, meta)
+				if !batchActive {
+					batchTimer.Reset(batchFlushInterval)
+					batchActive = true
+				}
+
+				if len(batch) >= batchMaxEvents || isTerminalEventType(env.EventType) {
+					if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
+						c.logStreamError(err)
+						return
 					}
 				}
-			}
-		}
-	}
-}
-
-// runPollLoop is the fallback DB-polling loop identical to the original thread_stream.go.
-func (c *client) runPollLoop(ctx context.Context, conn *websocket.Conn, preferPostgres bool) {
-	pollTicker := time.NewTicker(fallbackPollInterval)
-	defer pollTicker.Stop()
-
-	snapshotTicker := time.NewTicker(snapshotInterval)
-	defer snapshotTicker.Stop()
-
-	heartbeatTicker := time.NewTicker(heartbeatInterval)
-	defer heartbeatTicker.Stop()
-
-	afterItem := c.cfg.afterItem
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-pollTicker.C:
-			if err := c.writeItemsDelta(ctx, conn, &afterItem, preferPostgres); err != nil {
-				c.logStreamError(err)
-				return
-			}
-		case <-snapshotTicker.C:
-			meta, _, err := c.loadThread(ctx)
-			if err != nil {
-				c.logStreamError(err)
-				return
-			}
-			if err := c.writeSnapshot(ctx, conn, meta); err != nil {
-				c.logStreamError(err)
-				return
-			}
-		case <-heartbeatTicker.C:
-			if err := wsjson.Write(ctx, conn, map[string]any{
-				"type":      "thread.heartbeat",
-				"thread_id": c.cfg.threadID,
-				"time":      time.Now().UTC().Format(time.RFC3339),
-			}); err != nil {
-				c.logStreamError(err)
-				return
 			}
 		}
 	}
@@ -342,13 +274,111 @@ func (c *client) writeItemsDelta(ctx context.Context, conn *websocket.Conn, afte
 		"thread_id": c.cfg.threadID,
 		"items":     presented,
 		"page": map[string]any{
-			"limit":       itemsBatchLimit,
-			"after":       options.After,
-			"count":       len(items),
+			"limit":        itemsBatchLimit,
+			"after":        options.After,
+			"count":        len(items),
 			"first_cursor": strconv.FormatInt(items[0].Seq, 10),
 			"last_cursor":  cursor,
 		},
 	})
+}
+
+type streamItemPayload struct {
+	Cursor     string          `json:"cursor"`
+	Seq        int64           `json:"seq"`
+	ResponseID string          `json:"response_id,omitempty"`
+	ItemType   string          `json:"item_type"`
+	Direction  string          `json:"direction"`
+	CreatedAt  string          `json:"created_at"`
+	StreamID   string          `json:"stream_id,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+}
+
+type streamSnapshotPayload struct {
+	ID                 string `json:"id"`
+	Status             string `json:"status,omitempty"`
+	Model              string `json:"model,omitempty"`
+	LastResponseID     string `json:"last_response_id,omitempty"`
+	ActiveResponseID   string `json:"active_response_id,omitempty"`
+	ActiveSpawnGroupID string `json:"active_spawn_group_id,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+}
+
+func (c *client) writeStreamItem(ctx context.Context, conn *websocket.Conn, afterItem *string, raw json.RawMessage) error {
+	var item streamItemPayload
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return err
+	}
+
+	cursor := strings.TrimSpace(item.Cursor)
+	if cursor == "" {
+		cursor = strconv.FormatInt(item.Seq, 10)
+		item.Cursor = cursor
+	}
+
+	if after := parseCursor(*afterItem); after > 0 && item.Seq <= after {
+		return nil
+	}
+
+	pageAfter := *afterItem
+	*afterItem = cursor
+
+	return wsjson.Write(ctx, conn, map[string]any{
+		"type":      "thread.items.delta",
+		"thread_id": c.cfg.threadID,
+		"items":     []streamItemPayload{item},
+		"page": map[string]any{
+			"limit":        itemsBatchLimit,
+			"after":        pageAfter,
+			"count":        1,
+			"first_cursor": cursor,
+			"last_cursor":  cursor,
+		},
+	})
+}
+
+func (c *client) writeStreamSnapshot(ctx context.Context, conn *websocket.Conn, raw json.RawMessage) error {
+	var snapshot streamSnapshotPayload
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return err
+	}
+
+	threadID := strings.TrimSpace(snapshot.ID)
+	if threadID == "" {
+		threadID = c.cfg.threadID
+	}
+
+	return wsjson.Write(ctx, conn, map[string]any{
+		"type":      "thread.snapshot",
+		"thread_id": threadID,
+		"thread":    snapshot,
+	})
+}
+
+func (c *client) flushPendingEventBatch(
+	ctx context.Context,
+	conn *websocket.Conn,
+	batch *[]json.RawMessage,
+	batchActive *bool,
+	batchTimer *time.Timer,
+) error {
+	if *batchActive {
+		if !batchTimer.Stop() {
+			select {
+			case <-batchTimer.C:
+			default:
+			}
+		}
+	}
+
+	if len(*batch) > 0 {
+		if err := c.flushEventBatch(ctx, conn, *batch); err != nil {
+			return err
+		}
+		*batch = (*batch)[:0]
+	}
+	*batchActive = false
+	return nil
 }
 
 func (c *client) flushEventBatch(ctx context.Context, conn *websocket.Conn, events []json.RawMessage) error {
@@ -392,6 +422,14 @@ func supportsPostgresCursor(raw string) bool {
 	}
 	_, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	return err == nil
+}
+
+func parseCursor(raw string) int64 {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 // Presentation helpers — mirrors internal/httpserver/command_api.go presenters.

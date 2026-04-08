@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"explorer/internal/blobstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
+	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -44,7 +46,7 @@ type threadActorConfig struct {
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
-	PublishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, eventSeq int, eventType string, raw json.RawMessage)
+	PublishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage)
 	SessionFactory func() *openaiws.Session
 }
 
@@ -58,7 +60,7 @@ type actorStore interface {
 	RenewOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error)
 	RotateOwnership(ctx context.Context, threadID, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
 	ReleaseOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64) error
-	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) error
+	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error)
 	AppendEvent(ctx context.Context, entry threadstore.EventLogEntry) error
 	SaveResponseRaw(ctx context.Context, threadID, responseID string, payload json.RawMessage) error
 	LoadLatestClientResponseCreatePayload(ctx context.Context, threadID string) (json.RawMessage, error)
@@ -78,7 +80,7 @@ type threadActor struct {
 	blob         *blobstore.LocalStore
 	cfg          openaiws.Config
 	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
-	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, eventSeq int, eventType string, raw json.RawMessage)
+	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage)
 
 	sessionFactory func() *openaiws.Session
 
@@ -342,11 +344,9 @@ func (a *threadActor) failThreadAfterRetryExhaustion(threadID string) error {
 	meta.ActiveResponseID = ""
 	meta.UpdatedAt = time.Now().UTC()
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-
-	a.setMeta(meta)
 	return nil
 }
 
@@ -526,10 +526,9 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	meta.ReasoningJSON = string(body.Reasoning)
 	meta.UpdatedAt = now
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
@@ -595,11 +594,13 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	meta.SocketExpiresAt = time.Now().UTC().Add(socketExpiryTTL)
 	meta.Status = threadstore.ThreadStatusRunning
 	meta.UpdatedAt = time.Now().UTC()
+	if len(body.Reasoning) > 0 {
+		meta.ReasoningJSON = string(body.Reasoning)
+	}
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
@@ -650,10 +651,9 @@ func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
 	meta.Status = threadstore.ThreadStatusRunning
 	meta.UpdatedAt = time.Now().UTC()
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
@@ -767,10 +767,9 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 		meta.Status = threadstore.ThreadStatusRunning
 		meta.UpdatedAt = time.Now().UTC()
 
-		if err := a.store.SaveThread(a.ctx, meta); err != nil {
+		if err := a.saveThreadMeta(meta); err != nil {
 			return err
 		}
-		a.setMeta(meta)
 		a.startLeaseLoop(meta)
 		a.stopIdleLoop()
 
@@ -926,10 +925,9 @@ func (a *threadActor) recoverThread(meta threadstore.ThreadMeta, cmdID string, f
 	meta.Status = targetStatus
 	meta.UpdatedAt = time.Now().UTC()
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
@@ -963,10 +961,9 @@ func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
 	meta.ActiveResponseID = ""
 	meta.UpdatedAt = time.Now().UTC()
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 
 	a.mu.Lock()
 	if a.leaseCancel != nil {
@@ -1051,10 +1048,9 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 
 	if spawn.Status != threadstore.SpawnGroupStatusClosed {
 		meta.Status = threadstore.ThreadStatusWaitingChildren
-		if err := a.store.SaveThread(a.ctx, meta); err != nil {
+		if err := a.saveThreadMeta(meta); err != nil {
 			return err
 		}
-		a.setMeta(meta)
 		a.startIdleLoop(meta)
 		return nil
 	}
@@ -1079,10 +1075,9 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 
 	meta.Status = threadstore.ThreadStatusRunning
 	meta.UpdatedAt = time.Now().UTC()
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 
 	if err := a.ensureSession(); err != nil {
 		return err
@@ -1115,10 +1110,9 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 
 	meta.ActiveResponseID = ""
 	meta.UpdatedAt = time.Now().UTC()
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 
 	return a.sendAndStream(meta, cmdID, payload)
 }
@@ -1140,10 +1134,9 @@ func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMet
 	meta.Status = threadstore.ThreadStatusIncomplete
 	meta.UpdatedAt = time.Now().UTC()
 
-	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+	if err := a.saveThreadMeta(meta); err != nil {
 		return err
 	}
-	a.setMeta(meta)
 
 	a.logger.Info("recovery checkpoint missing, leaving thread passive",
 		"thread_id", meta.ID,
@@ -1350,7 +1343,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 	}
 
 	if a.publishEvent != nil {
-		a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, 0, "client.response.create", rawEvent)
+		a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", threadevents.EventTypeClientResponse, rawEvent)
 	}
 
 	return a.streamUntilTerminal(meta)
@@ -1574,7 +1567,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		if a.publishEvent != nil {
-			a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, eventCount, string(event.Type), event.Raw)
+			a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), event.Raw)
 		}
 
 		if responsePayload := event.ResponsePayload(); len(responsePayload) > 0 {
@@ -1610,7 +1603,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					"item_type", itemType,
 					"response_id", responseID,
 				)
-				if err := a.store.AppendItem(a.ctx, threadstore.ItemLogEntry{
+				if _, err := a.appendItem(threadstore.ItemLogEntry{
 					ThreadID:    meta.ID,
 					ResponseID:  responseID,
 					ItemType:    itemType,
@@ -1670,10 +1663,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		meta.UpdatedAt = time.Now().UTC()
-		if err := a.store.SaveThread(a.ctx, meta); err != nil {
+		if err := a.saveThreadMeta(meta); err != nil {
 			return err
 		}
-		a.setMeta(meta)
 
 		if event.Type == openaiws.EventTypeError {
 			a.resetSession()
@@ -1829,7 +1821,7 @@ func (a *threadActor) appendInputItems(threadID, responseID string, itemsRaw jso
 	}
 
 	for _, item := range items {
-		if err := a.store.AppendItem(a.ctx, threadstore.ItemLogEntry{
+		if _, err := a.appendItem(threadstore.ItemLogEntry{
 			ThreadID:    threadID,
 			ResponseID:  responseID,
 			ItemType:    itemTypeFromRaw(item),
@@ -1842,6 +1834,120 @@ func (a *threadActor) appendInputItems(threadID, responseID string, itemsRaw jso
 	}
 
 	return nil
+}
+
+func (a *threadActor) appendItem(entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
+	item, err := a.store.AppendItem(a.ctx, entry)
+	if err != nil {
+		return threadstore.ItemRecord{}, err
+	}
+	a.publishThreadItem(item)
+	return item, nil
+}
+
+func (a *threadActor) saveThreadMeta(meta threadstore.ThreadMeta) error {
+	prev := a.currentMeta()
+	if err := a.store.SaveThread(a.ctx, meta); err != nil {
+		return err
+	}
+	a.setMeta(meta)
+	if shouldPublishThreadSnapshot(prev, meta) {
+		a.publishThreadSnapshot(meta)
+	}
+	return nil
+}
+
+func shouldPublishThreadSnapshot(prev, next threadstore.ThreadMeta) bool {
+	if prev.ID == "" {
+		return true
+	}
+	return prev.ID != next.ID ||
+		prev.Status != next.Status ||
+		prev.Model != next.Model ||
+		prev.LastResponseID != next.LastResponseID ||
+		prev.ActiveResponseID != next.ActiveResponseID ||
+		prev.ActiveSpawnGroupID != next.ActiveSpawnGroupID
+}
+
+func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
+	if a.publishEvent == nil {
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":                    meta.ID,
+		"status":                meta.Status,
+		"model":                 meta.Model,
+		"last_response_id":      meta.LastResponseID,
+		"active_response_id":    meta.ActiveResponseID,
+		"active_spawn_group_id": meta.ActiveSpawnGroupID,
+		"updated_at":            meta.UpdatedAt.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		a.logger.Warn("failed to marshal thread snapshot event", "thread_id", meta.ID, "error", err)
+		return
+	}
+
+	a.publishEvent(
+		a.ctx,
+		meta.ID,
+		meta.SocketGeneration,
+		fmt.Sprintf("snapshot-%d", meta.UpdatedAt.UnixNano()),
+		threadevents.EventTypeThreadSnapshot,
+		payload,
+	)
+}
+
+func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
+	if a.publishEvent == nil {
+		return
+	}
+
+	payload, err := json.Marshal(presentThreadItem(item))
+	if err != nil {
+		a.logger.Warn("failed to marshal thread item event", "thread_id", a.threadID, "seq", item.Seq, "error", err)
+		return
+	}
+
+	a.publishEvent(
+		a.ctx,
+		a.threadID,
+		a.currentSocketGeneration(),
+		fmt.Sprintf("item-%d", item.Seq),
+		threadevents.EventTypeThreadItem,
+		payload,
+	)
+}
+
+func presentThreadItem(item threadstore.ItemRecord) map[string]any {
+	response := map[string]any{
+		"cursor":      strconv.FormatInt(item.Seq, 10),
+		"seq":         item.Seq,
+		"response_id": item.ResponseID,
+		"item_type":   item.ItemType,
+		"direction":   item.Direction,
+		"created_at":  item.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if item.StreamID != "" {
+		response["stream_id"] = item.StreamID
+	}
+	if decoded, err := decodeStreamRawJSON(item.Payload); err == nil && decoded != nil {
+		response["payload"] = decoded
+	}
+	return response
+}
+
+func decodeStreamRawJSON(raw json.RawMessage) (any, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+
+	var decoded any
+	if err := json.Unmarshal(trimmed, &decoded); err != nil {
+		return string(trimmed), nil
+	}
+	return decoded, nil
 }
 
 func (a *threadActor) loadLatestAssistantText(threadID string) (string, error) {
@@ -1894,6 +2000,13 @@ func (a *threadActor) setMeta(meta threadstore.ThreadMeta) {
 	a.mu.Lock()
 	a.meta = meta
 	a.mu.Unlock()
+}
+
+func (a *threadActor) currentMeta() threadstore.ThreadMeta {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.meta
 }
 
 func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta) error {

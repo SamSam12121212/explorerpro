@@ -628,10 +628,10 @@ func (s *Store) ReleaseOwnership(ctx context.Context, threadID, workerID string,
 	return nil
 }
 
-func (s *Store) AppendItem(ctx context.Context, entry ItemLogEntry) error {
+func (s *Store) AppendItem(ctx context.Context, entry ItemLogEntry) (ItemRecord, error) {
 	seq, err := s.raw.Incr(ctx, itemSeqKey(entry.ThreadID)).Result()
 	if err != nil {
-		return fmt.Errorf("increment item sequence: %w", err)
+		return ItemRecord{}, fmt.Errorf("increment item sequence: %w", err)
 	}
 
 	if entry.CreatedAt.IsZero() {
@@ -655,16 +655,23 @@ func (s *Store) AppendItem(ctx context.Context, entry ItemLogEntry) error {
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("append thread item: %w", err)
+		return ItemRecord{}, fmt.Errorf("append thread item: %w", err)
 	}
 
 	if s.durable != nil {
 		if err := s.durable.AppendItem(ctx, entry, seq); err != nil {
-			return fmt.Errorf("persist thread item: %w", err)
+			return ItemRecord{}, fmt.Errorf("persist thread item: %w", err)
 		}
 	}
 
-	return nil
+	return ItemRecord{
+		Seq:        seq,
+		ResponseID: entry.ResponseID,
+		ItemType:   entry.ItemType,
+		Direction:  entry.Direction,
+		Payload:    json.RawMessage(entry.PayloadJSON),
+		CreatedAt:  entry.CreatedAt,
+	}, nil
 }
 
 func (s *Store) AppendEvent(ctx context.Context, entry EventLogEntry) error {

@@ -1,6 +1,13 @@
 export type MessageRole = "user" | "assistant" | "status" | "error";
 export type HealthState = "checking" | "online" | "degraded" | "offline";
-export type ReasoningEffort = "low" | "medium" | "high";
+/** Matches OpenAI Responses API / openai-go `shared.ReasoningEffort`. */
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 
 export interface ModelOption {
   value: string;
@@ -21,6 +28,7 @@ export interface ChatMessage {
   role: MessageRole;
   text: string;
   images?: UploadedImage[];
+  optimistic?: boolean;
 }
 
 export interface HealthResponse {

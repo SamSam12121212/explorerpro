@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	StreamName    = "THREAD_EVENTS"
-	SubjectPrefix = "thread.events."
+	StreamName              = "THREAD_EVENTS"
+	SubjectPrefix           = "thread.events."
+	EventTypeClientResponse = "client.response.create"
+	EventTypeThreadSnapshot = "thread.snapshot"
+	EventTypeThreadItem     = "thread.item.appended"
 )
 
 type EventEnvelope struct {
@@ -23,8 +26,8 @@ func Subject(threadID string) string {
 	return SubjectPrefix + threadID
 }
 
-func MsgID(threadID string, socketGeneration uint64, eventSeq int) string {
-	return fmt.Sprintf("%s-%d-%d", threadID, socketGeneration, eventSeq)
+func MsgID(threadID string, socketGeneration uint64, key string) string {
+	return fmt.Sprintf("%s-%d-%s", threadID, socketGeneration, key)
 }
 
 func Encode(env EventEnvelope) ([]byte, error) {

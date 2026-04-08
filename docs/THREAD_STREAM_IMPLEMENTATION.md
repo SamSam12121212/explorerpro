@@ -33,6 +33,7 @@ This keeps the worker simple, testable, and independent of the delivery topology
 - Receives commands via NATS JetStream (`AGENT_CMD` stream)
 - Persists events and items to Redis + Postgres
 - Publishes raw OpenAI events to JetStream (`THREAD_EVENTS` stream)
+- Publishes thread-native item and state updates to JetStream as soon as they are persisted
 - Does not know or care about the WebSocket server or browser
 
 ### 2. API Server (`internal/httpserver`)
@@ -46,9 +47,8 @@ This keeps the worker simple, testable, and independent of the delivery topology
 - Standalone service on its own port (default 8081)
 - Exposes `GET /threads/{thread_id}/connect` for browser WebSocket connections
 - Subscribes to JetStream `thread.events.{threadID}` for real-time event push
-- Polls DB for thread snapshots (every 2s) and items (every 1s)
+- Does one bootstrap read on connect for the current thread snapshot and any missed items after `after_item`
 - Batches events before sending to the browser (10 events or 50ms, whichever comes first)
-- Falls back to pure DB polling if JetStream is unavailable
 
 ## High-Level Flow
 
@@ -121,6 +121,11 @@ Inside that loop it:
    - `active_response_id`
    - `last_response_id`
    - `active_spawn_group_id`
+
+Whenever the worker appends an item or changes frontend-relevant thread state, it also publishes a thread-native event to JetStream immediately:
+
+- `thread.item.appended`
+- `thread.snapshot`
 
 The JetStream publish is fire-and-forget. If it fails, the worker logs a warning and continues. The durable store write is the source of truth. JetStream is a best-effort real-time notification layer.
 
@@ -241,7 +246,7 @@ When a browser connects:
 
 ### Event Loop
 
-The WebSocket server runs three concurrent concerns per client:
+The WebSocket server runs two concurrent concerns per client:
 
 **Real-time events from NATS**:
 
@@ -253,23 +258,20 @@ Events arrive from the JetStream subscription. They are buffered and flushed to 
 
 Events are sent as `thread.events.delta` messages containing the raw OpenAI event payloads.
 
-**Items from DB**:
+**Thread-native updates from NATS**:
 
-The server polls the database every 1 second for new items and sends `thread.items.delta` messages. Items are the normalized, assembled outputs (messages, function calls) that the chat UI renders.
+The worker publishes `thread.item.appended` as soon as an input or output item is persisted, and `thread.snapshot` as soon as the frontend-relevant thread state changes.
 
-This is slower than the previous 350ms poll because NATS now handles the real-time path. Items only need to be polled for the chat rendering layer.
+The WebSocket server forwards those immediately as:
 
-**Snapshots from DB**:
+- `thread.items.delta`
+- `thread.snapshot`
 
-The server reads thread meta from the database every 2 seconds and sends `thread.snapshot` messages. Snapshots contain thread status, owner info, and spawn group state.
+This removes the recurring item and snapshot pollers from the live stream path.
 
 **Heartbeat**:
 
 A `thread.heartbeat` message is sent every 20 seconds to keep the connection alive.
-
-### Fallback
-
-If the JetStream subscription fails (NATS unavailable, stream not created), the WebSocket server falls back to pure DB polling at 350ms intervals, identical to the previous behavior in `internal/httpserver/thread_stream.go`.
 
 ### What the WebSocket Server Sends
 
@@ -284,11 +286,11 @@ These are the same message types as the previous API WebSocket. The frontend doe
 
 #### `thread.snapshot`
 
-Contains the current thread view:
+Contains the current thread view.
 
-- thread meta
-- owner info when present
-- active spawn group when present
+On initial connect, the server still sends a bootstrap snapshot from the read model.
+
+After that, snapshots are pushed from worker-published thread state updates instead of a timer.
 
 This is what the frontend uses to understand whether the thread is still running, ready, failed, and so on.
 
@@ -296,7 +298,7 @@ This is what the frontend uses to understand whether the thread is still running
 
 Contains any new items after the last seen item cursor.
 
-This is the main UI payload because chat rendering is item-driven.
+This is the main UI payload because chat rendering is item-driven, and it now arrives as soon as the worker persists an item instead of waiting for a poll interval.
 
 #### `thread.events.delta`
 
@@ -338,6 +340,8 @@ If it already knows the last item cursor, it sends:
 - `?after_item=<last_cursor>`
 
 That means the socket can begin with only new items instead of replaying the whole thread.
+
+The WebSocket server does a one-time catch-up read after subscribing so reconnects can recover missed items without a recurring poller.
 
 ### Consuming Messages
 
@@ -415,11 +419,9 @@ The frontend dev server proxies WebSocket connections:
 
 The durable store (Redis + Postgres) remains the source of truth for thread state.
 
-JetStream is a real-time notification layer, not a durability requirement. If a NATS message is lost, the WebSocket server's DB polling catches up within 1-2 seconds.
+JetStream is a real-time notification layer, not a durability requirement.
 
-### Fallback is built in
-
-If JetStream is unavailable, the WebSocket server falls back to DB polling. The frontend does not know the difference — the same message types arrive over the same WebSocket.
+The durable store is what makes reconnect and reload safe. The browser bootstraps from HTTP, and the WebSocket server does a one-time catch-up read on connect before switching to push-only delivery.
 
 ## Mental Model
 
