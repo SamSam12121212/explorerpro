@@ -39,7 +39,6 @@ This keeps the worker simple, testable, and independent of the delivery topology
 ### 2. API Server (`internal/httpserver`)
 
 - Exposes REST endpoints for thread CRUD, commands, repos, images
-- No longer responsible for the browser WebSocket stream (moved to wsserver)
 - Still serves as the command ingestion point: browser -> API -> NATS -> worker
 
 ### 3. WebSocket Server (`internal/wsserver`)
@@ -281,8 +280,6 @@ Message types:
 - `thread.items.delta`
 - `thread.events.delta`
 - `thread.heartbeat`
-
-These are the same message types as the previous API WebSocket. The frontend does not need to change its message handling.
 
 #### `thread.snapshot`
 
