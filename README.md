@@ -4,7 +4,7 @@ An agent runtime built on the OpenAI Responses API with [WebSocket mode](https:/
 
 OpenAI-native by design with no provider abstraction layer yet and not planned atm.
 
-![Screenshot](docs/Screenshot%202026-04-07%20at%2000.15.44.png)
+![Screenshot](docs/image.png)
 
 ## Aims
 

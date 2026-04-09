@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { LuChevronDown, LuImage } from "react-icons/lu";
+import { LuChevronDown, LuImage, LuSend } from "react-icons/lu";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
 import type {
   ChatMessage,
@@ -268,11 +268,12 @@ export function ChatPanel({
             </div>
 
             <button
-              className="bg-[#007acc] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#1b8de4] disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center justify-center bg-[#007acc] p-1.5 text-white transition hover:bg-[#1b8de4] disabled:cursor-not-allowed disabled:opacity-40"
               disabled={submitDisabled}
+              title="Send"
               type="submit"
             >
-              Send
+              <LuSend className="h-4 w-4" />
             </button>
           </div>
         </form>
