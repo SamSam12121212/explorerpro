@@ -2,7 +2,7 @@
 
 An agent runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready and has loads of bugs.
 
-OpenAI-native by design with no provider abstraction layer yet and not planned atm.
+OpenAI-native by design with no provider abstraction layer which has not yet been planned. Azure OpenAI also does not work.
 
 ![Screenshot](docs/image.png)
 
