@@ -15,6 +15,9 @@ ReactDOM.createRoot(rootElement).render(
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<App />} />
+        <Route path="/collections" element={<App />} />
+        <Route path="/documents" element={<App />} />
+        <Route path="/repos" element={<App />} />
         <Route path="/thread/:threadId" element={<App />} />
       </Routes>
     </BrowserRouter>

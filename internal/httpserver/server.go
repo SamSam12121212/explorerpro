@@ -27,6 +27,7 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 	}
 
 	api := newCommandAPI(cfg, logger, runtime)
+	collections := newCollectionAPI(logger, runtime)
 	repos := newRepoAPI(logger, runtime)
 	docs := newDocumentAPI(logger, runtime)
 
@@ -46,6 +47,10 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 	mux.HandleFunc("/images", api.handleImages)
 	mux.HandleFunc("/images/", api.handleImageServe)
 	mux.HandleFunc("/repos", repos.handleRepos)
+	mux.HandleFunc("/collections", collections.handleCollections)
+	mux.HandleFunc("/collections/", collections.handleCollectionRoutes)
+	mux.HandleFunc("/api/collections", collections.handleCollections)
+	mux.HandleFunc("/api/collections/", collections.handleCollectionRoutes)
 	mux.HandleFunc("/documents", docs.handleDocuments)
 	mux.HandleFunc("/documents/", docs.handleDocumentRoutes)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

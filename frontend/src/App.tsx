@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { useNavigate, useParams } from "react-router";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { apiGet } from "./api";
 import { LeftSidebar } from "./components/LeftSidebar";
 import { MidPanelHost } from "./components/MidPanelHost";
@@ -11,6 +11,7 @@ import { useChat } from "./useChat";
 
 export default function App() {
   const { threadId: urlThreadId } = useParams<"threadId">();
+  const location = useLocation();
   const navigate = useNavigate();
 
   const {
@@ -72,11 +73,11 @@ export default function App() {
   useEffect(() => {
     if (urlThreadId && urlThreadId !== threadId) {
       void loadThread(urlThreadId);
-    } else if (!urlThreadId && threadId) {
+    } else if (location.pathname === "/" && threadId) {
       resetConversation();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlThreadId]);
+  }, [location.pathname, urlThreadId]);
 
   // Sync useChat -> URL: update URL when a new thread is created
   useEffect(() => {

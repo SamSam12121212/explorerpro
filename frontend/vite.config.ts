@@ -31,6 +31,11 @@ export default defineConfig({
         target: proxyTarget,
         changeOrigin: true,
       },
+      "/api": {
+        target: proxyTarget,
+        changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/api/, ""),
+      },
       "/documents": {
         target: proxyTarget,
         changeOrigin: true,

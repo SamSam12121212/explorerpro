@@ -82,7 +82,7 @@ export function DocumentsView() {
         <input
           accept="application/pdf,.pdf"
           className="hidden"
-          onChange={handleFileChange}
+          onChange={(event) => void handleFileChange(event)}
           ref={inputRef}
           type="file"
         />

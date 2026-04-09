@@ -103,6 +103,23 @@ export interface DocumentUploadResponse {
   cmd_id: string;
 }
 
+export interface CollectionEntry {
+  id: string;
+  name: string;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CollectionListResponse {
+  collections: CollectionEntry[];
+  count: number;
+}
+
+export interface CollectionCreateResponse {
+  collection: CollectionEntry;
+}
+
 export interface ThreadItemsResponse {
   items?: {
     cursor?: string;

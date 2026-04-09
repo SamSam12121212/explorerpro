@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { LuFileText, LuGitFork, LuMessageSquare } from "react-icons/lu";
+import { useLocation, useNavigate } from "react-router";
+import { LuFileText, LuFolder, LuGitFork, LuMessageSquare } from "react-icons/lu";
+import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
 import { ReposView } from "../mid-panel/views/ReposView";
 import { ThreadSidebar, type ThreadEntry } from "./ThreadSidebar";
 
-type Tab = "threads" | "documents" | "repos";
+type Tab = "threads" | "collections" | "documents" | "repos";
 
 interface LeftSidebarProps {
   threads: ThreadEntry[];
@@ -15,6 +16,7 @@ interface LeftSidebarProps {
 
 const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
   { id: "threads", icon: LuMessageSquare, label: "Threads" },
+  { id: "collections", icon: LuFolder, label: "Collections" },
   { id: "documents", icon: LuFileText, label: "Documents" },
   { id: "repos", icon: LuGitFork, label: "Repos" },
 ];
@@ -25,7 +27,32 @@ export function LeftSidebar({
   onSelectThread,
   onNewChat,
 }: LeftSidebarProps) {
-  const [activeTab, setActiveTab] = useState<Tab>("threads");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const activeTab: Tab = location.pathname.startsWith("/collections")
+    ? "collections"
+    : location.pathname.startsWith("/documents")
+      ? "documents"
+      : location.pathname.startsWith("/repos")
+        ? "repos"
+        : "threads";
+
+  const handleTabChange = (tab: Tab) => {
+    switch (tab) {
+      case "collections":
+        void navigate("/collections");
+        return;
+      case "documents":
+        void navigate("/documents");
+        return;
+      case "repos":
+        void navigate("/repos");
+        return;
+      case "threads":
+      default:
+        void navigate(activeThreadId ? `/thread/${activeThreadId}` : "/");
+    }
+  };
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
@@ -42,7 +69,7 @@ export function LeftSidebar({
                   : "text-[#666] hover:text-[#b2b2b2]"
               }`}
               key={tab.id}
-              onClick={() => { setActiveTab(tab.id); }}
+              onClick={() => { handleTabChange(tab.id); }}
               title={tab.label}
               type="button"
             >
@@ -61,6 +88,8 @@ export function LeftSidebar({
             onSelectThread={onSelectThread}
             threads={threads}
           />
+        ) : activeTab === "collections" ? (
+          <CollectionsView />
         ) : activeTab === "documents" ? (
           <DocumentsView />
         ) : (
