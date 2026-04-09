@@ -36,6 +36,14 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+func shouldPersistThreadEvent(eventType string) bool {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return false
+	}
+	return !strings.HasSuffix(eventType, ".delta")
+}
+
 func (s *Store) CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO threads (
@@ -267,6 +275,13 @@ ON CONFLICT (thread_id, seq) DO NOTHING
 }
 
 func (s *Store) AppendEvent(ctx context.Context, entry threadstore.EventLogEntry, eventSeq int64) error {
+	// Delta events are live-only UI telemetry for now. Keep them in Redis and
+	// NATS, but avoid persisting them into Postgres until we need historical
+	// replay outside the runtime store.
+	if !shouldPersistThreadEvent(entry.EventType) {
+		return nil
+	}
+
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO thread_events (
     thread_id,

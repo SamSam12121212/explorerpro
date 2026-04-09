@@ -725,16 +725,9 @@ func (a *commandAPI) listEventsForRead(ctx context.Context, threadID string, que
 		Before: query.Before,
 	}
 
-	if preferPostgres && supportsPostgresCursor(query.After) && supportsPostgresCursor(query.Before) {
-		events, err := a.pg.ListEvents(ctx, threadID, options)
-		if err == nil && len(events) > 0 {
-			return events, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
+	// Redis keeps the full raw event stream. Postgres only stores non-delta
+	// checkpoints, so serving event history from Postgres would now be partial.
+	_ = preferPostgres
 	return a.store.ListEvents(ctx, threadID, options)
 }
 

@@ -18,7 +18,7 @@ If the worker had to know about the WebSocket server, the browser, or any other 
 
 Instead, the worker does two things after receiving each OpenAI event:
 
-1. persists to the durable store (Redis + Postgres)
+1. persists to Redis and writes selective durable checkpoints to Postgres
 2. publishes the raw event to JetStream
 
 JetStream is the notification layer. Consumers subscribe when they need events, unsubscribe when they are done. The worker never blocks or changes behavior based on whether anyone is listening. If zero consumers exist, events are discarded after the stream's MaxAge. If ten consumers exist, JetStream handles fan-out and per-consumer acknowledgment.
@@ -31,7 +31,8 @@ This keeps the worker simple, testable, and independent of the delivery topology
 
 - Owns the OpenAI Responses WebSocket
 - Receives commands via NATS JetStream (`AGENT_CMD` stream)
-- Persists events and items to Redis + Postgres
+- Persists the full raw event stream to Redis
+- Persists items, thread state, raw responses, and non-delta event checkpoints to Postgres
 - Publishes raw OpenAI events to JetStream (`THREAD_EVENTS` stream)
 - Publishes thread-native item and state updates to JetStream as soon as they are persisted
 - Does not know or care about the WebSocket server or browser
@@ -126,7 +127,7 @@ Whenever the worker appends an item or changes frontend-relevant thread state, i
 - `thread.item.appended`
 - `thread.snapshot`
 
-The JetStream publish is fire-and-forget. If it fails, the worker logs a warning and continues. The durable store write is the source of truth. JetStream is a best-effort real-time notification layer.
+The JetStream publish is fire-and-forget. If it fails, the worker logs a warning and continues. The durable store write is the source of truth. For raw event history, Redis is authoritative; Postgres only keeps non-delta checkpoints. JetStream is a best-effort real-time notification layer.
 
 ### What Gets Persisted
 
@@ -153,7 +154,7 @@ Examples:
 
 #### Event log
 
-Raw socket event envelopes in sequence order.
+Raw socket event envelopes in sequence order in Redis, with non-delta checkpoints mirrored into Postgres.
 
 Examples:
 
@@ -183,7 +184,7 @@ Relevant files:
 - **Name**: `THREAD_EVENTS`
 - **Subjects**: `thread.events.>`
 - **Retention**: `InterestPolicy` — messages are kept only while active consumers exist that have not acked them
-- **Storage**: `MemoryStorage` — these are ephemeral relay messages, the durable copy lives in Postgres
+- **Storage**: `MemoryStorage` — these are ephemeral relay messages; the full raw event history lives in Redis and Postgres keeps non-delta checkpoints
 - **MaxAge**: 5 minutes — safety net for orphaned messages when no consumers are present
 
 Interest-based retention means that if nobody is listening for a thread's events, messages are discarded. This is correct because the durable store already has them. The stream exists only for real-time push.
