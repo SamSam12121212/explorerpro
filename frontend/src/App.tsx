@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useNavigate, useParams } from "react-router";
 import { apiGet } from "./api";
+import { LeftSidebar } from "./components/LeftSidebar";
 import { MidPanelHost } from "./components/MidPanelHost";
-import { ThreadSidebar, type ThreadEntry } from "./components/ThreadSidebar";
+import type { ThreadEntry } from "./components/ThreadSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import type { ThreadListResponse } from "./types";
 import { useChat } from "./useChat";
@@ -98,7 +99,7 @@ export default function App() {
     <div className="h-screen w-screen overflow-hidden bg-[#1e1e1e]">
       <Group className="h-full w-full min-w-0" orientation="horizontal">
         <Panel className="min-w-0" defaultSize={18} minSize={14}>
-          <ThreadSidebar
+          <LeftSidebar
             activeThreadId={threadId}
             onNewChat={handleNewChat}
             onSelectThread={handleSelectThread}

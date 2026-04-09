@@ -1,5 +1,3 @@
-import { ReposView } from "../mid-panel/views/ReposView";
-
 export function MidPanelHost() {
-  return <ReposView />;
+  return <div className="h-full w-full bg-[#1e1e1e]" />;
 }
