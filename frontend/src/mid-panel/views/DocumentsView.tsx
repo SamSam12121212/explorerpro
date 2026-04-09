@@ -2,37 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, uploadDocument } from "../../api";
 import type { DocumentEntry, DocumentListResponse } from "../../types";
 
-function statusColor(status: string) {
-  switch (status.toLowerCase()) {
-    case "ready":
-      return "text-emerald-400";
-    case "failed":
-      return "text-red-400";
-    case "pending":
-    case "splitting":
-      return "text-amber-400";
-    default:
-      return "text-[#888]";
-  }
-}
-
-function formatPageCount(pageCount: number) {
-  return `${pageCount.toString()} page${pageCount === 1 ? "" : "s"}`;
-}
-
-function documentSummary(document: DocumentEntry) {
-  if (document.status.toLowerCase() === "ready" && document.page_count > 0) {
-    return `${formatPageCount(document.page_count)} • ${document.dpi.toString()} DPI`;
-  }
-  if (document.status.toLowerCase() === "failed") {
-    return "Processing failed";
-  }
-  if (document.status.toLowerCase() === "splitting") {
-    return "Generating page images…";
-  }
-  return "Waiting for document processing…";
-}
-
 function documentTitle(document: DocumentEntry) {
   const filename = document.filename.trim();
   return filename || document.id;
@@ -128,33 +97,12 @@ export function DocumentsView() {
 
         {documents.map((document) => (
           <div
-            className="flex flex-col gap-1 border-b border-[#2a2a2a] px-3 py-2.5 transition hover:bg-[#252525]"
+            className="border-b border-[#2a2a2a] px-3 py-3 transition hover:bg-[#252525]"
             key={document.id}
           >
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate text-sm font-medium text-[#d4d4d4]">
-                {documentTitle(document)}
-              </span>
-              <span className={`shrink-0 text-[0.7rem] font-medium uppercase ${statusColor(document.status)}`}>
-                {document.status}
-              </span>
-            </div>
-            <span className="truncate text-[0.78rem] text-[#777]">
-              {documentSummary(document)}
+            <span className="block truncate text-sm font-medium text-[#d4d4d4]">
+              {documentTitle(document)}
             </span>
-            {(document.page_count > 0 || document.manifest_ref) && (
-              <div className="flex items-center gap-3 text-[0.68rem] text-[#555]">
-                {document.page_count > 0 && (
-                  <span>{formatPageCount(document.page_count)}</span>
-                )}
-                {document.manifest_ref && (
-                  <span className="truncate">Manifest ready</span>
-                )}
-              </div>
-            )}
-            {document.error && (
-              <p className="mt-0.5 text-[0.72rem] text-red-400">{document.error}</p>
-            )}
           </div>
         ))}
       </div>
