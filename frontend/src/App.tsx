@@ -122,7 +122,6 @@ export default function App() {
             model={model}
             pendingImages={pendingImages}
             reasoningEffort={reasoningEffort}
-            resetConversation={handleNewChat}
             sendMessage={sendMessage}
             setDraft={setDraft}
             setModel={setModel}

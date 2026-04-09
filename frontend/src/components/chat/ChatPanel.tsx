@@ -25,14 +25,6 @@ interface ChatPanelProps {
   threadId: string | null;
   uploadCount: number;
   addPendingFiles: (files: File[]) => Promise<void>;
-  resetConversation: () => void;
-}
-
-function formatBytes(bytes?: number) {
-  if (!bytes || bytes <= 0) return "";
-  if (bytes < 1024) return `${bytes.toString()} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function bubbleClass(role: MessageRole) {
@@ -65,7 +57,6 @@ export function ChatPanel({
   threadId,
   uploadCount,
   addPendingFiles,
-  resetConversation,
 }: ChatPanelProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -85,20 +76,6 @@ export function ChatPanel({
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#333] px-4 py-2">
-        <span className="truncate text-sm font-medium text-[#d4d4d4]">
-          {threadId ? `Thread ${threadId.slice(0, 14)}…` : "New thread"}
-        </span>
-
-        <button
-          className="border border-[#333] bg-[#2a2a2a] px-3 py-1 text-xs text-[#b2b2b2] transition hover:bg-[#333] hover:text-white"
-          onClick={resetConversation}
-          type="button"
-        >
-          New chat
-        </button>
-      </div>
-
       <div
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
         ref={messagesRef}
@@ -144,7 +121,7 @@ export function ChatPanel({
       </div>
 
       {pendingImages.length > 0 && (
-        <div className="flex flex-wrap gap-2 border-t border-[#2a2a2a] px-4 py-2">
+        <div className="flex flex-wrap gap-2 px-4 py-2">
           {pendingImages.map((img) => (
             <div
               className="flex items-center gap-2 border border-[#333] bg-[#252525] px-2 py-1.5"
@@ -158,9 +135,6 @@ export function ChatPanel({
               <div className="min-w-0">
                 <p className="m-0 truncate text-xs text-[#d4d4d4]">
                   {img.filename ?? img.image_id}
-                </p>
-                <p className="m-0 text-[0.68rem] text-[#666]">
-                  {formatBytes(img.bytes)}
                 </p>
               </div>
               <button
@@ -179,7 +153,7 @@ export function ChatPanel({
         </div>
       )}
 
-      <div className="border-t border-[#333] px-4 py-3">
+      <div className="px-4 py-3">
         <form
           className="flex flex-col gap-2"
           onSubmit={(e) => {
