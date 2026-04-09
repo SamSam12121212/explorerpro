@@ -1554,6 +1554,12 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 		eventCount++
 
+		if event.Type == openaiws.EventTypeResponseOutputItemAdded || event.Type == openaiws.EventTypeResponseOutputItemDone {
+			a.logger.Info("received openai event", "event_type", event.Type, "raw", string(event.Raw))
+		} else if event.Type != openaiws.EventTypeResponseOutputTextDelta {
+			a.logger.Info("received openai event", "event_type", event.Type)
+		}
+
 		responseID := event.ResolvedResponseID()
 		if err := a.store.AppendEvent(a.ctx, threadstore.EventLogEntry{
 			ThreadID:         meta.ID,
@@ -2098,6 +2104,12 @@ func buildResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]a
 		if err := mergeStoredJSONField(payload, "reasoning", meta.ReasoningJSON); err != nil {
 			return nil, err
 		}
+	}
+
+	// Strip reasoning summary fields — we don't consume these events yet.
+	if r, ok := payload["reasoning"].(map[string]any); ok {
+		delete(r, "summary")
+		delete(r, "generate_summary")
 	}
 
 	return payload, nil

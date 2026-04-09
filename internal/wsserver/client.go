@@ -149,6 +149,10 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 				continue
 			}
 
+			if !isDeltaEventType(env.EventType) {
+				c.cfg.logger.Info("wsserver received event", "event_type", env.EventType, "thread_id", env.ThreadID)
+			}
+
 			switch env.EventType {
 			case threadevents.EventTypeThreadItem:
 				if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
@@ -169,15 +173,26 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 					return
 				}
 			default:
-				batch = append(batch, env.Payload)
+				if isDeltaEventType(env.EventType) {
+					batch = append(batch, env.Payload)
 
-				if !batchActive {
-					batchTimer.Reset(batchFlushInterval)
-					batchActive = true
-				}
+					if !batchActive {
+						batchTimer.Reset(batchFlushInterval)
+						batchActive = true
+					}
 
-				if len(batch) >= batchMaxEvents || isTerminalEventType(env.EventType) {
+					if len(batch) >= batchMaxEvents {
+						if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
+							c.logStreamError(err)
+							return
+						}
+					}
+				} else {
 					if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
+						c.logStreamError(err)
+						return
+					}
+					if err := c.writeStreamEvent(ctx, conn, env.Payload); err != nil {
 						c.logStreamError(err)
 						return
 					}
@@ -414,6 +429,22 @@ func isTerminalEventType(eventType string) bool {
 		return true
 	}
 	return false
+}
+
+func isDeltaEventType(eventType string) bool {
+	return strings.HasSuffix(eventType, ".delta")
+}
+
+func (c *client) writeStreamEvent(ctx context.Context, conn *websocket.Conn, raw json.RawMessage) error {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	return wsjson.Write(ctx, conn, map[string]any{
+		"type":      "thread.events.delta",
+		"thread_id": c.cfg.threadID,
+		"events":    []any{v},
+	})
 }
 
 func supportsPostgresCursor(raw string) bool {

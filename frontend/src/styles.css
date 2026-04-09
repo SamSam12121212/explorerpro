@@ -114,3 +114,14 @@
     opacity: 1;
   }
 }
+
+@keyframes reasoning-pulse {
+  0%,
+  100% {
+    color: #888;
+  }
+
+  50% {
+    color: #3fb950;
+  }
+}

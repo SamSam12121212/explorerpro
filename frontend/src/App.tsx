@@ -17,6 +17,7 @@ export default function App() {
     draft,
     setDraft,
     busy,
+    thinking,
     uploadCount,
     threadId,
     pendingImages,
@@ -128,6 +129,7 @@ export default function App() {
             setPendingImages={setPendingImages}
             setReasoningEffort={setReasoningEffort}
             submitDisabled={submitDisabled}
+            thinking={thinking}
             threadId={threadId}
             uploadCount={uploadCount}
           />

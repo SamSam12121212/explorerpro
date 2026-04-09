@@ -22,6 +22,7 @@ interface ChatPanelProps {
   setPendingImages: Dispatch<SetStateAction<UploadedImage[]>>;
   setReasoningEffort: (value: ReasoningEffort) => void;
   submitDisabled: boolean;
+  thinking: boolean;
   threadId: string | null;
   uploadCount: number;
   addPendingFiles: (files: File[]) => Promise<void>;
@@ -54,6 +55,7 @@ export function ChatPanel({
   setPendingImages,
   setReasoningEffort,
   submitDisabled,
+  thinking,
   threadId,
   uploadCount,
   addPendingFiles,
@@ -65,7 +67,7 @@ export function ChatPanel({
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
+  }, [messages, busy, thinking]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -108,7 +110,13 @@ export function ChatPanel({
             </article>
           ))}
 
-          {busy && (
+          {thinking && (
+            <article className={bubbleClass("assistant")}>
+              <p className="m-0 text-[#888]">Thinking...</p>
+            </article>
+          )}
+
+          {busy && !thinking && (
             <div className="self-start px-4 py-3">
               <div className="inline-flex gap-1">
                 <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[#888]" />
@@ -243,7 +251,7 @@ export function ChatPanel({
               </label>
 
               <label className="relative inline-flex shrink-0 cursor-pointer items-center gap-0.5 text-xs text-[#888] hover:text-[#d4d4d4]">
-                <span>{REASONING_OPTIONS.find((o) => o.value === reasoningEffort)?.label ?? reasoningEffort}</span>
+                <span style={thinking ? { animation: "reasoning-pulse 1.5s ease-in-out infinite" } : undefined}>{REASONING_OPTIONS.find((o) => o.value === reasoningEffort)?.label ?? reasoningEffort}</span>
                 <LuChevronDown className="h-3 w-3" />
                 <select
                   className="absolute inset-0 cursor-pointer appearance-none opacity-0"

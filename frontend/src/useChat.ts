@@ -143,10 +143,82 @@ function statusMeansBusy(status?: string) {
   return !["ready", "completed", "failed", "incomplete", "cancelled"].includes(status ?? "");
 }
 
+const reasoningEventTypes = new Set([
+  "response.reasoning_summary_part.added",
+  "response.reasoning_summary_part.done",
+  "response.reasoning_summary_text.delta",
+  "response.reasoning_summary_text.done",
+  "response.reasoning_text.delta",
+  "response.reasoning_text.done",
+]);
+
+const stopThinkingEventTypes = new Set([
+  "error",
+  "response.completed",
+  "response.failed",
+  "response.function_call_arguments.done",
+  "response.incomplete",
+  "response.output_item.added",
+  "response.output_item.done",
+  "response.output_text.delta",
+  "response.output_text.done",
+  "response.refusal.done",
+]);
+
+function isReasoningItemEvent(event: Record<string, unknown>): boolean {
+  const item = event.item;
+  return typeof item === "object" && item !== null && (item as Record<string, unknown>).type === "reasoning";
+}
+
+function deriveThinkingState(events?: Record<string, unknown>[]) {
+  let nextThinking: boolean | null = null;
+
+  for (const event of events ?? []) {
+    const type = event.type;
+    if (typeof type !== "string") {
+      continue;
+    }
+
+    if (reasoningEventTypes.has(type)) {
+      nextThinking = true;
+      continue;
+    }
+
+    if ((type === "response.output_item.added" || type === "response.output_item.done") && isReasoningItemEvent(event)) {
+      nextThinking = true;
+      continue;
+    }
+
+    if (stopThinkingEventTypes.has(type)) {
+      nextThinking = false;
+    }
+  }
+
+  return nextThinking;
+}
+
+function deriveThinkingStateFromItems(items?: ThreadItemsResponse["items"]) {
+  let nextThinking: boolean | null = null;
+
+  for (const item of items ?? []) {
+    if (item.item_type === "reasoning") {
+      nextThinking = true;
+      continue;
+    }
+
+    if (item.direction === "output" && item.item_type && item.item_type !== "reasoning") {
+      nextThinking = false;
+    }
+  }
+
+  return nextThinking;
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [thinking, setThinking] = useState(false);
   const [uploadCount, setUploadCount] = useState(0);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [lastItemCursor, setLastItemCursor] = useState<string | null>(null);
@@ -163,6 +235,19 @@ export function useChat() {
   const activeThreadIdRef = useRef<string | null>(null);
   const lastItemCursorRef = useRef<string | null>(null);
   const lastThreadStatusRef = useRef<string | null>(null);
+  const debugLoggedCreateRef = useRef(false);
+  const debugLoggedReasoningItemCountRef = useRef(0);
+  const debugLoggedOutputDeltaCountRef = useRef(0);
+  const debugLoggedOutputItemCountRef = useRef(0);
+  const debugReasoningSeenRef = useRef(false);
+
+  function resetDebugStreamLogging() {
+    debugLoggedCreateRef.current = false;
+    debugLoggedReasoningItemCountRef.current = 0;
+    debugLoggedOutputDeltaCountRef.current = 0;
+    debugLoggedOutputItemCountRef.current = 0;
+    debugReasoningSeenRef.current = false;
+  }
 
   const checkHealth = useCallback(async () => {
     try {
@@ -241,6 +326,9 @@ export function useChat() {
     const previousStatus = lastThreadStatusRef.current;
     lastThreadStatusRef.current = nextStatus;
     setBusy(statusMeansBusy(nextStatus ?? undefined));
+    if (!statusMeansBusy(nextStatus ?? undefined)) {
+      setThinking(false);
+    }
     setModel(payload.thread?.model ?? DEFAULT_MODEL);
 
     if (
@@ -249,6 +337,22 @@ export function useChat() {
       previousStatus !== nextStatus
     ) {
       appendMessage("error", `Thread ended with status: ${nextStatus}`);
+    }
+  }, []);
+
+  const logThreadStreamMessage = useCallback((payload: ThreadStreamMessage) => {
+    switch (payload.type) {
+      case "thread.events.delta":
+        for (const event of payload.events ?? []) {
+          const type = typeof event.type === "string" ? event.type : "unknown";
+
+          if (type === "response.output_item.added" || type === "response.output_item.done") {
+            console.log(`[ws debug] ${type}`, event);
+          }
+        }
+        break;
+      default:
+        break;
     }
   }, []);
 
@@ -267,6 +371,10 @@ export function useChat() {
         if (cursor) {
           setLastItemCursor(cursor);
         }
+        const nextThinking = deriveThinkingStateFromItems(payload.items);
+        if (nextThinking !== null) {
+          setThinking(nextThinking);
+        }
         const nextMessages = buildMessagesFromItems({
           items: payload.items,
           page: payload.page,
@@ -276,7 +384,13 @@ export function useChat() {
         }
         break;
       }
-      case "thread.events.delta":
+      case "thread.events.delta": {
+        const nextThinking = deriveThinkingState(payload.events);
+        if (nextThinking !== null) {
+          setThinking(nextThinking);
+        }
+        break;
+      }
       case "thread.heartbeat":
         break;
       default:
@@ -321,7 +435,7 @@ export function useChat() {
     socket.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data as string) as ThreadStreamMessage;
-        console.log("[ws event]", payload.type, payload);
+        logThreadStreamMessage(payload);
         handleThreadStreamMessage(payload);
       } catch {
         /* swallow invalid websocket payloads */
@@ -360,6 +474,8 @@ export function useChat() {
 
   async function loadThread(nextThreadId: string) {
     setBusy(true);
+    setThinking(false);
+    resetDebugStreamLogging();
     activeThreadIdRef.current = nextThreadId;
 
     if (threadId && threadId !== nextThreadId) {
@@ -391,6 +507,7 @@ export function useChat() {
         error instanceof Error ? error.message : "Failed to load thread",
       );
       setBusy(false);
+      setThinking(false);
     }
   }
 
@@ -422,6 +539,8 @@ export function useChat() {
     if (!text && images.length === 0) return;
 
     setBusy(true);
+    setThinking(false);
+    resetDebugStreamLogging();
     const optimisticMessageId = appendOptimisticUserMessage(text, images);
 
     try {
@@ -483,6 +602,8 @@ export function useChat() {
     setPendingImages([]);
     setModel(DEFAULT_MODEL);
     setReasoningEffort("medium");
+    setThinking(false);
+    resetDebugStreamLogging();
     lastThreadStatusRef.current = null;
   }
 
@@ -494,6 +615,7 @@ export function useChat() {
     draft,
     setDraft,
     busy,
+    thinking,
     uploadCount,
     threadId,
     pendingImages,
