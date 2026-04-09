@@ -14,6 +14,7 @@ var ErrDocumentNotFound = errors.New("document not found")
 
 type Document struct {
 	ID          string    `json:"id"`
+	Filename    string    `json:"filename"`
 	SourceRef   string    `json:"source_ref"`
 	Status      string    `json:"status"`
 	Error       string    `json:"error,omitempty"`
@@ -34,9 +35,9 @@ func New(pool *pgxpool.Pool) *Store {
 
 func (s *Store) Create(ctx context.Context, doc Document) error {
 	_, err := s.pool.Exec(ctx, `
-INSERT INTO documents (id, source_ref, status, dpi, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6)`,
-		doc.ID, doc.SourceRef, doc.Status, doc.DPI, doc.CreatedAt, doc.UpdatedAt,
+	INSERT INTO documents (id, filename, source_ref, status, dpi, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		doc.ID, doc.Filename, doc.SourceRef, doc.Status, doc.DPI, doc.CreatedAt, doc.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert document: %w", err)
@@ -47,9 +48,9 @@ VALUES ($1, $2, $3, $4, $5, $6)`,
 func (s *Store) Get(ctx context.Context, id string) (Document, error) {
 	var d Document
 	err := s.pool.QueryRow(ctx, `
-SELECT id, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
-FROM documents WHERE id = $1`, id).Scan(
-		&d.ID, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt,
+	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
+	FROM documents WHERE id = $1`, id).Scan(
+		&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Document{}, ErrDocumentNotFound
@@ -65,8 +66,8 @@ func (s *Store) List(ctx context.Context, limit int64) ([]Document, error) {
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT id, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
-FROM documents ORDER BY created_at DESC LIMIT $1`, limit)
+	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
+	FROM documents ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
 	}
@@ -75,7 +76,7 @@ FROM documents ORDER BY created_at DESC LIMIT $1`, limit)
 	var docs []Document
 	for rows.Next() {
 		var d Document
-		if err := rows.Scan(&d.ID, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
 		docs = append(docs, d)

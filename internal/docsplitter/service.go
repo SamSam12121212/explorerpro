@@ -122,6 +122,11 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 }
 
 func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string, int, error) {
+	doc, err := s.docs.Get(ctx, cmd.DocumentID)
+	if err != nil {
+		return "", 0, fmt.Errorf("load document metadata: %w", err)
+	}
+
 	pdfData, err := s.blob.ReadRef(ctx, cmd.SourceRef)
 	if err != nil {
 		return "", 0, fmt.Errorf("read source pdf: %w", err)
@@ -201,6 +206,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 	manifest := Manifest{
 		Version:              "v1",
 		DocumentID:           cmd.DocumentID,
+		Filename:             doc.Filename,
 		CreatedAt:            now.Format(time.RFC3339),
 		PageCount:            len(pages),
 		AssetsRootRef:        s.blob.Ref("documents", cmd.DocumentID),

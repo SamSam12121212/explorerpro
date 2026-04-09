@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { LuGitFork, LuMessageSquare } from "react-icons/lu";
+import { LuFileText, LuGitFork, LuMessageSquare } from "react-icons/lu";
+import { DocumentsView } from "../mid-panel/views/DocumentsView";
 import { ReposView } from "../mid-panel/views/ReposView";
 import { ThreadSidebar, type ThreadEntry } from "./ThreadSidebar";
 
-type Tab = "threads" | "repos";
+type Tab = "threads" | "documents" | "repos";
 
 interface LeftSidebarProps {
   threads: ThreadEntry[];
@@ -14,6 +15,7 @@ interface LeftSidebarProps {
 
 const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
   { id: "threads", icon: LuMessageSquare, label: "Threads" },
+  { id: "documents", icon: LuFileText, label: "Documents" },
   { id: "repos", icon: LuGitFork, label: "Repos" },
 ];
 
@@ -59,6 +61,8 @@ export function LeftSidebar({
             onSelectThread={onSelectThread}
             threads={threads}
           />
+        ) : activeTab === "documents" ? (
+          <DocumentsView />
         ) : (
           <ReposView />
         )}

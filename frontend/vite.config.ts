@@ -31,6 +31,10 @@ export default defineConfig({
         target: proxyTarget,
         changeOrigin: true,
       },
+      "/documents": {
+        target: proxyTarget,
+        changeOrigin: true,
+      },
       "/threads": {
         target: proxyTarget,
         changeOrigin: true,

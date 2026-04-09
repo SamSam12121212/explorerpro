@@ -80,6 +80,29 @@ export interface RepoAddResponse {
   cmd_id: string;
 }
 
+export interface DocumentEntry {
+  id: string;
+  filename: string;
+  source_ref: string;
+  status: string;
+  error?: string;
+  manifest_ref?: string;
+  page_count: number;
+  dpi: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentListResponse {
+  documents: DocumentEntry[];
+  count: number;
+}
+
+export interface DocumentUploadResponse {
+  document: DocumentEntry;
+  cmd_id: string;
+}
+
 export interface ThreadItemsResponse {
   items?: {
     cursor?: string;

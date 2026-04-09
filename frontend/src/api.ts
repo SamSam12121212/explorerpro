@@ -1,4 +1,8 @@
-import type { HealthResponse, UploadedImage } from "./types";
+import type {
+  DocumentUploadResponse,
+  HealthResponse,
+  UploadedImage,
+} from "./types";
 
 async function readJson<T>(response: Response) {
   const text = await response.text();
@@ -43,6 +47,19 @@ export async function uploadImage(file: File) {
     image: Omit<UploadedImage, "preview_url">;
   }>(response);
   return payload.image;
+}
+
+export async function uploadDocument(file: File) {
+  const formData = new FormData();
+  formData.append("file", file, file.name || "document.pdf");
+
+  const response = await fetch("/documents", {
+    method: "POST",
+    body: formData,
+  });
+
+  const payload = await readJson<DocumentUploadResponse>(response);
+  return payload.document;
 }
 
 export async function checkHealthApi(): Promise<"online" | "degraded"> {

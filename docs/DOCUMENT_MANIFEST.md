@@ -82,6 +82,7 @@ Required top-level fields:
 
 Recommended top-level fields:
 
+- `filename`
 - `assets_root_ref`
 - `render_backend`
 - `render_backend_version`
@@ -108,6 +109,7 @@ Example:
 {
   "version": "v1",
   "document_id": "doc_123",
+  "filename": "Quarterly Report.pdf",
   "created_at": "2026-03-13T22:00:00Z",
   "page_count": 3,
   "assets_root_ref": "blob://documents/doc_123/",

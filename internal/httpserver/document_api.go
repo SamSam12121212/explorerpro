@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, "file field is required")
 		return
@@ -124,6 +125,11 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	filename := strings.TrimSpace(filepath.Base(header.Filename))
+	if filename == "." {
+		filename = ""
+	}
+
 	docID, err := idgen.New("doc")
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
@@ -145,6 +151,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 	now := time.Now().UTC()
 	doc := docstore.Document{
 		ID:        docID,
+		Filename:  filename,
 		SourceRef: sourceRef,
 		Status:    "pending",
 		DPI:       doccmd.DefaultDPI,
@@ -241,6 +248,7 @@ func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, 
 func presentDocument(d docstore.Document) map[string]any {
 	entry := map[string]any{
 		"id":         d.ID,
+		"filename":   d.Filename,
 		"source_ref": d.SourceRef,
 		"status":     d.Status,
 		"page_count": d.PageCount,
