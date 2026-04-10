@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"explorer/internal/collectionstore"
+	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/platform"
 )
@@ -19,10 +20,20 @@ type collectionAPI struct {
 	logger  *slog.Logger
 	runtime *platform.Runtime
 	store   *collectionstore.Store
+	docs    *docstore.Store
 }
 
 type createCollectionRequest struct {
 	Name string `json:"name"`
+}
+
+type addCollectionDocumentRequest struct {
+	DocumentID string `json:"document_id"`
+}
+
+type collectionRoute struct {
+	CollectionID string
+	Resource     string
 }
 
 func newCollectionAPI(logger *slog.Logger, runtime *platform.Runtime) *collectionAPI {
@@ -30,6 +41,7 @@ func newCollectionAPI(logger *slog.Logger, runtime *platform.Runtime) *collectio
 		logger:  logger,
 		runtime: runtime,
 		store:   collectionstore.New(runtime.Postgres().Pool()),
+		docs:    docstore.New(runtime.Postgres().Pool()),
 	}
 }
 
@@ -45,18 +57,28 @@ func (a *collectionAPI) handleCollections(w http.ResponseWriter, r *http.Request
 }
 
 func (a *collectionAPI) handleCollectionRoutes(w http.ResponseWriter, r *http.Request) {
-	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/collections/"), "/")
-	if trimmed == "" || strings.Contains(trimmed, "/") {
+	route, ok := parseCollectionRoute(r.URL.Path)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, http.MethodGet)
-		return
+	switch route.Resource {
+	case "":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		a.handleGetCollection(w, r, route.CollectionID)
+	case "documents":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		a.handleAddCollectionDocument(w, r, route.CollectionID)
+	default:
+		http.NotFound(w, r)
 	}
-
-	a.handleGetCollection(w, r, trimmed)
 }
 
 func (a *collectionAPI) handleListCollections(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +131,10 @@ func (a *collectionAPI) handleCreateCollection(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := a.store.Create(r.Context(), collection); err != nil {
+		if errors.Is(err, collectionstore.ErrCollectionNameExists) {
+			writeErrorJSON(w, http.StatusConflict, "collection name already exists")
+			return
+		}
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("create collection: %v", err))
 		return
 	}
@@ -134,9 +160,104 @@ func (a *collectionAPI) handleGetCollection(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	documents, err := a.store.ListDocuments(r.Context(), collectionID, 100)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list collection documents: %v", err))
+		return
+	}
+
+	presentedDocuments := make([]map[string]any, 0, len(documents))
+	for _, document := range documents {
+		presentedDocuments = append(presentedDocuments, presentDocument(document))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"collection": presentCollection(collection),
+		"documents":  presentedDocuments,
 	})
+}
+
+func (a *collectionAPI) handleAddCollectionDocument(w http.ResponseWriter, r *http.Request, collectionID string) {
+	var req addCollectionDocumentRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	documentID := strings.TrimSpace(req.DocumentID)
+	if documentID == "" {
+		writeErrorJSON(w, http.StatusBadRequest, "document_id is required")
+		return
+	}
+
+	if _, err := a.store.Get(r.Context(), collectionID); errors.Is(err, collectionstore.ErrCollectionNotFound) {
+		writeErrorJSON(w, http.StatusNotFound, "collection not found")
+		return
+	} else if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("get collection: %v", err))
+		return
+	}
+
+	if _, err := a.docs.Get(r.Context(), documentID); errors.Is(err, docstore.ErrDocumentNotFound) {
+		writeErrorJSON(w, http.StatusNotFound, "document not found")
+		return
+	} else if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("get document: %v", err))
+		return
+	}
+
+	if err := a.store.AddDocument(r.Context(), collectionID, documentID); err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("add document to collection: %v", err))
+		return
+	}
+
+	collection, err := a.store.Get(r.Context(), collectionID)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("get updated collection: %v", err))
+		return
+	}
+	documents, err := a.store.ListDocuments(r.Context(), collectionID, 100)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list updated collection documents: %v", err))
+		return
+	}
+
+	presentedDocuments := make([]map[string]any, 0, len(documents))
+	for _, document := range documents {
+		presentedDocuments = append(presentedDocuments, presentDocument(document))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"collection": presentCollection(collection),
+		"documents":  presentedDocuments,
+	})
+}
+
+func parseCollectionRoute(path string) (collectionRoute, bool) {
+	var trimmed string
+	switch {
+	case strings.HasPrefix(path, "/collections/"):
+		trimmed = strings.Trim(strings.TrimPrefix(path, "/collections/"), "/")
+	case strings.HasPrefix(path, "/api/collections/"):
+		trimmed = strings.Trim(strings.TrimPrefix(path, "/api/collections/"), "/")
+	default:
+		return collectionRoute{}, false
+	}
+
+	if trimmed == "" {
+		return collectionRoute{}, false
+	}
+
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 || parts[0] == "" || len(parts) > 2 {
+		return collectionRoute{}, false
+	}
+
+	route := collectionRoute{CollectionID: parts[0]}
+	if len(parts) == 2 {
+		route.Resource = parts[1]
+	}
+	return route, true
 }
 
 func presentCollection(collection collectionstore.Collection) map[string]any {

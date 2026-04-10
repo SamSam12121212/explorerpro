@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router";
 import { apiGet, apiPost } from "../../api";
+import { COLLECTIONS_CHANGED_EVENT } from "../../constants";
 import type {
   CollectionCreateResponse,
   CollectionEntry,
@@ -11,6 +13,8 @@ function documentCountLabel(count: number) {
 }
 
 export function CollectionsView() {
+  const { collectionId } = useParams<"collectionId">();
+  const navigate = useNavigate();
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
   const [draftName, setDraftName] = useState("");
   const [showComposer, setShowComposer] = useState(false);
@@ -32,6 +36,17 @@ export function CollectionsView() {
   }, [fetchCollections]);
 
   useEffect(() => {
+    const handleCollectionsChanged = () => {
+      void fetchCollections();
+    };
+
+    window.addEventListener(COLLECTIONS_CHANGED_EVENT, handleCollectionsChanged);
+    return () => {
+      window.removeEventListener(COLLECTIONS_CHANGED_EVENT, handleCollectionsChanged);
+    };
+  }, [fetchCollections]);
+
+  useEffect(() => {
     if (showComposer) {
       inputRef.current?.focus();
     }
@@ -44,10 +59,12 @@ export function CollectionsView() {
     setCreating(true);
     setError("");
     try {
-      await apiPost<CollectionCreateResponse>("/api/collections", { name });
+      const data = await apiPost<CollectionCreateResponse>("/api/collections", { name });
       setDraftName("");
       setShowComposer(false);
+      window.dispatchEvent(new Event(COLLECTIONS_CHANGED_EVENT));
       await fetchCollections();
+      void navigate(`/collections/${data.collection.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create collection");
     } finally {
@@ -116,24 +133,30 @@ export function CollectionsView() {
             No collections yet. Create one to start organizing documents.
           </div>
         ) : (
-          collections.map((collection) => (
-            <div
-              className="border-b border-[#2a2a2a] px-3 py-3 transition hover:bg-[#252525]"
-              key={collection.id}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-medium text-[#d4d4d4]">
+          collections.map((collection) => {
+            const isActive = collection.id === collectionId;
+            return (
+              <button
+                className={`flex w-full items-center justify-between gap-2 border-b border-[#2a2a2a] px-3 py-3 text-left transition ${
+                  isActive
+                    ? "bg-[#2a2a2a] text-white shadow-[inset_2px_0_0_#007acc]"
+                    : "text-[#b2b2b2] hover:bg-[#252525]"
+                }`}
+                key={collection.id}
+                onClick={() => {
+                  void navigate(`/collections/${collection.id}`);
+                }}
+                type="button"
+              >
+                <span className={`truncate text-sm font-medium ${isActive ? "text-white" : "text-[#d4d4d4]"}`}>
                   {collection.name}
                 </span>
                 <span className="shrink-0 text-[0.68rem] uppercase tracking-wide text-[#666]">
                   {documentCountLabel(collection.document_count)}
                 </span>
-              </div>
-              <span className="mt-1 block truncate text-[0.72rem] text-[#555]">
-                {collection.id}
-              </span>
-            </div>
-          ))
+              </button>
+            );
+          })
         )}
       </div>
 

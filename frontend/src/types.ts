@@ -120,6 +120,11 @@ export interface CollectionCreateResponse {
   collection: CollectionEntry;
 }
 
+export interface CollectionDetailResponse {
+  collection: CollectionEntry;
+  documents: DocumentEntry[];
+}
+
 export interface ThreadItemsResponse {
   items?: {
     cursor?: string;

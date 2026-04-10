@@ -7,6 +7,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
 ];
 
 export const DEFAULT_MODEL = "gpt-5.4";
+export const COLLECTIONS_CHANGED_EVENT = "explorer:collections-changed";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
