@@ -4,6 +4,7 @@ import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
 import { ReposView } from "../mid-panel/views/ReposView";
 import { ThreadSidebar, type ThreadEntry } from "./ThreadSidebar";
+import type { AttachedDocument } from "../types";
 
 type Tab = "threads" | "collections" | "documents" | "repos";
 
@@ -12,6 +13,8 @@ interface LeftSidebarProps {
   activeThreadId: string | null;
   onSelectThread: (id: string) => void;
   onNewChat: () => void;
+  onAttachDocument: (document: AttachedDocument) => void;
+  attachedDocumentIds: string[];
 }
 
 const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
@@ -26,6 +29,8 @@ export function LeftSidebar({
   activeThreadId,
   onSelectThread,
   onNewChat,
+  onAttachDocument,
+  attachedDocumentIds,
 }: LeftSidebarProps) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -91,7 +96,10 @@ export function LeftSidebar({
         ) : activeTab === "collections" ? (
           <CollectionsView />
         ) : activeTab === "documents" ? (
-          <DocumentsView />
+          <DocumentsView
+            attachedDocumentIds={attachedDocumentIds}
+            onAttachDocument={onAttachDocument}
+          />
         ) : (
           <ReposView />
         )}

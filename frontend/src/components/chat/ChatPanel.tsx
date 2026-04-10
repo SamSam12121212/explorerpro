@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { LuChevronDown, LuImage, LuSend } from "react-icons/lu";
+import { LuChevronDown, LuFileText, LuImage, LuSend } from "react-icons/lu";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
 import type {
+  AttachedDocument,
   ChatMessage,
   MessageRole,
   ReasoningEffort,
@@ -14,9 +15,11 @@ interface ChatPanelProps {
   draft: string;
   messages: ChatMessage[];
   model: string;
+  pendingDocuments: AttachedDocument[];
   pendingImages: UploadedImage[];
   reasoningEffort: ReasoningEffort;
   sendMessage: (text: string, images: UploadedImage[]) => Promise<void>;
+  setPendingDocuments: Dispatch<SetStateAction<AttachedDocument[]>>;
   setDraft: (value: string) => void;
   setModel: (value: string) => void;
   setPendingImages: Dispatch<SetStateAction<UploadedImage[]>>;
@@ -47,9 +50,11 @@ export function ChatPanel({
   draft,
   messages,
   model,
+  pendingDocuments,
   pendingImages,
   reasoningEffort,
   sendMessage,
+  setPendingDocuments,
   setDraft,
   setModel,
   setPendingImages,
@@ -150,6 +155,42 @@ export function ChatPanel({
                 onClick={() => {
                   setPendingImages((cur) =>
                     cur.filter((e) => e.image_id !== img.image_id),
+                  );
+                }}
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pendingDocuments.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 py-2">
+          {pendingDocuments.map((doc) => (
+            <div
+              className="flex items-center gap-2 border border-[#333] bg-[#252525] px-2 py-1.5"
+              key={doc.id}
+            >
+              <div className="flex h-10 w-10 items-center justify-center border border-[#333] bg-[#1f1f1f] text-[#888]">
+                <LuFileText className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="m-0 truncate text-xs text-[#d4d4d4]">
+                  {doc.filename.trim() || doc.id}
+                </p>
+                <p className="m-0 text-[11px] text-[#777]">
+                  {doc.page_count > 0
+                    ? `${doc.page_count.toString()} pages`
+                    : doc.status}
+                </p>
+              </div>
+              <button
+                className="text-xs text-[#888] hover:text-[#f44747]"
+                onClick={() => {
+                  setPendingDocuments((current) =>
+                    current.filter((entry) => entry.id !== doc.id),
                   );
                 }}
                 type="button"

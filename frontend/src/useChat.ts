@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost, buildStreamWebSocketUrl, checkHealthApi, uploadImage } from "./api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "./constants";
 import type {
+  AttachedDocument,
   ChatMessage,
   HealthState,
   MessageRole,
@@ -222,6 +223,7 @@ export function useChat() {
   const [uploadCount, setUploadCount] = useState(0);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [lastItemCursor, setLastItemCursor] = useState<string | null>(null);
+  const [pendingDocuments, setPendingDocuments] = useState<AttachedDocument[]>([]);
   const [pendingImages, setPendingImages] = useState<UploadedImage[]>([]);
   const [apiStatus, setApiStatus] = useState<HealthState>("checking");
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -496,6 +498,7 @@ export function useChat() {
       setLastItemCursor(cursor);
       lastThreadStatusRef.current = threadInfo.thread?.status ?? null;
       setMessages(buildMessagesFromItems(payload));
+      setPendingDocuments([]);
       setPendingImages([]);
       setDraft("");
       setBusy(statusMeansBusy(threadInfo.thread?.status));
@@ -599,6 +602,7 @@ export function useChat() {
     setDraft("");
     setThreadId(null);
     setLastItemCursor(null);
+    setPendingDocuments([]);
     setPendingImages([]);
     setModel(DEFAULT_MODEL);
     setReasoningEffort("medium");
@@ -618,6 +622,8 @@ export function useChat() {
     thinking,
     uploadCount,
     threadId,
+    pendingDocuments,
+    setPendingDocuments,
     pendingImages,
     setPendingImages,
     apiStatus,

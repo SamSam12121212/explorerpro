@@ -93,6 +93,13 @@ export interface DocumentEntry {
   updated_at: string;
 }
 
+export interface AttachedDocument {
+  id: string;
+  filename: string;
+  page_count: number;
+  status: string;
+}
+
 export interface DocumentListResponse {
   documents: DocumentEntry[];
   count: number;

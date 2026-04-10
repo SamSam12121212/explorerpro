@@ -6,7 +6,7 @@ import { LeftSidebar } from "./components/LeftSidebar";
 import { MidPanelHost } from "./components/MidPanelHost";
 import type { ThreadEntry } from "./components/ThreadSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
-import type { ThreadListResponse } from "./types";
+import type { AttachedDocument, ThreadListResponse } from "./types";
 import { useChat } from "./useChat";
 
 export default function App() {
@@ -22,6 +22,8 @@ export default function App() {
     thinking,
     uploadCount,
     threadId,
+    pendingDocuments,
+    setPendingDocuments,
     pendingImages,
     setPendingImages,
     model,
@@ -37,6 +39,15 @@ export default function App() {
 
   const [threads, setThreads] = useState<ThreadEntry[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(true);
+
+  const handleAttachDocument = (document: AttachedDocument) => {
+    setPendingDocuments((current) => {
+      if (current.some((entry) => entry.id === document.id)) {
+        return current;
+      }
+      return [...current, document];
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +113,8 @@ export default function App() {
         <Panel className="min-w-0" defaultSize={18} minSize={14}>
           <LeftSidebar
             activeThreadId={threadId}
+            attachedDocumentIds={pendingDocuments.map((document) => document.id)}
+            onAttachDocument={handleAttachDocument}
             onNewChat={handleNewChat}
             onSelectThread={handleSelectThread}
             threads={threads}
@@ -123,11 +136,13 @@ export default function App() {
             draft={draft}
             messages={messages}
             model={model}
+            pendingDocuments={pendingDocuments}
             pendingImages={pendingImages}
             reasoningEffort={reasoningEffort}
             sendMessage={sendMessage}
             setDraft={setDraft}
             setModel={setModel}
+            setPendingDocuments={setPendingDocuments}
             setPendingImages={setPendingImages}
             setReasoningEffort={setReasoningEffort}
             submitDisabled={submitDisabled}
