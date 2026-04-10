@@ -26,13 +26,15 @@ The intended product shape is:
 - PDFs are processed outside the thread runtime
 - chat threads can have documents attached to them
 - the model will later use a new document tool to work with attached documents
-- the worker should remain focused on OpenAI Responses WebSocket thread execution
+- the worker should remain focused on OpenAI Responses WebSocket execution, including worker-owned document sessions for tools
 
 This is meant to stay aligned with the broader repo design:
 
 - ingestion and preparation stay outside the worker
 - the worker stays OpenAI-native and thread-centric
-- document-specific behavior should live in an external service/tool layer
+- the worker is the only process that ever touches OpenAI
+- OpenAI-facing document session execution must therefore live inside the worker boundary
+- non-OpenAI document preparation or support behavior can still live in separate services
 
 ## Important Clarifications From Discussion
 
@@ -42,19 +44,28 @@ We explicitly moved away from the idea of treating document payloads as permanen
 
 The main thread should not become a giant store of PDF payload material.
 
-### 2. The worker should stay dumb
+### 2. The worker should stay focused, but it is the only OpenAI boundary
 
 The worker should continue to be:
 
 - a thread actor
 - a Responses WebSocket runtime
 - a `function_call` / `function_call_output` continuation engine
+- the only process that opens Responses sockets or sends OpenAI requests
 
 The worker should not become:
 
 - a PDF processor
-- a document-aware orchestration layer
-- a document query engine
+- a page renderer
+- a document ingestion pipeline
+- a generic document preparation service
+
+What this means in practice:
+
+- the worker must own document sockets
+- the worker must send document warmup requests with `generate:false`
+- the worker must send the actual document question
+- any future helper service must stay out of the OpenAI path
 
 ### 3. XML-like tags are still valid, but only at the OpenAI adapter boundary
 
@@ -78,9 +89,75 @@ The longer-term direction is:
 - a thread knows which document IDs are attached
 - the model gets a new document tool
 - the tool can only operate on attached documents
-- the actual document execution happens outside the worker
+- OpenAI-facing document execution happens in a worker-local document executor, not in an external OpenAI-calling service
 
 This is the clean boundary.
+
+### 5. Document execution should use durable response lineage, not permanent sockets
+
+The newest agreed direction is:
+
+- durable state should be OpenAI response IDs
+- live sockets are a latency optimization, not the long-term source of truth
+- a document may have a hot reusable worker-owned socket for a while, but the system must always be able to reopen and continue from `previous_response_id`
+
+This matters because:
+
+- a single socket still only supports one in-flight response at a time
+- parent chat sockets and document sockets therefore need to be separate worker-owned sessions
+- parallel document reads therefore still require multiple worker-owned sockets
+- socket lifetime is operationally bounded, so we cannot model "document memory" as "one socket forever"
+
+### 6. We want two layers of lineage for documents
+
+The agreed model is now:
+
+- the `documents` row can hold one shared base anchor for that document
+- the `thread_documents` relation should hold the thread-local lineage for that document inside one chat thread
+
+That means:
+
+- a brand new chat thread should not inherit another thread's document Q&A history
+- but it should be able to reuse a document-level initialization anchor
+- thread-local follow-up questions should continue from the thread-local latest response ID, not from the document global base every time
+
+### 7. First use in a new thread may need a two-step bootstrap
+
+If a thread asks a document question and there is no usable prior lineage yet, the agreed bootstrap is:
+
+1. a worker-local document executor warms the document with `generate:false` on a worker-owned document session
+2. persist the returned response ID as the shared base anchor on the `documents` row
+3. the same worker-local executor then sends the actual question
+4. persist the returned response ID as the thread-local latest lineage for that `thread_id + document_id`
+
+If a shared base anchor already exists, then the new thread can skip the warmup step and start from that anchor immediately.
+
+### 8. The main thread should not care about document session mechanics
+
+The parent thread's job is only:
+
+- decide which attached documents to ask
+- trigger the question through the normal tool flow
+- wait for regrouped results
+
+The parent thread should not care whether the worker-local document executor:
+
+- reused a hot worker-owned socket
+- continued from a thread-local latest response ID
+- bootstrapped from the shared document base anchor
+- rebuilt missing lineage after an OpenAI error
+- reopened a fresh socket from persisted lineage
+
+### 9. `documenthandler` is not the OpenAI executor
+
+The `documenthandler` service shell exists in the repo, but after the latest clarification:
+
+- it should not open Responses sockets
+- it should not send `generate:false`
+- it should not ask the actual document question
+- if it gains future responsibilities, they must remain outside the OpenAI boundary
+
+This matters because the worker is the only thing that ever touches OpenAI.
 
 ## Architecture Position As Of Now
 
@@ -98,7 +175,7 @@ The current repo already has:
 - chat document attachment hydration and a paperclip attachment viewer
 - worker-side generated instruction decoration for attached-document discovery
 - a worker that can lower `image_ref` to `input_image` at send time
-- a `documenthandler` service shell that is now wired into Docker but does nothing yet
+- a `documenthandler` service shell that is now wired into Docker but does nothing yet, but it is not the planned owner of OpenAI document execution
 
 ### Current boundary we want to preserve
 
@@ -106,9 +183,10 @@ The correct boundary remains:
 
 - PDF upload and split happen outside the thread runtime
 - document manifests and page refs are the stable artifact contract
-- document querying should happen in a dedicated service/tool layer
+- OpenAI-facing document querying must stay in a worker-local executor/session layer
+- non-OpenAI document support work may still happen in dedicated services
 - the worker may read thread attachment metadata at send time to shape outbound instructions
-- the worker should just wait in `waiting_tool` and continue when it gets `thread.submit_tool_output`
+- the parent chat thread actor should just wait in `waiting_tool` and continue when it gets `thread.submit_tool_output`
 
 ## Current Implementation Status
 
@@ -153,6 +231,7 @@ What it does not do yet:
 - no tool execution
 - no document logic
 - no chat integration
+- it is not the planned owner of OpenAI document execution
 
 This was intentionally only the first infrastructure step.
 
@@ -253,6 +332,63 @@ Current relevant files:
 - `internal/worker/service.go`
 - `internal/worker/actor_test.go`
 
+### 7. The per-document lineage model is now agreed in detail, but not implemented yet
+
+This is the newest planning state and should be treated as the intended next architecture.
+
+Agreed durable model:
+
+- `documents` row stores the shared base anchor for one document
+- `thread_documents` stores the thread-local latest lineage for that document inside one parent chat thread
+
+Agreed execution ownership:
+
+- the worker is the only process that ever talks to OpenAI
+- a worker-local document executor owns document sockets
+- `generate:false` warmups happen in the worker
+- actual document questions happen in the worker
+- other services may assist with non-OpenAI work only
+
+Planned `documents` row additions:
+
+- `base_response_id`
+- `base_model`
+- `base_prompt_version`
+- `base_initialized_at`
+- `base_manifest_ref` or equivalent document-version marker
+
+Planned `thread_documents` additions:
+
+- `latest_response_id`
+- `initialized_at`
+- `last_used_at`
+- optional `status`
+- optional `last_error`
+
+Agreed execution behavior:
+
+- first query for a document inside a thread checks `thread_documents.latest_response_id`
+- if present, continue from that thread-local lineage
+- otherwise check `documents.base_response_id`
+- if the base anchor exists, start the thread-local document chain from that anchor
+- if the base anchor does not exist, create it first with `generate:false` on a worker-owned document session
+- after the actual query completes, save the new response ID back to `thread_documents.latest_response_id`
+
+Agreed rebuild behavior:
+
+- if OpenAI returns a lineage error such as missing previous response state, rebuild
+- if the document changes materially, rebuild the shared base anchor
+- if the prompt or model contract changes materially, rebuild the shared base anchor
+- thread-local lineage should be treated as disposable and rebuildable from the shared base anchor
+
+Agreed socket behavior:
+
+- a hot worker-owned document socket is allowed and useful
+- a hot worker-owned document socket is not the durable truth
+- sockets should be reopenable from persisted response lineage
+- document sockets should be closable on idle timeout, worker pressure, or planned rotation
+- the system should assume sockets are temporary but response IDs are durable enough for continuation
+
 ## Deliberate Limitations Right Now
 
 These are intentional and should not be mistaken for bugs in the current slice.
@@ -285,7 +421,20 @@ There is no tool like:
 
 yet.
 
-### 3. There is no general tool-runner service yet
+### 3. The document lineage model is agreed, but none of it is persisted yet
+
+What still does not exist yet:
+
+- no `base_response_id` persisted on `documents`
+- no `latest_response_id` persisted on `thread_documents`
+- no executor logic yet for:
+  - thread-local lineage reuse
+  - shared base-anchor reuse
+  - `generate:false` bootstrap
+  - rebuild-on-error behavior
+- no idle/rotation policy yet specifically for hot worker-owned document sockets
+
+### 4. There is no general tool-runner path yet
 
 Today the worker only has custom handling for:
 
@@ -296,10 +445,11 @@ All other tool calls just leave the thread in `waiting_tool`.
 So before documents can work end to end, we need a real execution path that:
 
 - notices the tool call
-- executes external logic
+- dispatches worker-local document execution
+- lets that worker-local executor run OpenAI calls on worker-owned sessions
 - submits a `function_call_output` back to the thread
 
-### 4. The backend thread attachment model is still only a first pass
+### 5. The backend thread attachment model is still only a first pass
 
 What still does not exist yet:
 
@@ -312,21 +462,27 @@ What still does not exist yet:
 
 These points are important because they protect the shape of the system.
 
-### 1. Do not make the worker document-smart
+### 1. Do not turn the worker into a document preparation pipeline
 
 The worker should not:
 
-- read manifests as part of business logic
-- choose document pages
-- own document retrieval policy
-- build document answers itself
+- read raw PDFs as primary execution input
+- split PDFs or render pages
+- own long-term document artifact generation
+- become a generic document preparation service
 
 What is acceptable:
 
 - reading the thread's attached document IDs and filenames at send time
 - appending a generated discovery block to outbound instructions
+- loading manifest/page refs at the OpenAI boundary when executing a document tool
+- opening or reusing worker-owned document sockets
+- sending `generate:false` warmups
+- continuing a document query from stored response lineage
+- keeping a worker-owned document socket warm temporarily if it improves latency
+- submitting `function_call_output` back to the parent thread
 
-That is request shaping, not document execution.
+That is runtime/session ownership, not document preparation.
 
 ### 2. Do not persist base64-heavy document payloads as runtime truth
 
@@ -334,7 +490,7 @@ Any future XML-tag + page-image structure should be generated near the OpenAI re
 
 ### 3. Do not blur document prep with thread execution
 
-`docsplitter` and future document handling should remain separate from the OpenAI thread runtime.
+`docsplitter` and future non-OpenAI document handling should remain separate from the OpenAI thread runtime.
 
 ## Best Current Mental Model
 
@@ -367,24 +523,39 @@ Current owner:
 ### Layer 3: Tool execution
 
 - model asks to use an attached document
-- external service handles the request
+- worker-local document executor resolves document lineage
+- it may reuse a hot worker-owned document socket
+- otherwise it continues from a stored thread-local or document-level response ID
+- if no usable base anchor exists yet, the worker first warms the document with `generate:false`
+- then the worker runs the actual question on a separate document session
 - thread resumes with tool output
 
 Current owner:
 
 - not implemented yet
-- likely future owner is `documenthandler`
+- likely future owner is a worker-local document executor/session manager
+- `documenthandler` is not the OpenAI executor for this path
 
 ## Recommended Next Step
 
-The next sensible step is no longer attachment persistence or document discovery.
+The next sensible step is no longer attachment persistence or just document discovery.
 
-It is now the first real document tool path:
+It is now the first real document-session and document-tool path:
 
 1. keep the current generated-instructions approach for attached-document discovery
-2. design a first document tool schema
-3. give `documenthandler` a real command/execution loop
-4. validate that the tool can only access documents attached to the thread
+2. extend `documents` so each document can hold a shared base anchor response ID plus versioning fields
+3. extend `thread_documents` so each `thread_id + document_id` relation can hold thread-local latest response lineage
+4. add a worker-local document executor/session manager that:
+   - detects or is dispatched for the document tool call
+   - validates the requested document is attached
+   - opens or reuses a worker-owned document session separate from the parent chat thread socket
+   - checks thread-local lineage first
+   - falls back to the shared document base anchor
+   - creates the shared base anchor with `generate:false` when missing
+   - sends the actual user/document question after warmup
+   - persists the resulting thread-local latest response ID
+   - submits a normal `function_call_output` back to the parent thread
+5. only after that decide whether `documenthandler` needs any non-OpenAI responsibilities at all
 
 The current backend shape is now:
 
@@ -396,11 +567,18 @@ The current backend shape is now:
 
 The next backend shape should be:
 
+- `documents` stores the shared document base anchor response ID
+- `thread_documents` stores the thread-local latest response ID
 - a document tool is added to the chat tool list
-- `documenthandler` becomes the executor for that tool
-- it validates the requested document is attached
-- it loads the manifest and page refs
+- the worker owns all OpenAI calls for document warmup and question execution
+- a worker-local document executor validates the requested document is attached
+- it decides whether to:
+  - reuse thread-local lineage
+  - reuse the shared document base anchor
+  - rebuild the shared base anchor first
+- it may keep a hot worker-owned document socket temporarily, but never relies on that socket as the durable truth
 - it later returns a normal `function_call_output`
+- `documenthandler` is not the OpenAI executor for this path
 
 ## Suggested First Tool Shape
 
@@ -428,6 +606,76 @@ Not implemented yet, but this is the current intended direction:
 ```
 
 This is only a planning direction, not a locked contract yet.
+
+## Planned Document Session Flow
+
+This is the most important newest planning section.
+
+All OpenAI calls below happen inside the worker on worker-owned document sessions. The parent chat thread actor can still sit in `waiting_tool` while the worker process drives the separate document session.
+
+The intended flow for one document query is now:
+
+### Case A: Existing thread-local lineage exists
+
+1. Parent thread asks an attached document question.
+2. Worker-local document executor looks up `thread_documents.latest_response_id`.
+3. Worker-local document executor continues that document chain from the thread-local latest response ID.
+4. Worker-local document executor saves the newly returned response ID back onto `thread_documents`.
+5. Worker-local document executor returns a normal tool result to the parent thread.
+
+### Case B: No thread-local lineage, but shared document base anchor exists
+
+1. Parent thread asks an attached document question.
+2. Worker-local document executor does not find a thread-local latest response ID.
+3. Worker-local document executor finds `documents.base_response_id`.
+4. Worker-local document executor starts the new thread-local document chain from that shared base anchor.
+5. Worker-local document executor saves the newly returned response ID onto `thread_documents`.
+6. Worker-local document executor returns a normal tool result to the parent thread.
+
+### Case C: No thread-local lineage and no shared base anchor yet
+
+1. Parent thread asks an attached document question.
+2. Worker-local document executor finds no thread-local latest response ID.
+3. Worker-local document executor finds no shared document base anchor.
+4. Worker-local document executor sends a document warmup request with `generate:false` on a worker-owned document session.
+5. Worker-local document executor saves the returned response ID onto the `documents` row as the shared base anchor.
+6. Worker-local document executor then sends the actual question from the parent thread.
+7. Worker-local document executor saves the returned response ID onto `thread_documents`.
+8. Worker-local document executor returns a normal tool result to the parent thread.
+
+### Case D: Stored lineage is invalid or stale
+
+If OpenAI rejects the stored lineage, or the system decides the base anchor is stale because the document/model/prompt contract changed, then:
+
+1. discard the invalid thread-local lineage
+2. rebuild the shared base anchor if needed
+3. rebuild the thread-local lineage from the fresh base anchor
+4. continue normally
+
+## Socket Policy For Documents
+
+The current intended policy is:
+
+- a document query may run on a hot reusable worker-owned socket if one already exists
+- the parent chat thread socket and the document query socket are separate worker-owned sockets
+- a single socket still only supports one in-flight response at a time
+- a document socket is allowed to stay warm temporarily for low-latency follow-ups
+- a document socket is not the durable state boundary
+- persisted response IDs are the durable state boundary
+- document sockets can be closed and later reopened from stored lineage
+
+The likely closure triggers are:
+
+- idle timeout
+- worker pressure / socket budget pressure
+- planned rotation before connection lifetime limits
+- worker shutdown or ownership loss
+
+So the correct mental model is:
+
+- response IDs are the durable lineage
+- worker-owned sockets are a hot cache
+- parent/document regroup still happens through the normal barrier/tool-output machinery
 
 ## Future OpenAI Request Shape
 
@@ -491,18 +739,22 @@ During this work the following checks passed:
 Where we are now:
 
 - document upload and split are real
-- documenthandler service shell is real
+- documenthandler service shell is real, but it is not the planned OpenAI executor
 - backend thread attachment persistence is real
 - thread attachment read/hydration is real
 - attached-document discovery via generated instructions is real
 - chat-side pending attachment UI is real
 - paperclip-based thread attachment viewer is real
+- the per-document lineage model is now agreed in detail
+- the worker-only OpenAI ownership rule is now explicitly clarified
 - document tool execution is not built yet
 
 What comes next:
 
-- tool contract
-- documenthandler execution path
-- tool-side attachment validation
-- optional dedicated attach/detach management if product wants it
-- worker continuation through standard tool output
+- persist shared base anchors on `documents`
+- persist thread-local latest response lineage on `thread_documents`
+- build a worker-local document session manager/executor
+- keep the `generate:false` warmup + actual-question flow inside worker-owned OpenAI sessions
+- add rebuild rules for missing/stale lineage
+- wire the first document tool and regroup through standard tool output
+- decide later whether `documenthandler` needs any non-OpenAI role
