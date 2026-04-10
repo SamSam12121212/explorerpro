@@ -4,6 +4,8 @@ An agent runtime built on the OpenAI Responses API with [WebSocket mode](https:/
 
 OpenAI-native by design with no provider abstraction layer which has not yet been planned. Azure OpenAI also does not work.
 
+In the current setup, your data is not processed under ZDR settings, so potentially everything is being logged and stored. I am working this way to start as I want to see the different possibilites that open up with `previous_response_id` and warm sockets and do not want to be constrained.
+
 ![Screenshot](docs/image.png)
 
 ## Aims
