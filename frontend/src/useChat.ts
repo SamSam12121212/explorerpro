@@ -33,6 +33,30 @@ function buildUserInputItems(text: string, images: UploadedImage[]) {
   return [{ type: "message", role: "user", content }];
 }
 
+function normalizeAttachedDocuments(documents?: AttachedDocument[]) {
+  return (documents ?? []).map((document) => ({
+    id: document.id,
+    filename: document.filename,
+    page_count: document.page_count,
+    status: document.status,
+  }));
+}
+
+function mergeAttachedDocuments(current: AttachedDocument[], incoming: AttachedDocument[]) {
+  const merged = [...current];
+  const seen = new Set(current.map((document) => document.id));
+
+  for (const document of incoming) {
+    if (seen.has(document.id)) {
+      continue;
+    }
+    seen.add(document.id);
+    merged.push(document);
+  }
+
+  return merged;
+}
+
 function extractMessageText(item: NonNullable<ThreadItemsResponse["items"]>[number]) {
   return (item.payload?.content ?? [])
     .filter(
@@ -223,6 +247,7 @@ export function useChat() {
   const [uploadCount, setUploadCount] = useState(0);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [lastItemCursor, setLastItemCursor] = useState<string | null>(null);
+  const [attachedDocuments, setAttachedDocuments] = useState<AttachedDocument[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<AttachedDocument[]>([]);
   const [pendingImages, setPendingImages] = useState<UploadedImage[]>([]);
   const [apiStatus, setApiStatus] = useState<HealthState>("checking");
@@ -332,6 +357,7 @@ export function useChat() {
       setThinking(false);
     }
     setModel(payload.thread?.model ?? DEFAULT_MODEL);
+    setAttachedDocuments(normalizeAttachedDocuments(payload.attached_documents));
 
     if (
       nextStatus &&
@@ -365,7 +391,7 @@ export function useChat() {
 
     switch (payload.type) {
       case "thread.snapshot":
-        handleThreadSnapshot({ thread: payload.thread });
+        handleThreadSnapshot(payload);
         break;
       case "thread.items.delta": {
         const cursor =
@@ -495,6 +521,7 @@ export function useChat() {
       const cursor = payload.page?.last_cursor ?? payload.page?.last_stream_id ?? null;
       setThreadId(nextThreadId);
       setModel(threadInfo.thread?.model ?? DEFAULT_MODEL);
+      setAttachedDocuments(normalizeAttachedDocuments(threadInfo.attached_documents));
       setLastItemCursor(cursor);
       lastThreadStatusRef.current = threadInfo.thread?.status ?? null;
       setMessages(buildMessagesFromItems(payload));
@@ -505,6 +532,7 @@ export function useChat() {
       connectThreadStream(nextThreadId, cursor);
     } catch (error) {
       setMessages([]);
+      setAttachedDocuments([]);
       appendMessage(
         "error",
         error instanceof Error ? error.message : "Failed to load thread",
@@ -538,7 +566,7 @@ export function useChat() {
     }
   }
 
-  async function sendMessage(text: string, images: UploadedImage[]) {
+  async function sendMessage(text: string, images: UploadedImage[], documents: AttachedDocument[]) {
     if (!text && images.length === 0) return;
 
     setBusy(true);
@@ -559,6 +587,7 @@ export function useChat() {
           model,
           instructions: DEFAULT_INSTRUCTIONS,
           input: inputItems,
+          attached_document_ids: documents.map((document) => document.id),
           tools: EXPLORER_TOOLS,
           reasoning: { effort: reasoningEffort, summary: "concise" },
           store: true,
@@ -569,6 +598,8 @@ export function useChat() {
 
         activeThreadIdRef.current = currentThreadId;
         setThreadId(currentThreadId);
+        setAttachedDocuments(normalizeAttachedDocuments(documents));
+        setPendingDocuments([]);
         setLastItemCursor(null);
         connectThreadStream(currentThreadId, null);
       } else {
@@ -577,8 +608,15 @@ export function useChat() {
         }
         await apiPost(`/threads/${currentThreadId}/commands`, {
           kind: "thread.resume",
-          body: { input_items: inputItems },
+          body: {
+            input_items: inputItems,
+            attached_document_ids: documents.map((document) => document.id),
+          },
         });
+        setAttachedDocuments((current) =>
+          mergeAttachedDocuments(current, normalizeAttachedDocuments(documents)),
+        );
+        setPendingDocuments([]);
       }
     } catch (error) {
       removeMessage(optimisticMessageId);
@@ -602,6 +640,7 @@ export function useChat() {
     setDraft("");
     setThreadId(null);
     setLastItemCursor(null);
+    setAttachedDocuments([]);
     setPendingDocuments([]);
     setPendingImages([]);
     setModel(DEFAULT_MODEL);
@@ -622,6 +661,7 @@ export function useChat() {
     thinking,
     uploadCount,
     threadId,
+    attachedDocuments,
     pendingDocuments,
     setPendingDocuments,
     pendingImages,

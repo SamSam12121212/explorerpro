@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { LuChevronDown, LuFileText, LuImage, LuSend } from "react-icons/lu";
+import { LuChevronDown, LuFileText, LuImage, LuPaperclip, LuSend } from "react-icons/lu";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
 import type {
   AttachedDocument,
@@ -15,10 +15,15 @@ interface ChatPanelProps {
   draft: string;
   messages: ChatMessage[];
   model: string;
+  attachedDocuments: AttachedDocument[];
   pendingDocuments: AttachedDocument[];
   pendingImages: UploadedImage[];
   reasoningEffort: ReasoningEffort;
-  sendMessage: (text: string, images: UploadedImage[]) => Promise<void>;
+  sendMessage: (
+    text: string,
+    images: UploadedImage[],
+    documents: AttachedDocument[],
+  ) => Promise<void>;
   setPendingDocuments: Dispatch<SetStateAction<AttachedDocument[]>>;
   setDraft: (value: string) => void;
   setModel: (value: string) => void;
@@ -50,6 +55,7 @@ export function ChatPanel({
   draft,
   messages,
   model,
+  attachedDocuments,
   pendingDocuments,
   pendingImages,
   reasoningEffort,
@@ -68,6 +74,13 @@ export function ChatPanel({
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  const [prevThreadId, setPrevThreadId] = useState(threadId);
+  if (prevThreadId !== threadId) {
+    setPrevThreadId(threadId);
+    setAttachmentsOpen(false);
+  }
+  const totalVisibleDocuments = attachedDocuments.length + pendingDocuments.length;
 
   useEffect(() => {
     const el = messagesRef.current;
@@ -80,6 +93,23 @@ export function ChatPanel({
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, 200).toString()}px`;
   }, [draft]);
+
+  useEffect(() => {
+    if (!attachmentsOpen) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAttachmentsOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [attachmentsOpen]);
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
@@ -212,9 +242,10 @@ export function ChatPanel({
               return;
             }
             const imgs = pendingImages.slice();
+            const docs = pendingDocuments.slice();
             setDraft("");
             setPendingImages([]);
-            void sendMessage(text, imgs);
+            void sendMessage(text, imgs, docs);
           }}
         >
           <input
@@ -268,6 +299,23 @@ export function ChatPanel({
                 <LuImage className="h-4 w-4" />
               </button>
 
+              <button
+                className={`relative text-[#888] hover:text-[#d4d4d4] disabled:cursor-not-allowed disabled:opacity-40 ${
+                  attachedDocuments.length > 0 ? "mr-1" : ""
+                }`}
+                disabled={totalVisibleDocuments === 0}
+                onClick={() => { setAttachmentsOpen(true); }}
+                title="View attached documents"
+                type="button"
+              >
+                <LuPaperclip className="h-4 w-4" />
+                {attachedDocuments.length > 0 && (
+                  <span className="absolute -top-1.5 -right-2 min-w-4 rounded-full bg-[#007acc] px-1 text-[10px] leading-4 text-white">
+                    {attachedDocuments.length.toString()}
+                  </span>
+                )}
+              </button>
+
               <label
                 className={`relative inline-flex shrink-0 items-center gap-0.5 text-xs text-[#888] ${
                   threadId
@@ -319,6 +367,127 @@ export function ChatPanel({
           </div>
         </form>
       </div>
+
+      {attachmentsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(0,0,0,0.55)] px-4"
+          onClick={() => { setAttachmentsOpen(false); }}
+        >
+          <div
+            className="flex max-h-[80vh] w-full max-w-xl flex-col border border-[#333] bg-[#1f1f1f] shadow-[0_18px_60px_rgba(0,0,0,0.45)]"
+            onClick={(event) => { event.stopPropagation(); }}
+          >
+            <div className="flex items-center justify-between border-b border-[#333] px-4 py-3">
+              <div>
+                <p className="m-0 text-sm font-medium text-[#d4d4d4]">Thread attachments</p>
+                <p className="m-0 mt-1 text-xs text-[#777]">
+                  View the documents already attached to this thread and anything queued for the next send.
+                </p>
+              </div>
+              <button
+                className="text-xs text-[#888] hover:text-[#d4d4d4]"
+                onClick={() => { setAttachmentsOpen(false); }}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+              <div className="space-y-6">
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="m-0 text-xs font-semibold uppercase tracking-widest text-[#888]">
+                      Attached to thread
+                    </h3>
+                    <span className="text-xs text-[#666]">
+                      {attachedDocuments.length.toString()}
+                    </span>
+                  </div>
+                  {attachedDocuments.length === 0 ? (
+                    <p className="m-0 border border-dashed border-[#333] px-3 py-3 text-sm text-[#666]">
+                      No persisted documents are attached to this thread yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {attachedDocuments.map((document) => (
+                        <div
+                          className="flex items-center gap-3 border border-[#333] bg-[#252525] px-3 py-2"
+                          key={document.id}
+                        >
+                          <div className="flex h-9 w-9 items-center justify-center border border-[#333] bg-[#1b1b1b] text-[#888]">
+                            <LuFileText className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="m-0 truncate text-sm text-[#d4d4d4]">
+                              {document.filename.trim() || document.id}
+                            </p>
+                            <p className="m-0 mt-1 text-xs text-[#777]">
+                              {document.page_count > 0
+                                ? `${document.page_count.toString()} pages`
+                                : document.status}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="m-0 text-xs font-semibold uppercase tracking-widest text-[#888]">
+                      Pending next send
+                    </h3>
+                    <span className="text-xs text-[#666]">
+                      {pendingDocuments.length.toString()}
+                    </span>
+                  </div>
+                  {pendingDocuments.length === 0 ? (
+                    <p className="m-0 border border-dashed border-[#333] px-3 py-3 text-sm text-[#666]">
+                      No new documents are queued right now.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {pendingDocuments.map((document) => (
+                        <div
+                          className="flex items-center gap-3 border border-[#333] bg-[#252525] px-3 py-2"
+                          key={document.id}
+                        >
+                          <div className="flex h-9 w-9 items-center justify-center border border-[#333] bg-[#1b1b1b] text-[#888]">
+                            <LuFileText className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="m-0 truncate text-sm text-[#d4d4d4]">
+                              {document.filename.trim() || document.id}
+                            </p>
+                            <p className="m-0 mt-1 text-xs text-[#777]">
+                              {document.page_count > 0
+                                ? `${document.page_count.toString()} pages`
+                                : document.status}
+                            </p>
+                          </div>
+                          <button
+                            className="text-xs text-[#888] hover:text-[#f44747]"
+                            onClick={() => {
+                              setPendingDocuments((current) =>
+                                current.filter((entry) => entry.id !== document.id),
+                              );
+                            }}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

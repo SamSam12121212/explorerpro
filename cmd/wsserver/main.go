@@ -14,6 +14,7 @@ import (
 	"explorer/internal/logutil"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 	"explorer/internal/wsserver"
 
@@ -84,6 +85,7 @@ func run() error {
 	defer rdb.Close()
 
 	pg := postgresstore.New(pool)
+	docs := threaddocstore.New(pool)
 	store := threadstore.New(rdb, pg)
 
 	srv := wsserver.New(wsserver.Config{
@@ -92,6 +94,7 @@ func run() error {
 		JS:     js,
 		Store:  store,
 		PG:     pg,
+		Docs:   docs,
 	})
 
 	logger.Info("wsserver starting",

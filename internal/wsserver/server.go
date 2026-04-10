@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"explorer/internal/postgresstore"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -22,6 +23,7 @@ type Config struct {
 	JS     nats.JetStreamContext
 	Store  *threadstore.Store
 	PG     *postgresstore.Store
+	Docs   *threaddocstore.Store
 }
 
 type Server struct {
@@ -86,6 +88,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		js:        s.cfg.JS,
 		store:     s.cfg.Store,
 		pg:        s.cfg.PG,
+		docs:      s.cfg.Docs,
 		threadID:  threadID,
 		afterItem: afterItem,
 	})

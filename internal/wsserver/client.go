@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"explorer/internal/docstore"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
@@ -38,6 +40,7 @@ type clientConfig struct {
 	js        nats.JetStreamContext
 	store     *threadstore.Store
 	pg        *postgresstore.Store
+	docs      *threaddocstore.Store
 	threadID  string
 	afterItem string
 }
@@ -218,10 +221,16 @@ func (c *client) loadThread(ctx context.Context) (threadstore.ThreadMeta, bool, 
 }
 
 func (c *client) writeSnapshot(ctx context.Context, conn *websocket.Conn, meta threadstore.ThreadMeta) error {
+	attachedDocuments, err := c.loadAttachedDocuments(ctx, meta.ID)
+	if err != nil {
+		return err
+	}
+
 	msg := map[string]any{
-		"type":      "thread.snapshot",
-		"thread_id": meta.ID,
-		"thread":    presentThreadMeta(meta),
+		"type":               "thread.snapshot",
+		"thread_id":          meta.ID,
+		"thread":             presentThreadMeta(meta),
+		"attached_documents": attachedDocuments,
 	}
 
 	if owner, err := c.cfg.store.LoadOwner(ctx, meta.ID); err == nil {
@@ -363,11 +372,30 @@ func (c *client) writeStreamSnapshot(ctx context.Context, conn *websocket.Conn, 
 		threadID = c.cfg.threadID
 	}
 
+	attachedDocuments, err := c.loadAttachedDocuments(ctx, threadID)
+	if err != nil {
+		return err
+	}
+
 	return wsjson.Write(ctx, conn, map[string]any{
-		"type":      "thread.snapshot",
-		"thread_id": threadID,
-		"thread":    snapshot,
+		"type":               "thread.snapshot",
+		"thread_id":          threadID,
+		"thread":             snapshot,
+		"attached_documents": attachedDocuments,
 	})
+}
+
+func (c *client) loadAttachedDocuments(ctx context.Context, threadID string) ([]map[string]any, error) {
+	if c.cfg.docs == nil {
+		return []map[string]any{}, nil
+	}
+
+	documents, err := c.cfg.docs.ListDocuments(ctx, threadID, 200)
+	if err != nil {
+		return nil, err
+	}
+
+	return presentAttachedDocuments(documents), nil
 }
 
 func (c *client) flushPendingEventBatch(
@@ -499,6 +527,19 @@ func presentThreadMeta(meta threadstore.ThreadMeta) map[string]any {
 	}
 
 	return response
+}
+
+func presentAttachedDocuments(documents []docstore.Document) []map[string]any {
+	presented := make([]map[string]any, 0, len(documents))
+	for _, document := range documents {
+		presented = append(presented, map[string]any{
+			"id":         document.ID,
+			"filename":   document.Filename,
+			"status":     document.Status,
+			"page_count": document.PageCount,
+		})
+	}
+	return presented
 }
 
 func presentOwner(owner threadstore.OwnerRecord) map[string]any {

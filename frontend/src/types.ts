@@ -41,6 +41,7 @@ export interface ThreadResponse {
     status?: string;
     model?: string;
   };
+  attached_documents?: AttachedDocument[];
 }
 
 export interface ThreadCreateResponse {
@@ -160,6 +161,7 @@ export interface ThreadStreamSnapshotMessage {
   type: "thread.snapshot";
   thread_id: string;
   thread?: ThreadResponse["thread"];
+  attached_documents?: AttachedDocument[];
 }
 
 export interface ThreadStreamItemsDeltaMessage {

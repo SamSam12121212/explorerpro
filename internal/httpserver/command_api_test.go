@@ -186,3 +186,55 @@ func TestPresentPageUsesCursorBounds(t *testing.T) {
 		t.Fatalf("first_stream_id = %v, want first Redis stream id", page["first_stream_id"])
 	}
 }
+
+func TestNormalizeAttachedDocumentIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dedupes and trims", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := normalizeAttachedDocumentIDs([]string{" doc_1 ", "doc_1", "doc_2"})
+		if err != nil {
+			t.Fatalf("normalizeAttachedDocumentIDs() error = %v", err)
+		}
+		if stringJSON(got) != `["doc_1","doc_2"]` {
+			t.Fatalf("got %s, want [\"doc_1\",\"doc_2\"]", stringJSON(got))
+		}
+	})
+
+	t.Run("rejects blank ids", func(t *testing.T) {
+		t.Parallel()
+
+		if _, err := normalizeAttachedDocumentIDs([]string{"doc_1", " "}); err == nil {
+			t.Fatal("expected blank attached document id to fail")
+		}
+	})
+}
+
+func TestNormalizeResumeBodyPreservesAttachedDocumentIDs(t *testing.T) {
+	t.Parallel()
+
+	got, err := normalizeResumeBody(json.RawMessage(`{
+		"input_items":"hello",
+		"attached_document_ids":["doc_1","doc_2"]
+	}`))
+	if err != nil {
+		t.Fatalf("normalizeResumeBody() error = %v", err)
+	}
+
+	ids, err := extractAttachedDocumentIDs(got)
+	if err != nil {
+		t.Fatalf("extractAttachedDocumentIDs() error = %v", err)
+	}
+	if stringJSON(ids) != `["doc_1","doc_2"]` {
+		t.Fatalf("attached_document_ids = %s, want [\"doc_1\",\"doc_2\"]", stringJSON(ids))
+	}
+}
+
+func stringJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}

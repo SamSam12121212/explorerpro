@@ -15,9 +15,11 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/config"
+	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -29,19 +31,22 @@ type commandAPI struct {
 	runtime *platform.Runtime
 	store   *threadstore.Store
 	pg      *postgresstore.Store
+	docs    *docstore.Store
+	links   *threaddocstore.Store
 }
 
 type createThreadRequest struct {
-	Model              string          `json:"model"`
-	Instructions       string          `json:"instructions,omitempty"`
-	Input              json.RawMessage `json:"input"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
-	Include            json.RawMessage `json:"include,omitempty"`
-	Tools              json.RawMessage `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
-	Store              *bool           `json:"store,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	Model               string          `json:"model"`
+	Instructions        string          `json:"instructions,omitempty"`
+	Input               json.RawMessage `json:"input"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	Include             json.RawMessage `json:"include,omitempty"`
+	Tools               json.RawMessage `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Reasoning           json.RawMessage `json:"reasoning,omitempty"`
+	Store               *bool           `json:"store,omitempty"`
+	PreviousResponseID  string          `json:"previous_response_id,omitempty"`
+	AttachedDocumentIDs []string        `json:"attached_document_ids,omitempty"`
 }
 
 type submitCommandRequest struct {
@@ -78,6 +83,8 @@ func newCommandAPI(cfg config.Config, logger *slog.Logger, runtime *platform.Run
 		runtime: runtime,
 		store:   threadstore.New(runtime.Redis().Raw(), pg),
 		pg:      pg,
+		docs:    docstore.New(runtime.Postgres().Pool()),
+		links:   threaddocstore.New(runtime.Postgres().Pool()),
 	}
 }
 
@@ -194,6 +201,19 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	attachedDocumentIDs, err := normalizeAttachedDocumentIDs(req.AttachedDocumentIDs)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.ensureDocumentsExist(r.Context(), attachedDocumentIDs); err != nil {
+		if errors.Is(err, docstore.ErrDocumentNotFound) {
+			writeErrorJSON(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("validate attached documents: %v", err))
+		return
+	}
 
 	threadID, err := idgen.New("thread")
 	if err != nil {
@@ -240,6 +260,10 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		UpdatedAt:      now,
 	}); err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("create thread record: %v", err))
+		return
+	}
+	if err := a.links.AddDocuments(r.Context(), threadID, attachedDocumentIDs); err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("attach thread documents: %v", err))
 		return
 	}
 
@@ -342,6 +366,23 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	attachedDocumentIDs, err := attachedDocumentIDsForCommand(req.Kind, body)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.ensureDocumentsExist(r.Context(), attachedDocumentIDs); err != nil {
+		if errors.Is(err, docstore.ErrDocumentNotFound) {
+			writeErrorJSON(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("validate attached documents: %v", err))
+		return
+	}
+	if err := a.links.AddDocuments(r.Context(), threadID, attachedDocumentIDs); err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("attach thread documents: %v", err))
+		return
+	}
 
 	cmdID := strings.TrimSpace(req.CmdID)
 	if cmdID == "" {
@@ -418,7 +459,17 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 	}
 
 	response := map[string]any{
-		"thread": presentThreadMeta(meta),
+		"thread":             presentThreadMeta(meta),
+		"attached_documents": []map[string]any{},
+	}
+
+	attachedDocuments, err := a.links.ListDocuments(r.Context(), threadID, 200)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list attached documents for thread %s: %v", threadID, err))
+		return
+	}
+	if len(attachedDocuments) > 0 {
+		response["attached_documents"] = presentAttachedDocuments(attachedDocuments)
 	}
 
 	if owner, err := a.store.LoadOwner(r.Context(), threadID); err == nil {
@@ -962,6 +1013,13 @@ func normalizeCommandBody(kind agentcmd.Kind, raw json.RawMessage) (json.RawMess
 	}
 }
 
+func attachedDocumentIDsForCommand(kind agentcmd.Kind, raw json.RawMessage) ([]string, error) {
+	if kind != agentcmd.KindThreadResume {
+		return nil, nil
+	}
+	return extractAttachedDocumentIDs(raw)
+}
+
 func normalizeResumeBody(raw json.RawMessage) (json.RawMessage, error) {
 	body, err := normalizeObjectBody(raw)
 	if err != nil {
@@ -997,6 +1055,55 @@ func normalizeOptionalBody(raw json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage("{}"), nil
 	}
 	return normalizeObjectBody(raw)
+}
+
+func extractAttachedDocumentIDs(raw json.RawMessage) ([]string, error) {
+	if isBlankJSON(raw) {
+		return nil, nil
+	}
+
+	var payload struct {
+		AttachedDocumentIDs []string `json:"attached_document_ids"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("decode attached_document_ids: %w", err)
+	}
+
+	return normalizeAttachedDocumentIDs(payload.AttachedDocumentIDs)
+}
+
+func normalizeAttachedDocumentIDs(rawIDs []string) ([]string, error) {
+	if len(rawIDs) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{}, len(rawIDs))
+	ids := make([]string, 0, len(rawIDs))
+	for _, rawID := range rawIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return nil, fmt.Errorf("attached_document_ids cannot contain blank values")
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	return ids, nil
+}
+
+func (a *commandAPI) ensureDocumentsExist(ctx context.Context, documentIDs []string) error {
+	for _, documentID := range documentIDs {
+		if _, err := a.docs.Get(ctx, documentID); err != nil {
+			if errors.Is(err, docstore.ErrDocumentNotFound) {
+				return fmt.Errorf("%w: %s", docstore.ErrDocumentNotFound, documentID)
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeObjectBody(raw json.RawMessage) (json.RawMessage, error) {
@@ -1223,6 +1330,19 @@ func presentThreadListEntry(entry postgresstore.ThreadListEntry) map[string]any 
 		}
 	}
 	return response
+}
+
+func presentAttachedDocuments(documents []docstore.Document) []map[string]any {
+	presented := make([]map[string]any, 0, len(documents))
+	for _, document := range documents {
+		presented = append(presented, map[string]any{
+			"id":         document.ID,
+			"filename":   document.Filename,
+			"status":     document.Status,
+			"page_count": document.PageCount,
+		})
+	}
+	return presented
 }
 
 func presentOwner(owner threadstore.OwnerRecord) map[string]any {

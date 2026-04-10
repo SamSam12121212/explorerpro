@@ -22,6 +22,7 @@ export default function App() {
     thinking,
     uploadCount,
     threadId,
+    attachedDocuments,
     pendingDocuments,
     setPendingDocuments,
     pendingImages,
@@ -41,6 +42,9 @@ export default function App() {
   const [threadsLoading, setThreadsLoading] = useState(true);
 
   const handleAttachDocument = (document: AttachedDocument) => {
+    if (attachedDocuments.some((entry) => entry.id === document.id)) {
+      return;
+    }
     setPendingDocuments((current) => {
       if (current.some((entry) => entry.id === document.id)) {
         return current;
@@ -113,7 +117,10 @@ export default function App() {
         <Panel className="min-w-0" defaultSize={18} minSize={14}>
           <LeftSidebar
             activeThreadId={threadId}
-            attachedDocumentIds={pendingDocuments.map((document) => document.id)}
+            attachedDocumentIds={[
+              ...attachedDocuments.map((document) => document.id),
+              ...pendingDocuments.map((document) => document.id),
+            ]}
             onAttachDocument={handleAttachDocument}
             onNewChat={handleNewChat}
             onSelectThread={handleSelectThread}
@@ -136,6 +143,7 @@ export default function App() {
             draft={draft}
             messages={messages}
             model={model}
+            attachedDocuments={attachedDocuments}
             pendingDocuments={pendingDocuments}
             pendingImages={pendingImages}
             reasoningEffort={reasoningEffort}
