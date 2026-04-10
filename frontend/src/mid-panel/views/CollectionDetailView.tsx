@@ -12,6 +12,12 @@ function documentTitle(document: DocumentEntry) {
   return filename || document.id;
 }
 
+/** Title for collection list rows — never show raw document id. */
+function documentListTitle(document: DocumentEntry) {
+  const filename = document.filename.trim();
+  return filename || "Untitled document";
+}
+
 function documentMeta(document: DocumentEntry) {
   const parts: string[] = [document.status];
   if (document.page_count > 0) {
@@ -187,18 +193,13 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
               className="border-b border-[#2a2a2a] px-5 py-4"
               key={document.id}
             >
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-[#e6e6e6]">
-                    {documentTitle(document)}
-                  </p>
-                  <p className="mt-1 truncate text-[0.78rem] text-[#777]">
-                    {documentMeta(document)}
-                  </p>
-                </div>
-                <span className="shrink-0 text-[0.68rem] uppercase tracking-[0.16em] text-[#555]">
-                  {document.id}
-                </span>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-[#e6e6e6]">
+                  {documentListTitle(document)}
+                </p>
+                <p className="mt-1 truncate text-[0.78rem] text-[#777]">
+                  {documentMeta(document)}
+                </p>
               </div>
             </div>
           ))
