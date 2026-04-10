@@ -50,6 +50,9 @@ SELECT
     d.manifest_ref,
     d.page_count,
     d.dpi,
+    d.base_response_id,
+    d.base_model,
+    d.base_initialized_at,
     d.created_at,
     d.updated_at
 FROM thread_documents td
@@ -74,6 +77,9 @@ LIMIT $2`, threadID, limit)
 			&document.ManifestRef,
 			&document.PageCount,
 			&document.DPI,
+			&document.BaseResponseID,
+			&document.BaseModel,
+			&document.BaseInitializedAt,
 			&document.CreatedAt,
 			&document.UpdatedAt,
 		); err != nil {
@@ -83,4 +89,31 @@ LIMIT $2`, threadID, limit)
 	}
 
 	return documents, rows.Err()
+}
+
+func (s *Store) FilterAttached(ctx context.Context, threadID string, documentIDs []string) ([]string, error) {
+	if len(documentIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+SELECT document_id
+FROM thread_documents
+WHERE thread_id = $1
+  AND document_id = ANY($2::text[])`, threadID, documentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("filter attached documents for %s: %w", threadID, err)
+	}
+	defer rows.Close()
+
+	attached := make([]string, 0, len(documentIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan attached document id: %w", err)
+		}
+		attached = append(attached, id)
+	}
+
+	return attached, rows.Err()
 }

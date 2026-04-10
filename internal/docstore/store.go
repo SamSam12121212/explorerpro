@@ -13,16 +13,19 @@ import (
 var ErrDocumentNotFound = errors.New("document not found")
 
 type Document struct {
-	ID          string    `json:"id"`
-	Filename    string    `json:"filename"`
-	SourceRef   string    `json:"source_ref"`
-	Status      string    `json:"status"`
-	Error       string    `json:"error,omitempty"`
-	ManifestRef string    `json:"manifest_ref,omitempty"`
-	PageCount   int       `json:"page_count"`
-	DPI         int       `json:"dpi"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                string     `json:"id"`
+	Filename          string     `json:"filename"`
+	SourceRef         string     `json:"source_ref"`
+	Status            string     `json:"status"`
+	Error             string     `json:"error,omitempty"`
+	ManifestRef       string     `json:"manifest_ref,omitempty"`
+	PageCount         int        `json:"page_count"`
+	DPI               int        `json:"dpi"`
+	BaseResponseID    string     `json:"base_response_id,omitempty"`
+	BaseModel         string     `json:"base_model,omitempty"`
+	BaseInitializedAt *time.Time `json:"base_initialized_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type Store struct {
@@ -48,9 +51,13 @@ func (s *Store) Create(ctx context.Context, doc Document) error {
 func (s *Store) Get(ctx context.Context, id string) (Document, error) {
 	var d Document
 	err := s.pool.QueryRow(ctx, `
-	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
+	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi,
+	       base_response_id, base_model, base_initialized_at,
+	       created_at, updated_at
 	FROM documents WHERE id = $1`, id).Scan(
-		&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt,
+		&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI,
+		&d.BaseResponseID, &d.BaseModel, &d.BaseInitializedAt,
+		&d.CreatedAt, &d.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Document{}, ErrDocumentNotFound
@@ -66,7 +73,9 @@ func (s *Store) List(ctx context.Context, limit int64) ([]Document, error) {
 		limit = 100
 	}
 	rows, err := s.pool.Query(ctx, `
-	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi, created_at, updated_at
+	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi,
+	       base_response_id, base_model, base_initialized_at,
+	       created_at, updated_at
 	FROM documents ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
@@ -76,7 +85,11 @@ func (s *Store) List(ctx context.Context, limit int64) ([]Document, error) {
 	var docs []Document
 	for rows.Next() {
 		var d Document
-		if err := rows.Scan(&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&d.ID, &d.Filename, &d.SourceRef, &d.Status, &d.Error, &d.ManifestRef, &d.PageCount, &d.DPI,
+			&d.BaseResponseID, &d.BaseModel, &d.BaseInitializedAt,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
 		docs = append(docs, d)

@@ -16,7 +16,8 @@ The goal is that after a full context reset, this file is enough to recover the 
 
 ## Date
 
-- Current working state captured on: April 10, 2026
+- Previous working state captured on: April 10, 2026
+- Updated: April 10, 2026 (document lineage schema + tool dispatch skeleton)
 
 ## Core Product Direction
 
@@ -189,6 +190,35 @@ The correct boundary remains:
 - the parent chat thread actor should just wait in `waiting_tool` and continue when it gets `thread.submit_tool_output`
 
 ## Current Implementation Status
+
+### 0. Document lineage schema and tool dispatch skeleton now exist
+
+The database schema now supports the lineage model and the worker can dispatch document tool calls.
+
+Implemented behavior:
+
+- `documents` table now has `base_response_id`, `base_model`, `base_initialized_at` columns
+- `thread_documents` table now has `latest_response_id`, `initialized_at`, `last_used_at` columns
+- all new columns are nullable / have safe defaults so existing data is unaffected
+- `docstore.Document` struct reads and writes the new lineage fields
+- `threaddocstore` has a `FilterAttached` method for validating document IDs against a thread
+- a `query_attached_documents` tool definition is dynamically injected into the outbound tools list when documents are attached to the thread
+- the tool accepts `document_ids` (array of strings) and `task` (string)
+- no `page_numbers` parameter — each document has all pages loaded; the model mentions specific pages in the task text if needed
+- in `streamUntilTerminal`, a `function_call` with name `query_attached_documents` is now recognized and dispatched
+- after `response.completed`, if the only pending tool is a document query, the worker validates the requested document IDs are attached, builds a stub `function_call_output`, and self-publishes a `thread.submit_tool_output` command
+- the stub output reports validation errors for unattached documents, or returns a `not_yet_implemented` status for valid ones
+- the self-published command follows the normal `handleSubmitToolOutput` path, so the thread continues cleanly
+- the document query tool is stripped from subagent tools via `filterSubagentTools` to prevent children from querying documents directly
+- if both a document query and another unknown tool are pending, the thread falls back to `waiting_tool` for all tools (no partial auto-handling)
+
+Current relevant files:
+
+- `db/migrations/000009_document_lineage.sql`
+- `internal/docstore/store.go`
+- `internal/threaddocstore/store.go`
+- `internal/worker/actor.go`
+- `internal/worker/actor_test.go`
 
 ### 1. Document upload and split already exist
 
@@ -411,22 +441,31 @@ They now exist as:
 
 They still do not exist as real document execution context.
 
-### 2. The document tool does not exist yet
+### 2. The document tool exists as a stub only
 
-There is no tool like:
+The `query_attached_documents` tool is now:
 
-- `query_attached_document`
-- `read_attached_document`
-- `search_attached_document`
+- defined and dynamically injected into outbound tool lists when documents are attached
+- recognized and dispatched in `streamUntilTerminal`
+- validated (document IDs must be attached to the thread)
+- self-handled via a `thread.submit_tool_output` self-publish
 
-yet.
+But it is still a stub:
 
-### 3. The document lineage model is agreed, but none of it is persisted yet
+- it returns `not_yet_implemented` for valid document queries
+- it does not open a document session or call OpenAI
+- it does not read manifests or page images
+- it does not persist lineage
+
+### 3. The document lineage schema exists, but no executor logic uses it yet
+
+The columns now exist:
+
+- `base_response_id`, `base_model`, `base_initialized_at` on `documents`
+- `latest_response_id`, `initialized_at`, `last_used_at` on `thread_documents`
 
 What still does not exist yet:
 
-- no `base_response_id` persisted on `documents`
-- no `latest_response_id` persisted on `thread_documents`
 - no executor logic yet for:
   - thread-local lineage reuse
   - shared base-anchor reuse
@@ -434,20 +473,16 @@ What still does not exist yet:
   - rebuild-on-error behavior
 - no idle/rotation policy yet specifically for hot worker-owned document sockets
 
-### 4. There is no general tool-runner path yet
+### 4. The worker now has a document tool dispatch path, but no general tool runner
 
-Today the worker only has custom handling for:
+The worker now has custom handling for:
 
-- `spawn_subagents`
+- `spawn_subagents` (full implementation)
+- `query_attached_documents` (stub, self-publishes tool output)
 
-All other tool calls just leave the thread in `waiting_tool`.
+All other tool calls still leave the thread in `waiting_tool`.
 
-So before documents can work end to end, we need a real execution path that:
-
-- notices the tool call
-- dispatches worker-local document execution
-- lets that worker-local executor run OpenAI calls on worker-owned sessions
-- submits a `function_call_output` back to the thread
+The document query path demonstrates the pattern for worker-local tool execution: detect the tool call, build the output, self-publish `thread.submit_tool_output`. The next step replaces the stub with a real document executor.
 
 ### 5. The backend thread attachment model is still only a first pass
 
@@ -538,74 +573,74 @@ Current owner:
 
 ## Recommended Next Step
 
-The next sensible step is no longer attachment persistence or just document discovery.
+The next sensible step is to replace the document query stub with a real document executor.
 
-It is now the first real document-session and document-tool path:
+The schema, tool definition, dispatch path, and self-publish mechanism are now all in place. The stub returns `not_yet_implemented` but proves the full round-trip works.
 
-1. keep the current generated-instructions approach for attached-document discovery
-2. extend `documents` so each document can hold a shared base anchor response ID plus versioning fields
-3. extend `thread_documents` so each `thread_id + document_id` relation can hold thread-local latest response lineage
-4. add a worker-local document executor/session manager that:
-   - detects or is dispatched for the document tool call
-   - validates the requested document is attached
-   - opens or reuses a worker-owned document session separate from the parent chat thread socket
-   - checks thread-local lineage first
-   - falls back to the shared document base anchor
+The next increment should:
+
+1. build a worker-local document executor that:
+   - loads the document manifest from blob storage
+   - opens a worker-owned document session (separate from the parent chat thread socket)
+   - checks `thread_documents.latest_response_id` for existing thread-local lineage
+   - falls back to `documents.base_response_id` for the shared base anchor
    - creates the shared base anchor with `generate:false` when missing
-   - sends the actual user/document question after warmup
-   - persists the resulting thread-local latest response ID
-   - submits a normal `function_call_output` back to the parent thread
-5. only after that decide whether `documenthandler` needs any non-OpenAI responsibilities at all
+   - sends the actual question with all page images from the manifest
+   - persists the resulting response ID back to `thread_documents.latest_response_id`
+   - returns the model's answer as the `function_call_output`
+2. replace `buildDocumentQueryStubOutput` with a real call to the executor
+3. persist lineage after each successful query
+4. add rebuild-on-error handling for stale or missing lineage
 
 The current backend shape is now:
 
-- `thread_documents` stores thread/document relationships
-- create/resume requests can attach documents by `attached_document_ids`
-- thread reads and thread snapshots expose `attached_documents`
-- the worker appends current attached document IDs and filenames to outgoing instructions at send time
-- the worker still does not know document contents or page semantics
+- `documents` has lineage columns (`base_response_id`, `base_model`, `base_initialized_at`) but they are unused
+- `thread_documents` has lineage columns (`latest_response_id`, `initialized_at`, `last_used_at`) but they are unused
+- the `query_attached_documents` tool is injected when docs are attached
+- the worker dispatches document tool calls and self-publishes stub outputs
+- the full round-trip from model tool call through dispatch through `thread.submit_tool_output` works
 
-The next backend shape should be:
+The next backend shape should:
 
-- `documents` stores the shared document base anchor response ID
-- `thread_documents` stores the thread-local latest response ID
-- a document tool is added to the chat tool list
-- the worker owns all OpenAI calls for document warmup and question execution
-- a worker-local document executor validates the requested document is attached
-- it decides whether to:
-  - reuse thread-local lineage
-  - reuse the shared document base anchor
-  - rebuild the shared base anchor first
-- it may keep a hot worker-owned document socket temporarily, but never relies on that socket as the durable truth
-- it later returns a normal `function_call_output`
-- `documenthandler` is not the OpenAI executor for this path
+- populate `documents.base_response_id` after the first `generate:false` warmup
+- populate `thread_documents.latest_response_id` after each document query
+- use the lineage fields to decide warm vs cold starts
+- handle OpenAI lineage errors by rebuilding from the base anchor
 
-## Suggested First Tool Shape
+## Implemented Tool Shape
 
-Not implemented yet, but this is the current intended direction:
+The tool is now registered and dispatched. The implemented shape is:
 
 ```json
 {
   "type": "function",
-  "name": "query_attached_document",
-  "description": "Inspect one attached document and return concise evidence-backed findings.",
+  "name": "query_attached_documents",
+  "description": "Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Describe what you need in the task field; mention specific page numbers there if needed.",
   "parameters": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "document_id": { "type": "string" },
-      "task": { "type": "string" },
-      "page_numbers": {
+      "document_ids": {
         "type": "array",
-        "items": { "type": "integer" }
+        "items": { "type": "string" },
+        "description": "IDs of the attached documents to query."
+      },
+      "task": {
+        "type": "string",
+        "description": "What to look for or ask about in the documents."
       }
     },
-    "required": ["document_id", "task"]
+    "required": ["document_ids", "task"]
   }
 }
 ```
 
-This is only a planning direction, not a locked contract yet.
+Key design decisions:
+
+- `document_ids` is an array so the model can query multiple documents in one call
+- there is no `page_numbers` parameter — each document has all pages loaded; the model mentions specific pages in the task text if needed
+- the tool is dynamically injected into the outbound tools list only when documents are attached to the thread
+- the tool is stripped from subagent tools to prevent children from querying documents directly
 
 ## Planned Document Session Flow
 
@@ -747,14 +782,16 @@ Where we are now:
 - paperclip-based thread attachment viewer is real
 - the per-document lineage model is now agreed in detail
 - the worker-only OpenAI ownership rule is now explicitly clarified
-- document tool execution is not built yet
+- the lineage schema is in place (`base_response_id` on documents, `latest_response_id` on thread_documents)
+- the `query_attached_documents` tool is defined, injected, dispatched, and validated
+- the full tool call round-trip works end to end (model calls tool → worker dispatches → stub output → self-publish → thread continues)
+- the stub returns `not_yet_implemented` for valid queries and validation errors for unattached documents
 
 What comes next:
 
-- persist shared base anchors on `documents`
-- persist thread-local latest response lineage on `thread_documents`
-- build a worker-local document session manager/executor
-- keep the `generate:false` warmup + actual-question flow inside worker-owned OpenAI sessions
+- replace the stub with a real worker-local document executor
+- load manifests and page images from blob storage
+- open worker-owned document sessions with `generate:false` warmup
+- persist lineage after each query
 - add rebuild rules for missing/stale lineage
-- wire the first document tool and regroup through standard tool output
 - decide later whether `documenthandler` needs any non-OpenAI role

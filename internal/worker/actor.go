@@ -76,6 +76,7 @@ type actorStore interface {
 
 type threadDocumentStore interface {
 	ListDocuments(ctx context.Context, threadID string, limit int64) ([]docstore.Document, error)
+	FilterAttached(ctx context.Context, threadID string, documentIDs []string) ([]string, error)
 }
 
 type threadActor struct {
@@ -1309,6 +1310,10 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 }
 
 func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any) error {
+	if err := a.injectDocumentTools(meta.ID, payload); err != nil {
+		return err
+	}
+
 	if err := ensureRequiredResponseInclude(payload); err != nil {
 		return err
 	}
@@ -1617,6 +1622,159 @@ func escapePromptAttribute(value string) string {
 	return replacer.Replace(value)
 }
 
+const toolNameQueryAttachedDocuments = "query_attached_documents"
+
+func queryAttachedDocumentsToolDef() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"name": toolNameQueryAttachedDocuments,
+		"description": "Query one or more attached documents. " +
+			"Each document has all of its pages already loaded into a separate analysis session. " +
+			"Describe what you need in the task field; mention specific page numbers there if needed.",
+		"parameters": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"document_ids": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "IDs of the attached documents to query.",
+				},
+				"task": map[string]any{
+					"type":        "string",
+					"description": "What to look for or ask about in the documents.",
+				},
+			},
+			"required": []string{"document_ids", "task"},
+		},
+	}
+}
+
+func (a *threadActor) injectDocumentTools(threadID string, payload map[string]any) error {
+	if a.threadDocs == nil {
+		return nil
+	}
+
+	docs, err := a.threadDocs.ListDocuments(a.ctx, threadID, 1)
+	if err != nil {
+		return fmt.Errorf("check thread documents for tool injection: %w", err)
+	}
+	if len(docs) == 0 {
+		return nil
+	}
+
+	existing, _ := payload["tools"].([]any)
+	for _, t := range existing {
+		if m, ok := t.(map[string]any); ok {
+			if name, _ := m["name"].(string); name == toolNameQueryAttachedDocuments {
+				return nil
+			}
+		}
+	}
+
+	payload["tools"] = append(existing, queryAttachedDocumentsToolDef())
+	return nil
+}
+
+type docQueryRequest struct {
+	DocumentIDs []string `json:"document_ids"`
+	Task        string   `json:"task"`
+}
+
+func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
+	var req docQueryRequest
+	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
+		return docQueryRequest{}, fmt.Errorf("decode %s arguments: %w", toolNameQueryAttachedDocuments, err)
+	}
+	if len(req.DocumentIDs) == 0 {
+		return docQueryRequest{}, fmt.Errorf("%s requires at least one document_id", toolNameQueryAttachedDocuments)
+	}
+	if strings.TrimSpace(req.Task) == "" {
+		return docQueryRequest{}, fmt.Errorf("%s requires a non-empty task", toolNameQueryAttachedDocuments)
+	}
+	return req, nil
+}
+
+func (a *threadActor) handlePendingDocumentQuery(meta threadstore.ThreadMeta, callID string, req docQueryRequest) error {
+	output := a.buildDocumentQueryStubOutput(meta.ID, req)
+
+	outputItem, err := json.Marshal(map[string]any{
+		"type":    "function_call_output",
+		"call_id": callID,
+		"output":  output,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal document query stub output: %w", err)
+	}
+
+	cmdID, err := idgen.New("cmd")
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(agentcmd.SubmitToolOutputBody{
+		CallID:     callID,
+		OutputItem: outputItem,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal document query submit body: %w", err)
+	}
+
+	subject := agentcmd.WorkerCommandSubject(a.workerID, agentcmd.KindThreadSubmitToolOutput)
+	return a.publish(a.ctx, subject, agentcmd.Command{
+		CmdID:        cmdID,
+		Kind:         agentcmd.KindThreadSubmitToolOutput,
+		ThreadID:     meta.ID,
+		RootThreadID: meta.RootThreadID,
+		CausationID:  meta.LastResponseID,
+		Body:         body,
+	})
+}
+
+func (a *threadActor) buildDocumentQueryStubOutput(threadID string, req docQueryRequest) string {
+	if a.threadDocs == nil {
+		return `{"error":"document store not available"}`
+	}
+
+	attached, err := a.threadDocs.FilterAttached(a.ctx, threadID, req.DocumentIDs)
+	if err != nil {
+		a.logger.Warn("failed to validate attached documents for tool call",
+			"thread_id", threadID,
+			"error", err,
+		)
+		return `{"error":"failed to validate attached documents"}`
+	}
+
+	attachedSet := make(map[string]bool, len(attached))
+	for _, id := range attached {
+		attachedSet[id] = true
+	}
+
+	var missing []string
+	for _, id := range req.DocumentIDs {
+		if !attachedSet[id] {
+			missing = append(missing, id)
+		}
+	}
+
+	if len(missing) > 0 {
+		result, _ := json.Marshal(map[string]any{
+			"error":        "some requested documents are not attached to this thread",
+			"missing_ids":  missing,
+			"attached_ids": attached,
+		})
+		return string(result)
+	}
+
+	result, _ := json.Marshal(map[string]any{
+		"status":       "not_yet_implemented",
+		"document_ids": req.DocumentIDs,
+		"task":         req.Task,
+		"message":      "Document querying is not yet implemented. The documents are attached and validated, but the document execution session is not built yet.",
+	})
+	return string(result)
+}
+
 func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	a.mu.Lock()
 	session := a.session
@@ -1632,6 +1790,8 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	waitingTool := false
 	var pendingSpawn *spawnRequest
 	var pendingSpawnCallID string
+	var pendingDocQuery *docQueryRequest
+	var pendingDocQueryCallID string
 	prevStatus := meta.Status
 	eventCount := 0
 
@@ -1693,6 +1853,18 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 						}
 						pendingSpawn = &req
 						pendingSpawnCallID = call.CallID
+					} else if err == nil && call.Name == toolNameQueryAttachedDocuments {
+						req, err := decodeDocQueryRequest(call.Arguments)
+						if err != nil {
+							a.logger.Warn("invalid document query arguments, falling back to waiting_tool",
+								"call_id", call.CallID,
+								"error", err,
+							)
+							waitingTool = true
+						} else {
+							pendingDocQuery = &req
+							pendingDocQueryCallID = call.CallID
+						}
 					} else {
 						waitingTool = true
 					}
@@ -1724,7 +1896,12 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
-			} else if waitingTool {
+			} else if pendingDocQuery != nil && !waitingTool {
+				if err := a.handlePendingDocumentQuery(meta, pendingDocQueryCallID, *pendingDocQuery); err != nil {
+					return err
+				}
+				meta.Status = threadstore.ThreadStatusWaitingTool
+			} else if waitingTool || pendingDocQuery != nil {
 				meta.Status = threadstore.ThreadStatusWaitingTool
 			} else {
 				if meta.ParentThreadID != "" {
@@ -2737,7 +2914,7 @@ func filterSubagentTools(raw string) (string, error) {
 
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		if name, _ := tool["name"].(string); name == "spawn_subagents" {
+		if name, _ := tool["name"].(string); name == "spawn_subagents" || name == toolNameQueryAttachedDocuments {
 			continue
 		}
 		filtered = append(filtered, tool)

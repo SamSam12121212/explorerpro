@@ -933,6 +933,26 @@ func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID stri
 	return cloned, nil
 }
 
+func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID string, documentIDs []string) ([]string, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	docs := s.documentsByThread[threadID]
+	idSet := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		idSet[d.ID] = true
+	}
+
+	attached := make([]string, 0, len(documentIDs))
+	for _, id := range documentIDs {
+		if idSet[id] {
+			attached = append(attached, id)
+		}
+	}
+	return attached, nil
+}
+
 func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {
 	return d.conn, nil
 }
@@ -1001,4 +1021,301 @@ func (c *actorTestConn) Close(code openaiws.CloseCode, reason string) error {
 		close(c.closedCh)
 	}
 	return nil
+}
+
+func TestQueryAttachedDocumentsToolDef(t *testing.T) {
+	t.Parallel()
+
+	def := queryAttachedDocumentsToolDef()
+	if def["type"] != "function" {
+		t.Fatalf("type = %v, want function", def["type"])
+	}
+	if def["name"] != "query_attached_documents" {
+		t.Fatalf("name = %v, want query_attached_documents", def["name"])
+	}
+
+	params, ok := def["parameters"].(map[string]any)
+	if !ok {
+		t.Fatal("parameters missing")
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties missing")
+	}
+	if _, ok := props["document_ids"]; !ok {
+		t.Fatal("document_ids property missing")
+	}
+	if _, ok := props["task"]; !ok {
+		t.Fatal("task property missing")
+	}
+}
+
+func TestInjectDocumentToolsAddsToolWhenDocsAttached(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+	}
+
+	payload := map[string]any{
+		"model": "gpt-5.4",
+	}
+
+	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
+		t.Fatalf("injectDocumentTools() error = %v", err)
+	}
+
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
+	}
+
+	toolMap, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatal("tool is not a map")
+	}
+	if toolMap["name"] != "query_attached_documents" {
+		t.Fatalf("name = %v, want query_attached_documents", toolMap["name"])
+	}
+}
+
+func TestInjectDocumentToolsSkipsWhenNoDocsAttached(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{},
+		},
+	}
+
+	payload := map[string]any{
+		"model": "gpt-5.4",
+		"tools": []any{map[string]any{"type": "function", "name": "lookup"}},
+	}
+
+	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
+		t.Fatalf("injectDocumentTools() error = %v", err)
+	}
+
+	tools := payload["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools count = %d, want 1 (unchanged)", len(tools))
+	}
+}
+
+func TestInjectDocumentToolsAppendsToExistingTools(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+	}
+
+	payload := map[string]any{
+		"model": "gpt-5.4",
+		"tools": []any{map[string]any{"type": "function", "name": "spawn_subagents"}},
+	}
+
+	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
+		t.Fatalf("injectDocumentTools() error = %v", err)
+	}
+
+	tools := payload["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools count = %d, want 2", len(tools))
+	}
+}
+
+func TestDecodeDocQueryRequest(t *testing.T) {
+	t.Parallel()
+
+	req, err := decodeDocQueryRequest(`{"document_ids":["doc_1","doc_2"],"task":"summarize findings"}`)
+	if err != nil {
+		t.Fatalf("decodeDocQueryRequest() error = %v", err)
+	}
+	if len(req.DocumentIDs) != 2 {
+		t.Fatalf("document_ids count = %d, want 2", len(req.DocumentIDs))
+	}
+	if req.Task != "summarize findings" {
+		t.Fatalf("task = %q, want %q", req.Task, "summarize findings")
+	}
+}
+
+func TestDecodeDocQueryRequestRejectsEmptyDocumentIDs(t *testing.T) {
+	t.Parallel()
+
+	_, err := decodeDocQueryRequest(`{"document_ids":[],"task":"summarize"}`)
+	if err == nil {
+		t.Fatal("expected error for empty document_ids")
+	}
+}
+
+func TestDecodeDocQueryRequestRejectsEmptyTask(t *testing.T) {
+	t.Parallel()
+
+	_, err := decodeDocQueryRequest(`{"document_ids":["doc_1"],"task":""}`)
+	if err == nil {
+		t.Fatal("expected error for empty task")
+	}
+}
+
+func TestBuildDocumentQueryStubOutputReportsUnattachedDocs(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {{ID: "doc_1"}},
+			},
+		},
+	}
+
+	output := actor.buildDocumentQueryStubOutput("thread_123", docQueryRequest{
+		DocumentIDs: []string{"doc_1", "doc_missing"},
+		Task:        "summarize",
+	})
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if parsed["error"] == nil {
+		t.Fatal("expected error field for unattached document")
+	}
+
+	missingIDs, ok := parsed["missing_ids"].([]any)
+	if !ok || len(missingIDs) != 1 || missingIDs[0] != "doc_missing" {
+		t.Fatalf("missing_ids = %#v, want [doc_missing]", parsed["missing_ids"])
+	}
+}
+
+func TestBuildDocumentQueryStubOutputReturnsStubForValidDocs(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {{ID: "doc_1"}, {ID: "doc_2"}},
+			},
+		},
+	}
+
+	output := actor.buildDocumentQueryStubOutput("thread_123", docQueryRequest{
+		DocumentIDs: []string{"doc_1", "doc_2"},
+		Task:        "summarize findings",
+	})
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if parsed["status"] != "not_yet_implemented" {
+		t.Fatalf("status = %v, want not_yet_implemented", parsed["status"])
+	}
+	if parsed["task"] != "summarize findings" {
+		t.Fatalf("task = %v, want %q", parsed["task"], "summarize findings")
+	}
+}
+
+func TestFilterSubagentToolsRemovesDocumentQueryTool(t *testing.T) {
+	t.Parallel()
+
+	filtered, err := filterSubagentTools(`[{"type":"function","name":"query_attached_documents"},{"type":"function","name":"lookup"}]`)
+	if err != nil {
+		t.Fatalf("filterSubagentTools() error = %v", err)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal([]byte(filtered), &tools); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(tools) != 1 || tools[0]["name"] != "lookup" {
+		t.Fatalf("tools = %v, want only lookup", tools)
+	}
+}
+
+func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:               "thread_parent",
+		RootThreadID:     "thread_parent",
+		Status:           threadstore.ThreadStatusRunning,
+		Model:            "gpt-5.4",
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 1,
+	}
+
+	funcCallItem := `{
+		"type":"function_call",
+		"call_id":"call_doc_1",
+		"name":"query_attached_documents",
+		"arguments":"{\"document_ids\":[\"doc_1\"],\"task\":\"summarize\"}"
+	}`
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_1"}}`),
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":` + funcCallItem + `}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1"}}`),
+		},
+	}
+	var publishedCommands []agentcmd.Command
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadDocs = &fakeThreadDocumentStore{
+		documentsByThread: map[string][]docstore.Document{
+			"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+		},
+	}
+	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publishedCommands = append(publishedCommands, cmd)
+		return nil
+	}
+
+	meta := store.threads["thread_parent"]
+	if err := actor.streamUntilTerminal(meta); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	final := store.threads["thread_parent"]
+	if final.Status != threadstore.ThreadStatusWaitingTool {
+		t.Fatalf("final status = %q, want waiting_tool", final.Status)
+	}
+
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+	cmd := publishedCommands[0]
+	if cmd.Kind != agentcmd.KindThreadSubmitToolOutput {
+		t.Fatalf("command kind = %q, want %q", cmd.Kind, agentcmd.KindThreadSubmitToolOutput)
+	}
+
+	var body agentcmd.SubmitToolOutputBody
+	if err := json.Unmarshal(cmd.Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	var outputItem map[string]any
+	if err := json.Unmarshal(body.OutputItem, &outputItem); err != nil {
+		t.Fatalf("json.Unmarshal(output_item) error = %v", err)
+	}
+	if outputItem["type"] != "function_call_output" {
+		t.Fatalf("output item type = %v, want function_call_output", outputItem["type"])
+	}
+	if outputItem["call_id"] != "call_doc_1" {
+		t.Fatalf("output item call_id = %v, want call_doc_1", outputItem["call_id"])
+	}
 }
