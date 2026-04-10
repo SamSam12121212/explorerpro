@@ -191,6 +191,25 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  documenthandler:
+    build: .
+    entrypoint: ["documenthandler"]
+    environment:
+      SERVICE_NAME: explorer-documenthandler
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-documenthandler
+      POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
+      BLOB_STORAGE_DIR: /data/blob-storage
+    volumes:
+      - ./blob-storage:/data/blob-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   frontend_node_modules:
   nats_data:
