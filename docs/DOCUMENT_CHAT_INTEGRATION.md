@@ -96,6 +96,7 @@ The current repo already has:
 - thread attachment reads on `GET /threads/{thread_id}` and websocket snapshots
 - chat image attachments
 - chat document attachment hydration and a paperclip attachment viewer
+- worker-side generated instruction decoration for attached-document discovery
 - a worker that can lower `image_ref` to `input_image` at send time
 - a `documenthandler` service shell that is now wired into Docker but does nothing yet
 
@@ -106,6 +107,7 @@ The correct boundary remains:
 - PDF upload and split happen outside the thread runtime
 - document manifests and page refs are the stable artifact contract
 - document querying should happen in a dedicated service/tool layer
+- the worker may read thread attachment metadata at send time to shape outbound instructions
 - the worker should just wait in `waiting_tool` and continue when it gets `thread.submit_tool_output`
 
 ## Current Implementation Status
@@ -187,7 +189,7 @@ Implemented behavior:
 - the API validates referenced document IDs exist before attaching them
 - attached document rows are persisted in Postgres through `thread_documents`
 - repeated sends with the same document are idempotent through the table primary key
-- the worker remains unaware of all of this
+- the worker still remains unaware of document contents and manifests
 
 Current relevant files:
 
@@ -221,21 +223,57 @@ Current relevant files:
 - `frontend/src/App.tsx`
 - `frontend/src/types.ts`
 
+### 6. Attached document discovery through generated instructions now exists
+
+The model now has a first discovery mechanism for attached documents.
+
+Implemented behavior:
+
+- right before a normal `response.create`, the worker reads the thread's currently attached documents
+- the worker appends a generated `<available_documents>` block to the outgoing `instructions`
+- this happens for both thread start and later continuation sends
+- stored thread metadata keeps the original base instructions unchanged
+- if attachments change between turns, the next send gets an updated generated list
+- only attachment metadata is exposed here:
+  - document `id`
+  - document `filename`
+- manifests, page refs, and document contents are still not part of this step
+
+Current generated shape:
+
+```text
+<available_documents>
+<document id="doc_123" name="Report.pdf" />
+</available_documents>
+```
+
+Current relevant files:
+
+- `internal/worker/actor.go`
+- `internal/worker/service.go`
+- `internal/worker/actor_test.go`
+
 ## Deliberate Limitations Right Now
 
 These are intentional and should not be mistaken for bugs in the current slice.
 
-### 1. Attached documents are persisted thread metadata, not model-visible inputs yet
+### 1. Attached documents are discoverable, but not real document inputs yet
 
 Right now document attachments:
 
 - are sent to the API on thread create/resume
 - are persisted in backend thread attachment state
 - are not included in thread input items
-- are not available to the model
+- are discoverable to the model only through generated outgoing instructions
 - are not lowered into any OpenAI-side document prompt shape yet
+- are not executable through a document tool yet
 
-They now exist as thread attachment state, not just local composer state.
+They now exist as:
+
+- persistent thread attachment state
+- generated instruction-level discovery context
+
+They still do not exist as real document execution context.
 
 ### 2. The document tool does not exist yet
 
@@ -283,6 +321,13 @@ The worker should not:
 - own document retrieval policy
 - build document answers itself
 
+What is acceptable:
+
+- reading the thread's attached document IDs and filenames at send time
+- appending a generated discovery block to outbound instructions
+
+That is request shaping, not document execution.
+
 ### 2. Do not persist base64-heavy document payloads as runtime truth
 
 Any future XML-tag + page-image structure should be generated near the OpenAI request boundary, not stored as the long-term engine representation.
@@ -313,10 +358,11 @@ Current owner:
 - the backend stores thread/document relations
 - thread reads and snapshots hydrate attached docs back into the frontend
 - the paperclip viewer becomes the scalable UI for many attached documents
+- right before each normal `response.create`, the worker appends a generated `<available_documents>` block so the model can see which docs exist
 
 Current owner:
 
-- frontend + API/read model
+- frontend + API/read model + worker send boundary
 
 ### Layer 3: Tool execution
 
@@ -331,12 +377,12 @@ Current owner:
 
 ## Recommended Next Step
 
-The next sensible step is no longer attachment persistence.
+The next sensible step is no longer attachment persistence or document discovery.
 
-It is:
+It is now the first real document tool path:
 
-1. design a first document tool schema
-2. decide how the model should discover attached documents
+1. keep the current generated-instructions approach for attached-document discovery
+2. design a first document tool schema
 3. give `documenthandler` a real command/execution loop
 4. validate that the tool can only access documents attached to the thread
 
@@ -345,7 +391,8 @@ The current backend shape is now:
 - `thread_documents` stores thread/document relationships
 - create/resume requests can attach documents by `attached_document_ids`
 - thread reads and thread snapshots expose `attached_documents`
-- the worker still does not know document semantics
+- the worker appends current attached document IDs and filenames to outgoing instructions at send time
+- the worker still does not know document contents or page semantics
 
 The next backend shape should be:
 
@@ -447,6 +494,7 @@ Where we are now:
 - documenthandler service shell is real
 - backend thread attachment persistence is real
 - thread attachment read/hydration is real
+- attached-document discovery via generated instructions is real
 - chat-side pending attachment UI is real
 - paperclip-based thread attachment viewer is real
 - document tool execution is not built yet

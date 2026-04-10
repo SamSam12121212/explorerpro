@@ -17,6 +17,7 @@ import (
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
@@ -40,6 +41,7 @@ type Service struct {
 	openAIConfig openaiws.Config
 	workerID     string
 	store        *threadstore.Store
+	threadDocs   *threaddocstore.Store
 	sweepStore   serviceSweepStore
 	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
 
@@ -73,6 +75,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		openAIConfig: openAIConfig,
 		workerID:     resolveWorkerID(cfg.ServiceName),
 		store:        store,
+		threadDocs:   threaddocstore.New(runtime.Postgres().Pool()),
 		sweepStore:   store,
 		actors:       map[string]*threadActor{},
 	}, nil
@@ -222,6 +225,7 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		WorkerID:       s.workerID,
 		Logger:         s.logger.With("thread_id", threadID),
 		Store:          s.store,
+		ThreadDocs:     s.threadDocs,
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,
 		Publish:        s.publishCommand,

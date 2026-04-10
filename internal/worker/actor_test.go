@@ -16,6 +16,7 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
+	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadstore"
 )
@@ -185,6 +186,51 @@ func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
 	}
 	if payload["tool_choice"] == nil {
 		t.Fatalf("tool_choice missing from payload")
+	}
+}
+
+func TestFormatAvailableDocumentsBlock(t *testing.T) {
+	t.Parallel()
+
+	got := formatAvailableDocumentsBlock([]docstore.Document{
+		{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
+		{ID: "doc_2", Filename: ""},
+		{ID: "", Filename: "skip-me.pdf"},
+	})
+
+	want := "<available_documents>\n" +
+		`<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />` + "\n" +
+		`<document id="doc_2" name="doc_2" />` + "\n" +
+		"</available_documents>"
+	if got != want {
+		t.Fatalf("formatAvailableDocumentsBlock() = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveInstructionsAppendsAvailableDocuments(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {
+					{ID: "doc_1", Filename: "report.pdf"},
+				},
+			},
+		},
+	}
+
+	got, err := actor.effectiveInstructions("thread_123", "Be concise.")
+	if err != nil {
+		t.Fatalf("effectiveInstructions() error = %v", err)
+	}
+
+	want := "Be concise.\n\n<available_documents>\n" +
+		`<document id="doc_1" name="report.pdf" />` + "\n" +
+		"</available_documents>"
+	if got != want {
+		t.Fatalf("effectiveInstructions() = %q, want %q", got, want)
 	}
 }
 
@@ -499,6 +545,107 @@ func TestSendResponseCreateReconnectsAfterStaleSocket(t *testing.T) {
 	}
 }
 
+func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_start"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_start"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadDocs = &fakeThreadDocumentStore{
+		documentsByThread: map[string][]docstore.Document{
+			"thread_parent": {
+				{ID: "doc_1", Filename: "report.pdf"},
+			},
+		},
+	}
+
+	body, err := json.Marshal(agentcmd.StartBody{
+		Model:        "gpt-5.4",
+		Instructions: "Base instructions.",
+		InitialInput: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(StartBody) error = %v", err)
+	}
+
+	cmd := agentcmd.Command{
+		CmdID:        "cmd_start",
+		Kind:         agentcmd.KindThreadStart,
+		ThreadID:     "thread_parent",
+		RootThreadID: "thread_parent",
+		Body:         body,
+	}
+
+	if err := actor.handleStart(cmd); err != nil {
+		t.Fatalf("handleStart() error = %v", err)
+	}
+
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(conn.writes[0], &payload); err != nil {
+		t.Fatalf("json.Unmarshal(sent) error = %v", err)
+	}
+
+	instructions, _ := payload["instructions"].(string)
+	if !strings.Contains(instructions, `<document id="doc_1" name="report.pdf" />`) {
+		t.Fatalf("instructions = %q, want available_documents block", instructions)
+	}
+}
+
+func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_resume"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_resume"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadDocs = &fakeThreadDocumentStore{
+		documentsByThread: map[string][]docstore.Document{
+			"thread_parent": {
+				{ID: "doc_2", Filename: "followup.pdf"},
+			},
+		},
+	}
+
+	meta := threadstore.ThreadMeta{
+		ID:               "thread_parent",
+		Model:            "gpt-5.4",
+		Instructions:     "Base instructions.",
+		LastResponseID:   "resp_prev",
+		SocketGeneration: 1,
+	}
+
+	if err := actor.continueWithInputItems(meta, "cmd_resume", json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]`)); err != nil {
+		t.Fatalf("continueWithInputItems() error = %v", err)
+	}
+
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(conn.writes[0], &payload); err != nil {
+		t.Fatalf("json.Unmarshal(sent) error = %v", err)
+	}
+
+	instructions, _ := payload["instructions"].(string)
+	if !strings.Contains(instructions, `<document id="doc_2" name="followup.pdf" />`) {
+		t.Fatalf("instructions = %q, want available_documents block", instructions)
+	}
+}
+
 func TestTransientCommandRetryDelay(t *testing.T) {
 	t.Parallel()
 
@@ -768,6 +915,22 @@ func testActorLogger() *slog.Logger {
 
 type actorTestDialer struct {
 	conn openaiws.Conn
+}
+
+type fakeThreadDocumentStore struct {
+	documentsByThread map[string][]docstore.Document
+	err               error
+}
+
+func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID string, _ int64) ([]docstore.Document, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	documents := s.documentsByThread[threadID]
+	cloned := make([]docstore.Document, len(documents))
+	copy(cloned, documents)
+	return cloned, nil
 }
 
 func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {

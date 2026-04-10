@@ -17,6 +17,7 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
+	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadevents"
@@ -43,6 +44,7 @@ type threadActorConfig struct {
 	WorkerID       string
 	Logger         *slog.Logger
 	Store          actorStore
+	ThreadDocs     threadDocumentStore
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -72,11 +74,16 @@ type actorStore interface {
 	UpsertSpawnResult(ctx context.Context, spawnGroupID string, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error)
 }
 
+type threadDocumentStore interface {
+	ListDocuments(ctx context.Context, threadID string, limit int64) ([]docstore.Document, error)
+}
+
 type threadActor struct {
 	threadID     string
 	workerID     string
 	logger       *slog.Logger
 	store        actorStore
+	threadDocs   threadDocumentStore
 	blob         *blobstore.LocalStore
 	cfg          openaiws.Config
 	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -112,6 +119,7 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		workerID:       cfg.WorkerID,
 		logger:         cfg.Logger,
 		store:          cfg.Store,
+		threadDocs:     cfg.ThreadDocs,
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
 		publish:        cfg.Publish,
@@ -544,9 +552,14 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
+	effectiveInstructions, err := a.effectiveInstructions(meta.ID, body.Instructions)
+	if err != nil {
+		return err
+	}
+
 	payload, err := buildResponseCreatePayload(meta, map[string]any{
 		"model":                body.Model,
-		"instructions":         body.Instructions,
+		"instructions":         effectiveInstructions,
 		"input":                body.InitialInput,
 		"metadata":             body.Metadata,
 		"include":              body.Include,
@@ -1511,9 +1524,14 @@ func stringValue(value any) string {
 }
 
 func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage) error {
+	effectiveInstructions, err := a.effectiveInstructions(meta.ID, meta.Instructions)
+	if err != nil {
+		return err
+	}
+
 	payload, err := buildResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
-		"instructions":         meta.Instructions,
+		"instructions":         effectiveInstructions,
 		"input":                inputItems,
 		"previous_response_id": meta.LastResponseID,
 		"store":                true,
@@ -1523,6 +1541,80 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 	}
 
 	return a.sendAndStream(meta, cmdID, payload)
+}
+
+func (a *threadActor) effectiveInstructions(threadID, base string) (string, error) {
+	if a.threadDocs == nil {
+		return base, nil
+	}
+
+	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 200)
+	if err != nil {
+		return "", fmt.Errorf("list thread documents for response.create instructions: %w", err)
+	}
+	if len(documents) == 0 {
+		return base, nil
+	}
+
+	block := formatAvailableDocumentsBlock(documents)
+	if block == "" {
+		return base, nil
+	}
+
+	trimmedBase := strings.TrimRight(base, "\n")
+	if strings.TrimSpace(trimmedBase) == "" {
+		return block, nil
+	}
+
+	return trimmedBase + "\n\n" + block, nil
+}
+
+func formatAvailableDocumentsBlock(documents []docstore.Document) string {
+	var builder strings.Builder
+	count := 0
+
+	for _, document := range documents {
+		id := strings.TrimSpace(document.ID)
+		if id == "" {
+			continue
+		}
+
+		name := strings.TrimSpace(document.Filename)
+		if name == "" {
+			name = id
+		}
+
+		if count == 0 {
+			builder.WriteString("<available_documents>\n")
+		}
+		builder.WriteString(`<document id="`)
+		builder.WriteString(escapePromptAttribute(id))
+		builder.WriteString(`" name="`)
+		builder.WriteString(escapePromptAttribute(name))
+		builder.WriteString(`" />`)
+		builder.WriteByte('\n')
+		count++
+	}
+
+	if count == 0 {
+		return ""
+	}
+
+	builder.WriteString("</available_documents>")
+	return builder.String()
+}
+
+func escapePromptAttribute(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\n", "&#10;",
+		"\r", "&#13;",
+		"\t", "&#9;",
+	)
+	return replacer.Replace(value)
 }
 
 func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
