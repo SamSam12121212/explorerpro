@@ -20,6 +20,8 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadstore"
+
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func TestWrapRawItemAsArray(t *testing.T) {
@@ -251,12 +253,12 @@ func TestEnsureRequiredResponseIncludeAddsEncryptedContent(t *testing.T) {
 		t.Fatalf("ensureRequiredResponseInclude() error = %v", err)
 	}
 
-	include, ok := payload["include"].([]string)
+	include, ok := payload["include"].([]responses.ResponseIncludable)
 	if !ok {
-		t.Fatalf("include = %#v, want []string", payload["include"])
+		t.Fatalf("include = %#v, want []responses.ResponseIncludable", payload["include"])
 	}
-	if len(include) != 1 || include[0] != agentcmd.RequiredIncludeReasoningEncryptedContent {
-		t.Fatalf("include = %v, want [%q]", include, agentcmd.RequiredIncludeReasoningEncryptedContent)
+	if len(include) != 1 || include[0] != responses.ResponseIncludableReasoningEncryptedContent {
+		t.Fatalf("include = %v, want [%q]", include, responses.ResponseIncludableReasoningEncryptedContent)
 	}
 }
 
@@ -282,12 +284,12 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 		t.Fatalf("buildThreadResponseCreatePayload() error = %v", err)
 	}
 
-	include, ok := payload["include"].([]string)
+	include, ok := payload["include"].([]responses.ResponseIncludable)
 	if !ok {
-		t.Fatalf("include = %#v, want []string", payload["include"])
+		t.Fatalf("include = %#v, want []responses.ResponseIncludable", payload["include"])
 	}
-	if len(include) != 1 || include[0] != agentcmd.RequiredIncludeReasoningEncryptedContent {
-		t.Fatalf("include = %v, want [%q]", include, agentcmd.RequiredIncludeReasoningEncryptedContent)
+	if len(include) != 1 || include[0] != responses.ResponseIncludableReasoningEncryptedContent {
+		t.Fatalf("include = %v, want [%q]", include, responses.ResponseIncludableReasoningEncryptedContent)
 	}
 
 	tools, ok := payload["tools"].([]any)
@@ -1076,7 +1078,10 @@ func (c *actorTestConn) Close(code openaiws.CloseCode, reason string) error {
 func TestQueryAttachedDocumentsToolDef(t *testing.T) {
 	t.Parallel()
 
-	def := queryAttachedDocumentsToolDef()
+	def, err := queryAttachedDocumentsToolDef()
+	if err != nil {
+		t.Fatalf("queryAttachedDocumentsToolDef() error = %v", err)
+	}
 	if def["type"] != "function" {
 		t.Fatalf("type = %v, want function", def["type"])
 	}

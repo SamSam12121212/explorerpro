@@ -6,6 +6,9 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/threadstore"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 )
 
 func buildResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]any) (json.RawMessage, error) {
@@ -137,6 +140,54 @@ func ensureRequiredResponseInclude(payload map[string]any) error {
 	if err != nil {
 		return err
 	}
-	payload["include"] = include
+
+	normalized := make([]responses.ResponseIncludable, 0, len(include))
+	for _, value := range include {
+		normalized = append(normalized, responses.ResponseIncludable(value))
+	}
+	payload["include"] = normalized
 	return nil
+}
+
+func queryAttachedDocumentsToolDef() (map[string]any, error) {
+	return marshalJSONObject(responses.ToolUnionParam{
+		OfFunction: &responses.FunctionToolParam{
+			Name:        toolNameQueryAttachedDocuments,
+			Description: openai.String("Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Describe what you need in the task field; mention specific page numbers there if needed."),
+			Strict:      openai.Bool(true),
+			Parameters: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"document_ids": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "IDs of the attached documents to query.",
+					},
+					"task": map[string]any{
+						"type":        "string",
+						"description": "What to look for or ask about in the documents.",
+					},
+				},
+				"required": []string{"document_ids", "task"},
+			},
+		},
+	})
+}
+
+func marshalJSONObject(value any) (map[string]any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal json object: %w", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("decode json object: %w", err)
+	}
+	if decoded == nil {
+		return nil, fmt.Errorf("value did not encode as a json object")
+	}
+
+	return decoded, nil
 }

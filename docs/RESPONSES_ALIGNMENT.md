@@ -144,12 +144,32 @@ The next small cleanup step is now done too.
 - the thread path is easier to reason about because payload preparation and payload sending are separate responsibilities
 - this is a cleaner place to begin swapping builder internals over to upstream types later
 
+## Fourth Alignment Step Completed
+
+The first real `openai-go` adoption is now done.
+
+### What changed
+
+- the app now depends directly on upstream `github.com/openai/openai-go/v3`
+- `internal/worker/responsecreate.go` now uses `openai-go` response types at the builder boundary
+- the required `include` list is now normalized as `[]responses.ResponseIncludable`
+- the attached-documents tool definition is now built from `responses.ToolUnionParam` and `responses.FunctionToolParam`
+- the runtime still converts that typed tool definition back into the existing map shape before it flows through the rest of the worker
+
+### Why this is better
+
+- we now have a real upstream dependency in the code path, not just a reference repo on disk
+- one of the biggest hand-written Responses-shaped blobs is no longer defined entirely by us
+- the adoption point is still tightly scoped to the worker builder boundary
+- this proves we can use upstream types without forcing the websocket transport or persistence layers to change
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
 
 - worker/runtime code builds Responses payloads, ideally through `internal/worker/responsecreate.go`
 - thread payloads should be finalized before they enter `sendAndStream`
+- use upstream `openai-go` types at the builder boundary where they reduce hand-written schema code
 - `openaiws` sends and receives wire messages
 - stores persist raw JSON plus minimal runtime metadata
 - any future typed adoption from `openai-go` should happen at payload-build or decode boundaries, not inside websocket transport
@@ -162,7 +182,7 @@ That means:
 
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
-- `openai-go` is not yet the source of truth for outbound request builders
+- `openai-go` is only the source of truth for a small subset of outbound request fields so far
 - thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
 This is acceptable for now, but it is the next area to improve.
@@ -171,7 +191,7 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Start using `openai-go` types selectively inside `internal/worker/responsecreate.go` first, not across the whole runtime at once.
+1. Type the next low-risk request fields inside `internal/worker/responsecreate.go`, especially `tool_choice` and other top-level non-input fields, while still leaving `input` raw.
 2. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
 3. Keep storing raw JSON even when typed builders/decoders are introduced.
 

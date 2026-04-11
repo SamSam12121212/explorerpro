@@ -1635,32 +1635,6 @@ func escapePromptAttribute(value string) string {
 
 const toolNameQueryAttachedDocuments = "query_attached_documents"
 
-func queryAttachedDocumentsToolDef() map[string]any {
-	return map[string]any{
-		"type": "function",
-		"name": toolNameQueryAttachedDocuments,
-		"description": "Query one or more attached documents. " +
-			"Each document has all of its pages already loaded into a separate analysis session. " +
-			"Describe what you need in the task field; mention specific page numbers there if needed.",
-		"parameters": map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"document_ids": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "IDs of the attached documents to query.",
-				},
-				"task": map[string]any{
-					"type":        "string",
-					"description": "What to look for or ask about in the documents.",
-				},
-			},
-			"required": []string{"document_ids", "task"},
-		},
-	}
-}
-
 func (a *threadActor) injectDocumentTools(threadID string, payload map[string]any) error {
 	if a.threadDocs == nil {
 		return nil
@@ -1683,7 +1657,12 @@ func (a *threadActor) injectDocumentTools(threadID string, payload map[string]an
 		}
 	}
 
-	payload["tools"] = append(existing, queryAttachedDocumentsToolDef())
+	toolDef, err := queryAttachedDocumentsToolDef()
+	if err != nil {
+		return fmt.Errorf("build %s tool definition: %w", toolNameQueryAttachedDocuments, err)
+	}
+
+	payload["tools"] = append(existing, toolDef)
 	return nil
 }
 
