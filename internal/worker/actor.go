@@ -114,6 +114,13 @@ type payloadLoweringStats struct {
 	LoweredBlobRefs    int
 }
 
+type deltaLogState struct {
+	firstRaw      string
+	lastRaw       string
+	firstLogged   bool
+	suppressedAny bool
+}
+
 func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadActor {
 	ctx, cancel := context.WithCancel(parentCtx)
 
@@ -1822,6 +1829,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	var pendingDocQueryCallID string
 	prevStatus := meta.Status
 	eventCount := 0
+	deltaLogs := map[openaiws.EventType]*deltaLogState{}
 
 	for {
 		event, err := session.Receive(a.ctx)
@@ -1834,9 +1842,27 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 		eventCount++
 
-		if event.Type == openaiws.EventTypeResponseOutputItemAdded || event.Type == openaiws.EventTypeResponseOutputItemDone {
+		if strings.HasSuffix(string(event.Type), ".delta") {
+			state := deltaLogs[event.Type]
+			if state == nil {
+				state = &deltaLogState{}
+				deltaLogs[event.Type] = state
+			}
+			raw := string(event.Raw)
+			if !state.firstLogged {
+				state.firstRaw = raw
+				state.lastRaw = raw
+				state.firstLogged = true
+				a.logger.Info("received openai event", "event_type", event.Type, "raw", raw)
+			} else {
+				state.lastRaw = raw
+				state.suppressedAny = true
+			}
+		} else if event.Type == openaiws.EventTypeResponseOutputItemAdded || event.Type == openaiws.EventTypeResponseOutputItemDone {
+			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
 			a.logger.Info("received openai event", "event_type", event.Type, "raw", string(event.Raw))
-		} else if event.Type != openaiws.EventTypeResponseOutputTextDelta {
+		} else {
+			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
 			a.logger.Info("received openai event", "event_type", event.Type)
 		}
 
@@ -1979,6 +2005,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		if event.Type.IsTerminal() {
+			a.flushAllDeltaLogs(deltaLogs)
 			a.logger.Info("stream completed",
 				"final_status", meta.Status,
 				"last_response_id", meta.LastResponseID,
@@ -2000,6 +2027,35 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			return nil
 		}
 	}
+}
+
+func (a *threadActor) flushDeltaLogForDoneEvent(deltaLogs map[openaiws.EventType]*deltaLogState, eventType openaiws.EventType) {
+	if !strings.HasSuffix(string(eventType), ".done") {
+		return
+	}
+
+	deltaType := openaiws.EventType(strings.TrimSuffix(string(eventType), ".done") + ".delta")
+	a.flushDeltaLog(deltaLogs, deltaType)
+}
+
+func (a *threadActor) flushAllDeltaLogs(deltaLogs map[openaiws.EventType]*deltaLogState) {
+	for eventType := range deltaLogs {
+		a.flushDeltaLog(deltaLogs, eventType)
+	}
+}
+
+func (a *threadActor) flushDeltaLog(deltaLogs map[openaiws.EventType]*deltaLogState, eventType openaiws.EventType) {
+	state := deltaLogs[eventType]
+	if state == nil {
+		return
+	}
+	delete(deltaLogs, eventType)
+
+	if !state.suppressedAny || state.lastRaw == "" || state.lastRaw == state.firstRaw {
+		return
+	}
+
+	a.logger.Info("received openai event", "event_type", eventType, "raw", state.lastRaw)
 }
 
 func (a *threadActor) startIdleLoop(meta threadstore.ThreadMeta) {

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -1316,5 +1317,62 @@ func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
 	}
 	if outputItem["call_id"] != "call_doc_1" {
 		t.Fatalf("output item call_id = %v, want call_doc_1", outputItem["call_id"])
+	}
+}
+
+func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	actor := &threadActor{
+		logger: slog.New(slog.NewTextHandler(&logBuf, nil)),
+	}
+
+	deltaLogs := map[openaiws.EventType]*deltaLogState{
+		openaiws.EventType("response.function_call_arguments.delta"): {
+			firstRaw:      `{"type":"response.function_call_arguments.delta","delta":"{"}`,
+			lastRaw:       `{"type":"response.function_call_arguments.delta","delta":"}"}`,
+			firstLogged:   true,
+			suppressedAny: true,
+		},
+	}
+
+	actor.flushDeltaLogForDoneEvent(deltaLogs, openaiws.EventTypeResponseFunctionArgsDone)
+
+	if len(deltaLogs) != 0 {
+		t.Fatalf("deltaLogs still has %d entries, want 0", len(deltaLogs))
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, `event_type=response.function_call_arguments.delta`) {
+		t.Fatalf("logs = %q, want flushed delta event type", logs)
+	}
+	if !strings.Contains(logs, `raw="{\"type\":\"response.function_call_arguments.delta\",\"delta\":\"}\"}"`) {
+		t.Fatalf("logs = %q, want flushed last raw delta", logs)
+	}
+}
+
+func TestFlushDeltaLogForDoneEventSkipsWhenOnlyFirstDeltaSeen(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	actor := &threadActor{
+		logger: slog.New(slog.NewTextHandler(&logBuf, nil)),
+	}
+
+	deltaLogs := map[openaiws.EventType]*deltaLogState{
+		openaiws.EventTypeResponseOutputTextDelta: {
+			firstRaw:    `{"type":"response.output_text.delta","delta":"hello"}`,
+			lastRaw:     `{"type":"response.output_text.delta","delta":"hello"}`,
+			firstLogged: true,
+		},
+	}
+
+	actor.flushDeltaLogForDoneEvent(deltaLogs, openaiws.EventTypeResponseOutputTextDone)
+
+	if len(deltaLogs) != 0 {
+		t.Fatalf("deltaLogs still has %d entries, want 0", len(deltaLogs))
+	}
+	if got := strings.TrimSpace(logBuf.String()); got != "" {
+		t.Fatalf("logs = %q, want empty", got)
 	}
 }
