@@ -1333,7 +1333,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 }
 
 func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any) error {
-	logPayload, err := json.Marshal(payload)
+	logPayload, err := marshalResponseCreatePayload(payload)
 	if err != nil {
 		return fmt.Errorf("marshal response.create payload for log: %w", err)
 	}
@@ -1353,7 +1353,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
-	wirePayloadJSON, err := json.Marshal(wirePayload)
+	wirePayloadJSON, err := marshalResponseCreatePayload(wirePayload)
 	if err != nil {
 		return fmt.Errorf("marshal response.create payload for wire: %w", err)
 	}

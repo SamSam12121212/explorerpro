@@ -218,6 +218,24 @@ The next typed request-shape slice is now done too.
 - stored thread metadata and outbound request metadata now use the same shape once the worker has processed the start command
 - this removes another pocket of custom schema logic while keeping persistence and transport raw where that still helps
 
+## Eighth Alignment Step Completed
+
+The next builder-boundary cleanup is now done too.
+
+### What changed
+
+- thread execution and document execution now both build outbound `response.create` payloads from the same canonical object builder in `internal/worker/responsecreate.go`
+- document execution no longer uses the byte-returning builder as its primary path
+- marshaling now happens through a small helper at the websocket send edge instead of document execution building bytes earlier than thread execution does
+- `openaiws` still only receives raw JSON bytes at the transport boundary
+
+### Why this is better
+
+- thread and document execution now share the same in-memory request shape before send
+- there is one clearer boundary where canonical payload objects become wire JSON
+- this removes the last meaningful object-vs-bytes split inside worker payload construction
+- it makes future typed builder adoption easier because both execution paths now start from the same canonical object form
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -238,7 +256,6 @@ That means:
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
 - `openai-go` is only the source of truth for a subset of outbound request fields so far
-- thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
 This is acceptable for now, but it is the next area to improve.
 
@@ -246,9 +263,9 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
-2. Decide whether to normalize the remaining request fields earlier at API ingress as well, so stored thread state is canonical even before the worker processes the first start command.
-3. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
+1. Decide whether to normalize the remaining request fields earlier at API ingress as well, so stored thread state is canonical even before the worker processes the first start command.
+2. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
+3. Consider whether the canonical builder should start producing a typed `openai-go` request struct for a narrow top-level slice, while still leaving `input` raw.
 
 ## Strong Recommendation
 

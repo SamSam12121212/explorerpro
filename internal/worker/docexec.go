@@ -295,7 +295,7 @@ func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSe
 		return "", fmt.Errorf("build page content for warmup: %w", err)
 	}
 
-	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{}, map[string]any{
+	payload, err := buildResponseCreatePayloadObject(threadstore.ThreadMeta{}, map[string]any{
 		"model": model,
 		"input": []any{
 			map[string]any{
@@ -311,7 +311,7 @@ func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSe
 		return "", fmt.Errorf("build document warmup response.create payload: %w", err)
 	}
 
-	responseID, _, err := e.executePayloadLocked(ctx, entry, payloadJSON)
+	responseID, _, err := e.executePayloadLocked(ctx, entry, payload)
 	if err != nil {
 		return "", fmt.Errorf("warmup session failed: %w", err)
 	}
@@ -326,7 +326,7 @@ func (e *documentExec) warmDocument(ctx context.Context, doc docstore.Document, 
 }
 
 func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentSession, previousResponseID, task, model string) (string, string, error) {
-	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{}, map[string]any{
+	payload, err := buildResponseCreatePayloadObject(threadstore.ThreadMeta{}, map[string]any{
 		"model": model,
 		"input": []any{
 			map[string]any{
@@ -346,7 +346,7 @@ func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentS
 	if err != nil {
 		return "", "", fmt.Errorf("build document query response.create payload: %w", err)
 	}
-	return e.executePayloadLocked(ctx, entry, payloadJSON)
+	return e.executePayloadLocked(ctx, entry, payload)
 }
 
 func (e *documentExec) queryDocument(ctx context.Context, previousResponseID, task, model string) (string, string, error) {
@@ -356,14 +356,19 @@ func (e *documentExec) queryDocument(ctx context.Context, previousResponseID, ta
 	return e.queryDocumentLocked(ctx, entry, previousResponseID, task, model)
 }
 
-func (e *documentExec) openSessionAndQuery(ctx context.Context, payload json.RawMessage) (string, string, error) {
+func (e *documentExec) openSessionAndQuery(ctx context.Context, payload map[string]any) (string, string, error) {
 	session := e.sessionFactory()
 	if err := session.Connect(ctx); err != nil {
 		return "", "", fmt.Errorf("connect document session: %w", err)
 	}
 	defer session.Close()
 
-	event, err := openaiws.NewResponseCreateEvent("doc-query", payload)
+	payloadJSON, err := marshalResponseCreatePayload(payload)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("doc-query", payloadJSON)
 	if err != nil {
 		return "", "", fmt.Errorf("build document response.create event: %w", err)
 	}
@@ -375,12 +380,17 @@ func (e *documentExec) openSessionAndQuery(ctx context.Context, payload json.Raw
 	return streamDocumentResponse(ctx, session)
 }
 
-func (e *documentExec) executePayloadLocked(ctx context.Context, entry *documentSession, payload json.RawMessage) (string, string, error) {
+func (e *documentExec) executePayloadLocked(ctx context.Context, entry *documentSession, payload map[string]any) (string, string, error) {
 	if err := e.ensureConnectedLocked(ctx, entry); err != nil {
 		return "", "", err
 	}
 
-	event, err := openaiws.NewResponseCreateEvent("doc-query", payload)
+	payloadJSON, err := marshalResponseCreatePayload(payload)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("doc-query", payloadJSON)
 	if err != nil {
 		return "", "", fmt.Errorf("build document response.create event: %w", err)
 	}

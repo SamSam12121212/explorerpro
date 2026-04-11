@@ -20,12 +20,7 @@ func buildResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]a
 		return nil, err
 	}
 
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response.create payload: %w", err)
-	}
-
-	return payloadJSON, nil
+	return marshalResponseCreatePayload(payload)
 }
 
 func buildResponseCreatePayloadObject(meta threadstore.ThreadMeta, fields map[string]any) (map[string]any, error) {
@@ -105,6 +100,15 @@ func decodeResponseCreatePayloadObject(raw json.RawMessage) (map[string]any, err
 	}
 
 	return payload, nil
+}
+
+func marshalResponseCreatePayload(payload map[string]any) (json.RawMessage, error) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal response.create payload: %w", err)
+	}
+
+	return payloadJSON, nil
 }
 
 func mergeStoredJSONField(payload map[string]any, key, raw string) error {
