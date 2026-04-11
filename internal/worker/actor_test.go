@@ -260,6 +260,50 @@ func TestEnsureRequiredResponseIncludeAddsEncryptedContent(t *testing.T) {
 	}
 }
 
+func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+	}
+
+	payload, err := actor.buildThreadResponseCreatePayload(threadstore.ThreadMeta{
+		ID: "thread_123",
+	}, map[string]any{
+		"model": "gpt-5.4",
+		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
+	})
+	if err != nil {
+		t.Fatalf("buildThreadResponseCreatePayload() error = %v", err)
+	}
+
+	include, ok := payload["include"].([]string)
+	if !ok {
+		t.Fatalf("include = %#v, want []string", payload["include"])
+	}
+	if len(include) != 1 || include[0] != agentcmd.RequiredIncludeReasoningEncryptedContent {
+		t.Fatalf("include = %v, want [%q]", include, agentcmd.RequiredIncludeReasoningEncryptedContent)
+	}
+
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
+	}
+
+	toolMap, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tool = %#v, want map", tools[0])
+	}
+	if toolMap["name"] != toolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %v, want %q", toolMap["name"], toolNameQueryAttachedDocuments)
+	}
+}
+
 func TestNormalizeInputItemsString(t *testing.T) {
 	t.Parallel()
 

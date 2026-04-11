@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"explorer/internal/agentcmd"
 	"explorer/internal/threadstore"
 )
 
@@ -81,6 +82,27 @@ func buildResponseCreatePayloadObject(meta threadstore.ThreadMeta, fields map[st
 	return payload, nil
 }
 
+func (a *threadActor) buildThreadResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]any) (map[string]any, error) {
+	payload, err := buildResponseCreatePayloadObject(meta, fields)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := a.finalizeThreadResponseCreatePayload(meta.ID, payload); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
+func (a *threadActor) finalizeThreadResponseCreatePayload(threadID string, payload map[string]any) error {
+	if err := a.injectDocumentTools(threadID, payload); err != nil {
+		return err
+	}
+
+	return ensureRequiredResponseInclude(payload)
+}
+
 func decodeResponseCreatePayloadObject(raw json.RawMessage) (map[string]any, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("response.create payload is empty")
@@ -107,5 +129,14 @@ func mergeStoredJSONField(payload map[string]any, key, raw string) error {
 		return err
 	}
 	payload[key] = decoded
+	return nil
+}
+
+func ensureRequiredResponseInclude(payload map[string]any) error {
+	include, err := agentcmd.EnsureIncludeValue(payload["include"])
+	if err != nil {
+		return err
+	}
+	payload["include"] = include
 	return nil
 }

@@ -569,7 +569,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	payloadJSON, err := buildResponseCreatePayload(meta, map[string]any{
+	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                body.Model,
 		"instructions":         effectiveInstructions,
 		"input":                body.InitialInput,
@@ -585,7 +585,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	return a.sendAndStream(meta, cmd.CmdID, payloadJSON)
+	return a.sendAndStream(meta, cmd.CmdID, payload)
 }
 
 func (a *threadActor) handleResume(cmd agentcmd.Command) error {
@@ -1130,9 +1130,8 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 	if err != nil {
 		return err
 	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal recovery response.create payload: %w", err)
+	if err := a.finalizeThreadResponseCreatePayload(meta.ID, payload); err != nil {
+		return err
 	}
 
 	if err := a.ensureSession(); err != nil {
@@ -1145,7 +1144,7 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payloadJSON)
+	return a.sendAndStream(meta, cmdID, payload)
 }
 
 func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMeta) error {
@@ -1328,20 +1327,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	a.cancel()
 }
 
-func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payloadJSON json.RawMessage) error {
-	payload, err := decodeResponseCreatePayloadObject(payloadJSON)
-	if err != nil {
-		return err
-	}
-
-	if err := a.injectDocumentTools(meta.ID, payload); err != nil {
-		return err
-	}
-
-	if err := ensureRequiredResponseInclude(payload); err != nil {
-		return err
-	}
-
+func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any) error {
 	logPayload, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal response.create payload for log: %w", err)
@@ -1399,15 +1385,6 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 	}
 
 	return a.streamUntilTerminal(meta)
-}
-
-func ensureRequiredResponseInclude(payload map[string]any) error {
-	include, err := agentcmd.EnsureIncludeValue(payload["include"])
-	if err != nil {
-		return err
-	}
-	payload["include"] = include
-	return nil
 }
 
 func (a *threadActor) lowerResponseCreatePayload(payload map[string]any) (map[string]any, payloadLoweringStats, error) {
@@ -1568,7 +1545,7 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	payloadJSON, err := buildResponseCreatePayload(meta, map[string]any{
+	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
 		"instructions":         effectiveInstructions,
 		"input":                inputItems,
@@ -1579,7 +1556,7 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payloadJSON)
+	return a.sendAndStream(meta, cmdID, payload)
 }
 
 func (a *threadActor) effectiveInstructions(threadID, base string) (string, error) {

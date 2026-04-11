@@ -116,7 +116,7 @@ The next small cleanup step is now done too.
 - there is now one canonical worker-side builder for outbound `response.create` payloads in `internal/worker/responsecreate.go`
 - `buildResponseCreatePayload` now returns canonical JSON bytes rather than a mutable `map[string]any`
 - thread start/continue paths now build outbound payloads through that one file
-- recovery replay still extracts stored client payloads, but now re-marshals them back through the same worker-side send path
+- recovery replay still extracts stored client payloads, but now runs back through the same worker-side response handling path
 - document warmup/query paths now also build their top-level `response.create` payloads through that one file instead of assembling them inline
 
 ### Why this is better
@@ -126,11 +126,30 @@ The next small cleanup step is now done too.
 - the code now has one clear place to improve if we start replacing map-based building with upstream types
 - this is a much better seam for selective `openai-go` adoption than spreading typed code through actor and document runtime code
 
+## Third Alignment Step Completed
+
+The next small cleanup step is now done too.
+
+### What changed
+
+- thread-side required include injection and attached-document tool injection now happen at the worker payload-build boundary instead of inside `sendAndStream`
+- thread start/continue now use a thread-specific builder path that returns a finalized payload object before send
+- recovery replay now finalizes the extracted stored payload before handing it to the send path
+- `sendAndStream` now just logs, lowers input payloads for wire format, and sends
+
+### Why this is better
+
+- the send path no longer decodes canonical payload JSON just to mutate it
+- the last runtime-only request mutations now happen alongside payload assembly instead of deep in transport-adjacent code
+- the thread path is easier to reason about because payload preparation and payload sending are separate responsibilities
+- this is a cleaner place to begin swapping builder internals over to upstream types later
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
 
 - worker/runtime code builds Responses payloads, ideally through `internal/worker/responsecreate.go`
+- thread payloads should be finalized before they enter `sendAndStream`
 - `openaiws` sends and receives wire messages
 - stores persist raw JSON plus minimal runtime metadata
 - any future typed adoption from `openai-go` should happen at payload-build or decode boundaries, not inside websocket transport
@@ -144,7 +163,7 @@ That means:
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
 - `openai-go` is not yet the source of truth for outbound request builders
-- the actor still applies a couple of runtime-only payload mutations after decoding the canonical payload back into an object before send
+- thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
 This is acceptable for now, but it is the next area to improve.
 
@@ -152,8 +171,8 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Move required include injection and document-tool injection into the worker-side builder boundary so `sendAndStream` no longer has to decode canonical payload JSON just to mutate it.
-2. Start using `openai-go` types selectively inside `internal/worker/responsecreate.go` first, not across the whole runtime at once.
+1. Start using `openai-go` types selectively inside `internal/worker/responsecreate.go` first, not across the whole runtime at once.
+2. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
 3. Keep storing raw JSON even when typed builders/decoders are introduced.
 
 ## Strong Recommendation
