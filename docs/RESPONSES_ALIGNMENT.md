@@ -1,0 +1,166 @@
+# Responses Alignment
+
+## Purpose
+
+This file is the working handoff note for aligning the app more cleanly to the OpenAI Responses API shape.
+
+It captures:
+
+- what we are trying to preserve
+- what the codebase is actually doing today
+- what small alignment work has already started
+- the next small steps that should follow
+
+The goal is that after a context reset, this file is enough to recover the current direction without re-auditing the repo from scratch.
+
+## Date
+
+- Captured: April 11, 2026
+
+## Core Goal
+
+The product direction is still:
+
+- stay native to the OpenAI Responses API
+- keep the app's internal data as close as practical to Responses objects
+- avoid building a separate shadow schema unless the runtime truly needs it
+- keep custom runtime concepts very small and explicit
+
+The custom concepts we do need are still:
+
+- `thread`
+- `spawn_group`
+- command routing / ownership / recovery
+
+Those are runtime wrappers around Responses execution, not replacements for Responses objects.
+
+## Current Reality
+
+The codebase is already fairly close to the intended model, but the alignment is currently mostly at the JSON/runtime boundary rather than through typed `openai-go` usage.
+
+### What is Responses-shaped today
+
+- inbound API input is normalized into Responses-style input item arrays
+- worker continuation uses `previous_response_id`
+- raw OpenAI response bodies are stored with minimal transformation
+- output items are persisted close to wire shape
+- raw websocket events are stored close to wire shape
+
+### What is custom runtime state today
+
+- sticky worker ownership
+- socket generation / lease handling
+- thread status
+- spawn barriers
+- recovery / adoption commands
+
+### Important practical note
+
+The vendored `openai-go` repo is in-tree, but the runtime does not currently import it as part of normal execution.
+
+Today it is effectively being used as:
+
+- a reference surface
+- a future schema source
+- a place to compare against upstream behavior
+
+It is not yet the worker transport layer.
+
+## Current Architecture Boundary
+
+The current clean boundary we want to preserve is:
+
+- API layer: normalize input, create/publish commands, expose read APIs
+- worker: own thread actors, build `response.create` payloads, own continuation logic
+- `internal/openaiws`: own websocket transport only
+- stores: persist raw responses, items, events, and thread state
+- wsserver: fan out stored thread updates to the browser
+
+That means the worker should understand Responses request/continuation semantics, while `internal/openaiws` should understand sockets, not schema.
+
+## Problem We Started Fixing
+
+Some Responses-shape knowledge had leaked into `internal/openaiws`.
+
+In particular, `internal/openaiws` had a helper that accepted an arbitrary Go value, marshaled it, decoded it again into a map, and then wrapped it as `response.create`.
+
+That is small, but it is the wrong direction because it makes the transport package partially responsible for request shaping.
+
+If we keep going that way, `internal/openaiws` slowly turns into a copied mini-schema layer derived from `openai-go`.
+
+## First Alignment Step Completed
+
+The first small cleanup step is now done.
+
+### What changed
+
+- `openaiws.ClientEvent` now carries raw JSON payload bytes instead of `map[string]any`
+- `openaiws.NewResponseCreateEvent` now accepts raw JSON and validates that it is a JSON object
+- `openaiws` now only wraps the payload with `"type":"response.create"`
+- worker code now marshals the outbound payload before passing it into `openaiws`
+- document-executor code now does the same thing
+
+### Why this is better
+
+- payload shaping now clearly lives in the worker boundary
+- `openaiws` is thinner and more transport-only
+- we removed one small piece of duplicated schema-ish behavior from the socket layer
+- this creates a cleaner seam for future `openai-go` adoption
+
+## Current Rule Going Forward
+
+For now, the intended rule is:
+
+- worker/runtime code builds Responses payloads
+- `openaiws` sends and receives wire messages
+- stores persist raw JSON plus minimal runtime metadata
+- any future typed adoption from `openai-go` should happen at payload-build or decode boundaries, not inside websocket transport
+
+## What Still Is Not Fully Aligned
+
+We are not yet fully typed against upstream Responses structs.
+
+That means:
+
+- many payloads are still assembled as `map[string]any`
+- many decoded items/events are still handled as raw JSON plus small helper structs
+- `openai-go` is not yet the source of truth for outbound request builders
+
+This is acceptable for now, but it is the next area to improve.
+
+## Recommended Next Small Steps
+
+The next good small steps are:
+
+1. Remove any remaining schema-like helper behavior from `internal/openaiws` so it stays transport-only.
+2. Introduce one worker-side builder boundary for outbound `response.create` payloads.
+3. Start using `openai-go` types selectively at the builder boundary first, not across the whole runtime at once.
+4. Keep storing raw JSON even when typed builders/decoders are introduced.
+
+## Strong Recommendation
+
+Do not try to convert the whole runtime to typed `openai-go` structs in one pass.
+
+The safer direction is:
+
+- first clean up boundaries
+- then type outbound payload building
+- then type selected decode points where it materially helps
+- keep raw JSON persistence the whole time
+
+That keeps the runtime close to Responses shape without tying transport, persistence, and orchestration together too early.
+
+## Relevant Files
+
+- `docs/OPENAI_GO_EXPLORATION.md`
+- `docs/OPENAI_WS_RUNTIME.md`
+- `docs/ARCHITECTURE.md`
+- `docs/API_RUNTIME.md`
+- `docs/WORKER_RUNTIME.md`
+- `internal/openaiws/event.go`
+- `internal/openaiws/session.go`
+- `internal/worker/actor.go`
+- `internal/worker/docexec.go`
+- `internal/threadstore/store.go`
+- `internal/postgresstore/store.go`
+

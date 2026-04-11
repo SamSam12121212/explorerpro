@@ -1333,7 +1333,12 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
-	logEvent, err := openaiws.NewResponseCreateEvent(eventID, payload)
+	logPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal response.create payload for log: %w", err)
+	}
+
+	logEvent, err := openaiws.NewResponseCreateEvent(eventID, logPayload)
 	if err != nil {
 		return err
 	}
@@ -1348,7 +1353,12 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
-	event, err := openaiws.NewResponseCreateEvent(eventID, wirePayload)
+	wirePayloadJSON, err := json.Marshal(wirePayload)
+	if err != nil {
+		return fmt.Errorf("marshal response.create payload for wire: %w", err)
+	}
+
+	event, err := openaiws.NewResponseCreateEvent(eventID, wirePayloadJSON)
 	if err != nil {
 		return err
 	}

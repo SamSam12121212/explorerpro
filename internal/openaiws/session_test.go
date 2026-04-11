@@ -10,10 +10,10 @@ import (
 )
 
 func TestNewResponseCreateEvent(t *testing.T) {
-	event, err := NewResponseCreateEvent("evt_123", map[string]any{
-		"model": "gpt-5.4",
-		"input": "hello",
-	})
+	event, err := NewResponseCreateEvent("evt_123", json.RawMessage(`{
+		"model":"gpt-5.4",
+		"input":"hello"
+	}`))
 	if err != nil {
 		t.Fatalf("NewResponseCreateEvent() error = %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSessionConnectSendReceiveClose(t *testing.T) {
 		t.Fatalf("Authorization header = %q, want %q", got, "Bearer test-key")
 	}
 
-	event, err := NewResponseCreateEvent("evt_123", map[string]any{"model": "gpt-5.4"})
+	event, err := NewResponseCreateEvent("evt_123", json.RawMessage(`{"model":"gpt-5.4"}`))
 	if err != nil {
 		t.Fatalf("NewResponseCreateEvent() error = %v", err)
 	}
@@ -161,7 +161,7 @@ func TestSessionSendDisconnectsOnTransportError(t *testing.T) {
 		t.Fatalf("Connect() error = %v", err)
 	}
 
-	event, err := NewResponseCreateEvent("evt_123", map[string]any{"model": "gpt-5.4"})
+	event, err := NewResponseCreateEvent("evt_123", json.RawMessage(`{"model":"gpt-5.4"}`))
 	if err != nil {
 		t.Fatalf("NewResponseCreateEvent() error = %v", err)
 	}

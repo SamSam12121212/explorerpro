@@ -356,7 +356,12 @@ func (e *documentExec) openSessionAndQuery(ctx context.Context, payload map[stri
 	}
 	defer session.Close()
 
-	event, err := openaiws.NewResponseCreateEvent("doc-query", payload)
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("doc-query", payloadJSON)
 	if err != nil {
 		return "", "", fmt.Errorf("build document response.create event: %w", err)
 	}
@@ -373,7 +378,12 @@ func (e *documentExec) executePayloadLocked(ctx context.Context, entry *document
 		return "", "", err
 	}
 
-	event, err := openaiws.NewResponseCreateEvent("doc-query", payload)
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("doc-query", payloadJSON)
 	if err != nil {
 		return "", "", fmt.Errorf("build document response.create event: %w", err)
 	}

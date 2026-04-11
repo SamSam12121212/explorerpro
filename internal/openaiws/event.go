@@ -1,6 +1,7 @@
 package openaiws
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -39,42 +40,60 @@ func (t EventType) IsTerminal() bool {
 }
 
 type ClientEvent struct {
-	Type    EventType      `json:"type"`
-	EventID string         `json:"-"`
-	Payload map[string]any `json:"-"`
+	Type    EventType       `json:"type"`
+	EventID string          `json:"-"`
+	Payload json.RawMessage `json:"-"`
 }
 
-func NewResponseCreateEvent(eventID string, response any) (ClientEvent, error) {
-	payload, err := json.Marshal(response)
-	if err != nil {
-		return ClientEvent{}, fmt.Errorf("marshal response payload: %w", err)
-	}
-
-	fields := map[string]any{}
-	if err := json.Unmarshal(payload, &fields); err != nil {
-		return ClientEvent{}, fmt.Errorf("decode response payload object: %w", err)
+func NewResponseCreateEvent(eventID string, payload json.RawMessage) (ClientEvent, error) {
+	trimmed := bytes.TrimSpace(payload)
+	if err := validateJSONObjectPayload(trimmed); err != nil {
+		return ClientEvent{}, fmt.Errorf("validate response payload: %w", err)
 	}
 
 	return ClientEvent{
 		Type:    EventTypeResponseCreate,
 		EventID: eventID,
-		Payload: fields,
+		Payload: append(json.RawMessage(nil), trimmed...),
 	}, nil
 }
 
 func (e ClientEvent) Bytes() ([]byte, error) {
-	payload := make(map[string]any, len(e.Payload)+2)
-	payload["type"] = e.Type
-	for key, value := range e.Payload {
-		payload[key] = value
+	payload := bytes.TrimSpace(e.Payload)
+	if err := validateJSONObjectPayload(payload); err != nil {
+		return nil, fmt.Errorf("validate client event payload: %w", err)
 	}
 
-	encoded, err := json.Marshal(payload)
+	encodedType, err := json.Marshal(e.Type)
 	if err != nil {
-		return nil, fmt.Errorf("marshal client event: %w", err)
+		return nil, fmt.Errorf("marshal client event type: %w", err)
 	}
+
+	inner := bytes.TrimSpace(payload[1 : len(payload)-1])
+	encoded := make([]byte, 0, len(payload)+len(encodedType)+16)
+	encoded = append(encoded, '{')
+	encoded = append(encoded, []byte(`"type":`)...)
+	encoded = append(encoded, encodedType...)
+	if len(inner) > 0 {
+		encoded = append(encoded, ',')
+		encoded = append(encoded, inner...)
+	}
+	encoded = append(encoded, '}')
 
 	return encoded, nil
+}
+
+func validateJSONObjectPayload(payload json.RawMessage) error {
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is required")
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return fmt.Errorf("payload must be a JSON object: %w", err)
+	}
+
+	return nil
 }
 
 type EventError struct {

@@ -523,7 +523,7 @@ func TestSendResponseCreateReconnectsAfterStaleSocket(t *testing.T) {
 		},
 	}
 
-	event, err := openaiws.NewResponseCreateEvent("evt_retry", map[string]any{"model": "gpt-5.4"})
+	event, err := openaiws.NewResponseCreateEvent("evt_retry", json.RawMessage(`{"model":"gpt-5.4"}`))
 	if err != nil {
 		t.Fatalf("NewResponseCreateEvent() error = %v", err)
 	}
