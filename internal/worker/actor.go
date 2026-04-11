@@ -45,6 +45,7 @@ type threadActorConfig struct {
 	Logger         *slog.Logger
 	Store          actorStore
 	ThreadDocs     threadDocumentStore
+	DocExec        *documentExec
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -85,6 +86,7 @@ type threadActor struct {
 	logger       *slog.Logger
 	store        actorStore
 	threadDocs   threadDocumentStore
+	docExec      *documentExec
 	blob         *blobstore.LocalStore
 	cfg          openaiws.Config
 	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -121,6 +123,7 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		logger:         cfg.Logger,
 		store:          cfg.Store,
 		threadDocs:     cfg.ThreadDocs,
+		docExec:        cfg.DocExec,
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
 		publish:        cfg.Publish,
@@ -1696,7 +1699,7 @@ func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 }
 
 func (a *threadActor) handlePendingDocumentQuery(meta threadstore.ThreadMeta, callID string, req docQueryRequest) error {
-	output := a.buildDocumentQueryStubOutput(meta.ID, req)
+	output := a.executeDocumentQuery(meta, req)
 
 	outputItem, err := json.Marshal(map[string]any{
 		"type":    "function_call_output",
@@ -1704,7 +1707,7 @@ func (a *threadActor) handlePendingDocumentQuery(meta threadstore.ThreadMeta, ca
 		"output":  output,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal document query stub output: %w", err)
+		return fmt.Errorf("marshal document query output: %w", err)
 	}
 
 	cmdID, err := idgen.New("cmd")
@@ -1731,15 +1734,15 @@ func (a *threadActor) handlePendingDocumentQuery(meta threadstore.ThreadMeta, ca
 	})
 }
 
-func (a *threadActor) buildDocumentQueryStubOutput(threadID string, req docQueryRequest) string {
+func (a *threadActor) executeDocumentQuery(meta threadstore.ThreadMeta, req docQueryRequest) string {
 	if a.threadDocs == nil {
 		return `{"error":"document store not available"}`
 	}
 
-	attached, err := a.threadDocs.FilterAttached(a.ctx, threadID, req.DocumentIDs)
+	attached, err := a.threadDocs.FilterAttached(a.ctx, meta.ID, req.DocumentIDs)
 	if err != nil {
 		a.logger.Warn("failed to validate attached documents for tool call",
-			"thread_id", threadID,
+			"thread_id", meta.ID,
 			"error", err,
 		)
 		return `{"error":"failed to validate attached documents"}`
@@ -1766,13 +1769,33 @@ func (a *threadActor) buildDocumentQueryStubOutput(threadID string, req docQuery
 		return string(result)
 	}
 
-	result, _ := json.Marshal(map[string]any{
-		"status":       "not_yet_implemented",
-		"document_ids": req.DocumentIDs,
-		"task":         req.Task,
-		"message":      "Document querying is not yet implemented. The documents are attached and validated, but the document execution session is not built yet.",
+	if a.docExec == nil {
+		result, _ := json.Marshal(map[string]any{
+			"status":       "not_yet_implemented",
+			"document_ids": req.DocumentIDs,
+			"task":         req.Task,
+			"message":      "Document executor is not configured.",
+		})
+		return string(result)
+	}
+
+	a.logger.Info("executing document query",
+		"document_ids", req.DocumentIDs,
+		"task_length", len(req.Task),
+		"model", meta.Model,
+	)
+
+	results := a.docExec.Execute(a.ctx, docExecRequest{
+		ThreadID:    meta.ID,
+		DocumentIDs: req.DocumentIDs,
+		Task:        req.Task,
+		Model:       meta.Model,
 	})
-	return string(result)
+
+	resultJSON, _ := json.Marshal(map[string]any{
+		"results": results,
+	})
+	return string(resultJSON)
 }
 
 func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {

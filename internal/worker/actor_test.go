@@ -1169,7 +1169,7 @@ func TestDecodeDocQueryRequestRejectsEmptyTask(t *testing.T) {
 	}
 }
 
-func TestBuildDocumentQueryStubOutputReportsUnattachedDocs(t *testing.T) {
+func TestExecuteDocumentQueryReportsUnattachedDocs(t *testing.T) {
 	t.Parallel()
 
 	actor := &threadActor{
@@ -1181,7 +1181,8 @@ func TestBuildDocumentQueryStubOutputReportsUnattachedDocs(t *testing.T) {
 		},
 	}
 
-	output := actor.buildDocumentQueryStubOutput("thread_123", docQueryRequest{
+	meta := threadstore.ThreadMeta{ID: "thread_123"}
+	output := actor.executeDocumentQuery(meta, docQueryRequest{
 		DocumentIDs: []string{"doc_1", "doc_missing"},
 		Task:        "summarize",
 	})
@@ -1200,7 +1201,7 @@ func TestBuildDocumentQueryStubOutputReportsUnattachedDocs(t *testing.T) {
 	}
 }
 
-func TestBuildDocumentQueryStubOutputReturnsStubForValidDocs(t *testing.T) {
+func TestExecuteDocumentQueryReturnsStubWhenNoExecutor(t *testing.T) {
 	t.Parallel()
 
 	actor := &threadActor{
@@ -1212,7 +1213,8 @@ func TestBuildDocumentQueryStubOutputReturnsStubForValidDocs(t *testing.T) {
 		},
 	}
 
-	output := actor.buildDocumentQueryStubOutput("thread_123", docQueryRequest{
+	meta := threadstore.ThreadMeta{ID: "thread_123"}
+	output := actor.executeDocumentQuery(meta, docQueryRequest{
 		DocumentIDs: []string{"doc_1", "doc_2"},
 		Task:        "summarize findings",
 	})
@@ -1223,9 +1225,6 @@ func TestBuildDocumentQueryStubOutputReturnsStubForValidDocs(t *testing.T) {
 	}
 	if parsed["status"] != "not_yet_implemented" {
 		t.Fatalf("status = %v, want not_yet_implemented", parsed["status"])
-	}
-	if parsed["task"] != "summarize findings" {
-		t.Fatalf("task = %v, want %q", parsed["task"], "summarize findings")
 	}
 }
 

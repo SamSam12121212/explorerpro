@@ -2,10 +2,12 @@ package threaddocstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"explorer/internal/docstore"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -89,6 +91,31 @@ LIMIT $2`, threadID, limit)
 	}
 
 	return documents, rows.Err()
+}
+
+func (s *Store) GetLineage(ctx context.Context, threadID, documentID string) (string, error) {
+	var responseID string
+	err := s.pool.QueryRow(ctx, `
+	SELECT latest_response_id FROM thread_documents
+	WHERE thread_id = $1 AND document_id = $2`, threadID, documentID).Scan(&responseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get thread document lineage for %s/%s: %w", threadID, documentID, err)
+	}
+	return responseID, nil
+}
+
+func (s *Store) UpdateLineage(ctx context.Context, threadID, documentID, responseID string) error {
+	_, err := s.pool.Exec(ctx, `
+	UPDATE thread_documents
+	SET latest_response_id = $1, initialized_at = COALESCE(initialized_at, now()), last_used_at = now()
+	WHERE thread_id = $2 AND document_id = $3`, responseID, threadID, documentID)
+	if err != nil {
+		return fmt.Errorf("update thread document lineage for %s/%s: %w", threadID, documentID, err)
+	}
+	return nil
 }
 
 func (s *Store) FilterAttached(ctx context.Context, threadID string, documentIDs []string) ([]string, error) {

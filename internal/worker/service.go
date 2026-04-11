@@ -13,6 +13,7 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/config"
+	"explorer/internal/docstore"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
@@ -42,6 +43,7 @@ type Service struct {
 	workerID     string
 	store        *threadstore.Store
 	threadDocs   *threaddocstore.Store
+	docExec      *documentExec
 	sweepStore   serviceSweepStore
 	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
 
@@ -66,6 +68,19 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	}
 
 	store := threadstore.New(runtime.Redis().Raw(), postgresstore.New(runtime.Postgres().Pool()))
+	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
+	docStore := docstore.New(runtime.Postgres().Pool())
+
+	sessionFactory := func() *openaiws.Session { return openaiws.NewSession(openAIConfig, dialer) }
+
+	docExec := newDocumentExec(documentExecConfig{
+		Logger:         logger.With("component", "docexec"),
+		Blob:           runtime.Blob(),
+		OpenAIConfig:   openAIConfig,
+		SessionFactory: sessionFactory,
+		Docs:           docStore,
+		ThreadDocs:     threadDocs,
+	})
 
 	return &Service{
 		cfg:          cfg,
@@ -75,7 +90,8 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		openAIConfig: openAIConfig,
 		workerID:     resolveWorkerID(cfg.ServiceName),
 		store:        store,
-		threadDocs:   threaddocstore.New(runtime.Postgres().Pool()),
+		threadDocs:   threadDocs,
+		docExec:      docExec,
 		sweepStore:   store,
 		actors:       map[string]*threadActor{},
 	}, nil
@@ -226,6 +242,7 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		Logger:         s.logger.With("thread_id", threadID),
 		Store:          s.store,
 		ThreadDocs:     s.threadDocs,
+		DocExec:        s.docExec,
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,
 		Publish:        s.publishCommand,

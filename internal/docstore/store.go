@@ -97,6 +97,17 @@ func (s *Store) List(ctx context.Context, limit int64) ([]Document, error) {
 	return docs, rows.Err()
 }
 
+func (s *Store) UpdateBaseLineage(ctx context.Context, id, baseResponseID, baseModel string) error {
+	_, err := s.pool.Exec(ctx, `
+	UPDATE documents
+	SET base_response_id = $2, base_model = $3, base_initialized_at = now(), updated_at = now()
+	WHERE id = $1`, id, baseResponseID, baseModel)
+	if err != nil {
+		return fmt.Errorf("update document base lineage: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateStatus(ctx context.Context, id, status, manifestRef string, pageCount int, errMsg string) error {
 	_, err := s.pool.Exec(ctx, `
 UPDATE documents SET status = $2, manifest_ref = $3, page_count = $4, error = $5, updated_at = now()
