@@ -12,6 +12,7 @@ import (
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
+	"explorer/internal/threaddocstore"
 )
 
 func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T) {
@@ -200,6 +201,9 @@ func TestExecuteReusesThreadDocumentSession(t *testing.T) {
 	if got := threadDocs.Lineage("thread_1", doc.ID); got != "resp_query_2" {
 		t.Fatalf("stored lineage = %q, want %q", got, "resp_query_2")
 	}
+	if got := threadDocs.LineageModel("thread_1", doc.ID); got != "gpt-5.4" {
+		t.Fatalf("stored lineage model = %q, want %q", got, "gpt-5.4")
+	}
 	if got := docs.Document(doc.ID).BaseResponseID; got != "resp_warm" {
 		t.Fatalf("base_response_id = %q, want %q", got, "resp_warm")
 	}
@@ -221,6 +225,121 @@ func TestExecuteReusesThreadDocumentSession(t *testing.T) {
 	secondQueryPayload := decodeSentResponseCreateAt(t, conn, 2)
 	if got := secondQueryPayload["previous_response_id"]; got != "resp_query_1" {
 		t.Fatalf("second query previous_response_id = %v, want %q", got, "resp_query_1")
+	}
+}
+
+func TestExecuteUsesDocumentQueryModel(t *testing.T) {
+	ctx := context.Background()
+	blob := newTestBlobStore(t)
+
+	doc := writeReadyTestDocument(t, ctx, blob, "doc_1", "report.pdf")
+	doc.QueryModel = "gpt-5.4-mini"
+
+	conn := &fakeDocConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_warm"}}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_warm"}`),
+			[]byte(`{"type":"response.created","response":{"id":"resp_query"}}`),
+			[]byte(`{"type":"response.output_text.delta","delta":"mini"}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_query"}`),
+		},
+	}
+
+	exec := newDocumentExec(documentExecConfig{
+		Blob: blob,
+		SessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(testOpenAIWSConfig(), &fakeDocDialer{conn: conn})
+		},
+		Docs: &fakeExecDocStore{
+			documents: map[string]docstore.Document{
+				doc.ID: doc,
+			},
+		},
+		ThreadDocs:     &fakeExecThreadDocStore{lineage: map[string]string{}, models: map[string]string{}},
+		SessionIdleTTL: time.Hour,
+		SessionMaxTTL:  time.Hour,
+		MaxParallel:    1,
+	})
+
+	results := exec.Execute(ctx, docExecRequest{
+		ThreadID:    "thread_1",
+		DocumentIDs: []string{doc.ID},
+		Task:        "Summarize the document.",
+		Model:       "gpt-5.4",
+	})
+
+	if len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("unexpected results = %#v", results)
+	}
+
+	warmPayload := decodeSentResponseCreateAt(t, conn, 0)
+	if got := warmPayload["model"]; got != "gpt-5.4-mini" {
+		t.Fatalf("warmup model = %v, want %q", got, "gpt-5.4-mini")
+	}
+
+	queryPayload := decodeSentResponseCreateAt(t, conn, 1)
+	if got := queryPayload["model"]; got != "gpt-5.4-mini" {
+		t.Fatalf("query model = %v, want %q", got, "gpt-5.4-mini")
+	}
+}
+
+func TestExecuteKeepsExistingThreadLineageModelAfterDocumentModelChange(t *testing.T) {
+	ctx := context.Background()
+	blob := newTestBlobStore(t)
+
+	doc := writeReadyTestDocument(t, ctx, blob, "doc_1", "report.pdf")
+	doc.QueryModel = "gpt-5.4-nano"
+
+	conn := &fakeDocConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_query"}}`),
+			[]byte(`{"type":"response.output_text.delta","delta":"still-mini"}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_query"}`),
+		},
+	}
+
+	threadDocs := &fakeExecThreadDocStore{
+		lineage: map[string]string{
+			threadDocKey("thread_1", doc.ID): "resp_prev",
+		},
+		models: map[string]string{
+			threadDocKey("thread_1", doc.ID): "gpt-5.4-mini",
+		},
+	}
+
+	exec := newDocumentExec(documentExecConfig{
+		Blob: blob,
+		SessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(testOpenAIWSConfig(), &fakeDocDialer{conn: conn})
+		},
+		Docs: &fakeExecDocStore{
+			documents: map[string]docstore.Document{
+				doc.ID: doc,
+			},
+		},
+		ThreadDocs:     threadDocs,
+		SessionIdleTTL: time.Hour,
+		SessionMaxTTL:  time.Hour,
+		MaxParallel:    1,
+	})
+
+	results := exec.Execute(ctx, docExecRequest{
+		ThreadID:    "thread_1",
+		DocumentIDs: []string{doc.ID},
+		Task:        "Continue the existing conversation.",
+		Model:       "gpt-5.4",
+	})
+
+	if len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("unexpected results = %#v", results)
+	}
+
+	queryPayload := decodeSentResponseCreateAt(t, conn, 0)
+	if got := queryPayload["model"]; got != "gpt-5.4-mini" {
+		t.Fatalf("query model = %v, want %q", got, "gpt-5.4-mini")
+	}
+	if got := queryPayload["previous_response_id"]; got != "resp_prev" {
+		t.Fatalf("previous_response_id = %v, want %q", got, "resp_prev")
 	}
 }
 
@@ -498,21 +617,31 @@ func (s *fakeExecDocStore) Document(id string) docstore.Document {
 type fakeExecThreadDocStore struct {
 	mu      sync.Mutex
 	lineage map[string]string
+	models  map[string]string
 }
 
-func (s *fakeExecThreadDocStore) GetLineage(_ context.Context, threadID, documentID string) (string, error) {
+func (s *fakeExecThreadDocStore) GetLineage(_ context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lineage[threadDocKey(threadID, documentID)], nil
+	key := threadDocKey(threadID, documentID)
+	return threaddocstore.DocumentLineage{
+		ResponseID: s.lineage[key],
+		Model:      s.models[key],
+	}, nil
 }
 
-func (s *fakeExecThreadDocStore) UpdateLineage(_ context.Context, threadID, documentID, responseID string) error {
+func (s *fakeExecThreadDocStore) UpdateLineage(_ context.Context, threadID, documentID, responseID, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lineage == nil {
 		s.lineage = map[string]string{}
 	}
-	s.lineage[threadDocKey(threadID, documentID)] = responseID
+	if s.models == nil {
+		s.models = map[string]string{}
+	}
+	key := threadDocKey(threadID, documentID)
+	s.lineage[key] = responseID
+	s.models[key] = model
 	return nil
 }
 
@@ -520,6 +649,12 @@ func (s *fakeExecThreadDocStore) Lineage(threadID, documentID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lineage[threadDocKey(threadID, documentID)]
+}
+
+func (s *fakeExecThreadDocStore) LineageModel(threadID, documentID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.models[threadDocKey(threadID, documentID)]
 }
 
 func threadDocKey(threadID, documentID string) string {
@@ -557,6 +692,7 @@ func writeReadyTestDocument(t *testing.T, ctx context.Context, blob *blobstore.L
 		Filename:    filename,
 		ManifestRef: manifestRef,
 		Status:      "ready",
+		QueryModel:  "gpt-5.4",
 	}
 }
 

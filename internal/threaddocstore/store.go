@@ -11,6 +11,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type DocumentLineage struct {
+	ResponseID string
+	Model      string
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -52,6 +57,7 @@ SELECT
     d.manifest_ref,
     d.page_count,
     d.dpi,
+    d.query_model,
     d.base_response_id,
     d.base_model,
     d.base_initialized_at,
@@ -79,6 +85,7 @@ LIMIT $2`, threadID, limit)
 			&document.ManifestRef,
 			&document.PageCount,
 			&document.DPI,
+			&document.QueryModel,
 			&document.BaseResponseID,
 			&document.BaseModel,
 			&document.BaseInitializedAt,
@@ -93,25 +100,25 @@ LIMIT $2`, threadID, limit)
 	return documents, rows.Err()
 }
 
-func (s *Store) GetLineage(ctx context.Context, threadID, documentID string) (string, error) {
-	var responseID string
+func (s *Store) GetLineage(ctx context.Context, threadID, documentID string) (DocumentLineage, error) {
+	var lineage DocumentLineage
 	err := s.pool.QueryRow(ctx, `
-	SELECT latest_response_id FROM thread_documents
-	WHERE thread_id = $1 AND document_id = $2`, threadID, documentID).Scan(&responseID)
+	SELECT latest_response_id, latest_model FROM thread_documents
+	WHERE thread_id = $1 AND document_id = $2`, threadID, documentID).Scan(&lineage.ResponseID, &lineage.Model)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return DocumentLineage{}, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("get thread document lineage for %s/%s: %w", threadID, documentID, err)
+		return DocumentLineage{}, fmt.Errorf("get thread document lineage for %s/%s: %w", threadID, documentID, err)
 	}
-	return responseID, nil
+	return lineage, nil
 }
 
-func (s *Store) UpdateLineage(ctx context.Context, threadID, documentID, responseID string) error {
+func (s *Store) UpdateLineage(ctx context.Context, threadID, documentID, responseID, model string) error {
 	_, err := s.pool.Exec(ctx, `
 	UPDATE thread_documents
-	SET latest_response_id = $1, initialized_at = COALESCE(initialized_at, now()), last_used_at = now()
-	WHERE thread_id = $2 AND document_id = $3`, responseID, threadID, documentID)
+	SET latest_response_id = $1, latest_model = $2, initialized_at = COALESCE(initialized_at, now()), last_used_at = now()
+	WHERE thread_id = $3 AND document_id = $4`, responseID, model, threadID, documentID)
 	if err != nil {
 		return fmt.Errorf("update thread document lineage for %s/%s: %w", threadID, documentID, err)
 	}

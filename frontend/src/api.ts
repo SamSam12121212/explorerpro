@@ -34,6 +34,15 @@ export async function apiPost<T>(path: string, body: unknown) {
   return readJson<T>(response);
 }
 
+export async function apiPatch<T>(path: string, body: unknown) {
+  const response = await fetch(path, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return readJson<T>(response);
+}
+
 export async function uploadImage(file: File) {
   const formData = new FormData();
   formData.append("file", file, file.name || "image");

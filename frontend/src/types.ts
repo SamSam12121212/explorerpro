@@ -90,6 +90,10 @@ export interface DocumentEntry {
   manifest_ref?: string;
   page_count: number;
   dpi: number;
+  query_model: string;
+  base_response_id?: string;
+  base_model?: string;
+  base_initialized_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -109,6 +113,10 @@ export interface DocumentListResponse {
 export interface DocumentUploadResponse {
   document: DocumentEntry;
   cmd_id: string;
+}
+
+export interface DocumentResponse {
+  document: DocumentEntry;
 }
 
 export interface CollectionEntry {

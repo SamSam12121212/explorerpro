@@ -131,6 +131,10 @@ SELECT
     d.manifest_ref,
     d.page_count,
     d.dpi,
+    d.query_model,
+    d.base_response_id,
+    d.base_model,
+    d.base_initialized_at,
     d.created_at,
     d.updated_at
 FROM collection_documents cd
@@ -155,6 +159,10 @@ LIMIT $2`, collectionID, limit)
 			&document.ManifestRef,
 			&document.PageCount,
 			&document.DPI,
+			&document.QueryModel,
+			&document.BaseResponseID,
+			&document.BaseModel,
+			&document.BaseInitializedAt,
 			&document.CreatedAt,
 			&document.UpdatedAt,
 		); err != nil {

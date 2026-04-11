@@ -20,11 +20,23 @@ import (
 )
 
 const maxDocUploadBytes = 50 << 20
+const defaultDocumentQueryModel = "gpt-5.4"
+
+var allowedDocumentQueryModels = map[string]struct{}{
+	"gpt-5.4":      {},
+	"gpt-5.4-mini": {},
+	"gpt-5.4-nano": {},
+}
 
 type documentAPI struct {
 	logger  *slog.Logger
 	runtime *platform.Runtime
 	store   *docstore.Store
+}
+
+type updateDocumentRequest struct {
+	QueryModel        string `json:"query_model"`
+	ClearBaseResponse bool   `json:"clear_base_response"`
 }
 
 func newDocumentAPI(logger *slog.Logger, runtime *platform.Runtime) *documentAPI {
@@ -58,11 +70,14 @@ func (a *documentAPI) handleDocumentRoutes(w http.ResponseWriter, r *http.Reques
 
 	switch {
 	case len(parts) == 1:
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			a.handleGetDocument(w, r, docID)
+		case http.MethodPatch:
+			a.handleUpdateDocument(w, r, docID)
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodPatch)
 		}
-		a.handleGetDocument(w, r, docID)
 	case len(parts) == 2 && parts[1] == "source":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -156,13 +171,14 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 
 	now := time.Now().UTC()
 	doc := docstore.Document{
-		ID:        docID,
-		Filename:  filename,
-		SourceRef: sourceRef,
-		Status:    "pending",
-		DPI:       doccmd.DefaultDPI,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         docID,
+		Filename:   filename,
+		SourceRef:  sourceRef,
+		Status:     "pending",
+		DPI:        doccmd.DefaultDPI,
+		QueryModel: defaultDocumentQueryModel,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 
 	if err := a.store.Create(r.Context(), doc); err != nil {
@@ -217,6 +233,40 @@ func (a *documentAPI) handleGetDocument(w http.ResponseWriter, r *http.Request, 
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("get document: %v", err))
 		return
 	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"document": presentDocument(doc),
+	})
+}
+
+func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Request, docID string) {
+	var req updateDocumentRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	queryModel, err := normalizeDocumentQueryModel(req.QueryModel)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	doc, err := a.store.UpdateSettings(r.Context(), docID, queryModel, req.ClearBaseResponse)
+	if errors.Is(err, docstore.ErrDocumentNotFound) {
+		writeErrorJSON(w, http.StatusNotFound, "document not found")
+		return
+	}
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("update document: %v", err))
+		return
+	}
+
+	a.logger.Info("document settings updated",
+		"document_id", docID,
+		"query_model", queryModel,
+		"clear_base_response", req.ClearBaseResponse,
+	)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"document": presentDocument(doc),
@@ -281,14 +331,15 @@ func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, 
 
 func presentDocument(d docstore.Document) map[string]any {
 	entry := map[string]any{
-		"id":         d.ID,
-		"filename":   d.Filename,
-		"source_ref": d.SourceRef,
-		"status":     d.Status,
-		"page_count": d.PageCount,
-		"dpi":        d.DPI,
-		"created_at": d.CreatedAt.UTC().Format(time.RFC3339),
-		"updated_at": d.UpdatedAt.UTC().Format(time.RFC3339),
+		"id":          d.ID,
+		"filename":    d.Filename,
+		"source_ref":  d.SourceRef,
+		"status":      d.Status,
+		"page_count":  d.PageCount,
+		"dpi":         d.DPI,
+		"query_model": d.QueryModel,
+		"created_at":  d.CreatedAt.UTC().Format(time.RFC3339),
+		"updated_at":  d.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	if d.Error != "" {
 		entry["error"] = d.Error
@@ -296,5 +347,25 @@ func presentDocument(d docstore.Document) map[string]any {
 	if d.ManifestRef != "" {
 		entry["manifest_ref"] = d.ManifestRef
 	}
+	if d.BaseResponseID != "" {
+		entry["base_response_id"] = d.BaseResponseID
+	}
+	if d.BaseModel != "" {
+		entry["base_model"] = d.BaseModel
+	}
+	if d.BaseInitializedAt != nil {
+		entry["base_initialized_at"] = d.BaseInitializedAt.UTC().Format(time.RFC3339)
+	}
 	return entry
+}
+
+func normalizeDocumentQueryModel(raw string) (string, error) {
+	model := strings.TrimSpace(raw)
+	if model == "" {
+		return "", fmt.Errorf("query_model is required")
+	}
+	if _, ok := allowedDocumentQueryModels[model]; !ok {
+		return "", fmt.Errorf("unsupported query_model %q", model)
+	}
+	return model, nil
 }

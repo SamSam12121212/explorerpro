@@ -17,6 +17,7 @@ import (
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 )
 
@@ -28,8 +29,8 @@ type docExecDocStore interface {
 }
 
 type docExecThreadDocStore interface {
-	GetLineage(ctx context.Context, threadID, documentID string) (string, error)
-	UpdateLineage(ctx context.Context, threadID, documentID, responseID string) error
+	GetLineage(ctx context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error)
+	UpdateLineage(ctx context.Context, threadID, documentID, responseID, model string) error
 }
 
 type documentExecConfig struct {
@@ -65,6 +66,7 @@ type documentSession struct {
 	mu               sync.Mutex
 	session          *openaiws.Session
 	latestResponseID string
+	latestModel      string
 	connectedAt      time.Time
 	lastUsedAt       time.Time
 }
@@ -172,12 +174,12 @@ func (e *documentExec) executeOne(ctx context.Context, req docExecRequest, docum
 
 	entry := e.getSession(req.ThreadID, documentID)
 
-	responseID, answer, err := e.executeOneWithSession(ctx, entry, req, doc, manifest, log)
+	responseID, answer, model, err := e.executeOneWithSession(ctx, entry, req, doc, manifest, req.Model, log)
 	if err != nil {
 		return docExecResult{DocumentID: documentID, DocumentName: doc.Filename, Error: err.Error()}
 	}
 
-	if err := e.threadDocs.UpdateLineage(ctx, req.ThreadID, documentID, responseID); err != nil {
+	if err := e.threadDocs.UpdateLineage(ctx, req.ThreadID, documentID, responseID, model); err != nil {
 		log.Warn("failed to persist thread document lineage", "error", err)
 	}
 
@@ -188,22 +190,6 @@ func (e *documentExec) executeOne(ctx context.Context, req docExecRequest, docum
 		Answer:       answer,
 		ResponseID:   responseID,
 	}
-}
-
-func (e *documentExec) resolveLineage(ctx context.Context, threadID, documentID string, doc docstore.Document) (string, error) {
-	threadLineage, err := e.threadDocs.GetLineage(ctx, threadID, documentID)
-	if err != nil {
-		return "", fmt.Errorf("load thread document lineage: %w", err)
-	}
-	if threadLineage != "" {
-		return threadLineage, nil
-	}
-
-	if doc.BaseResponseID != "" {
-		return doc.BaseResponseID, nil
-	}
-
-	return "", nil
 }
 
 func (e *documentExec) loadManifest(ctx context.Context, manifestRef string) (docsplitter.Manifest, error) {
@@ -225,68 +211,107 @@ func (e *documentExec) executeOneWithSession(
 	req docExecRequest,
 	doc docstore.Document,
 	manifest docsplitter.Manifest,
+	fallbackModel string,
 	log *slog.Logger,
-) (string, string, error) {
+) (string, string, string, error) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	previousResponseID, err := e.resolveLineageLocked(ctx, entry, req.ThreadID, doc.ID, doc)
+	previousResponseID, model, err := e.resolveLineageLocked(ctx, entry, req.ThreadID, doc.ID, doc, fallbackModel)
 	if err != nil {
 		log.Warn("failed to resolve document lineage", "error", err)
-		return "", "", fmt.Errorf("lineage resolution failed: %w", err)
+		return "", "", "", fmt.Errorf("lineage resolution failed: %w", err)
 	}
 
 	if previousResponseID == "" {
-		log.Info("warming document (no existing lineage)", "page_count", manifest.PageCount)
-		warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, req.Model)
+		log.Info("warming document (no existing lineage)", "page_count", manifest.PageCount, "model", model)
+		warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, model)
 		if warmErr != nil {
 			log.Warn("document warmup failed", "error", warmErr)
-			return "", "", fmt.Errorf("warmup failed: %w", warmErr)
+			return "", "", "", fmt.Errorf("warmup failed: %w", warmErr)
 		}
-		if err := e.docs.UpdateBaseLineage(ctx, doc.ID, warmupResponseID, req.Model); err != nil {
+		if err := e.docs.UpdateBaseLineage(ctx, doc.ID, warmupResponseID, model); err != nil {
 			log.Warn("failed to persist document base lineage", "error", err)
 		}
 		previousResponseID = warmupResponseID
 		log.Info("document warmup completed", "base_response_id", warmupResponseID)
 	}
 
-	log.Info("sending document query", "previous_response_id", previousResponseID)
-	responseID, answer, err := e.queryDocumentLocked(ctx, entry, previousResponseID, req.Task, req.Model)
+	log.Info("sending document query", "previous_response_id", previousResponseID, "model", model)
+	responseID, answer, err := e.queryDocumentLocked(ctx, entry, previousResponseID, req.Task, model)
 	if err == nil {
-		return responseID, answer, nil
+		return responseID, answer, model, nil
 	}
 
 	log.Warn("document query failed on live session, retrying on fresh connection", "error", err)
 	e.dropSessionLocked(entry)
 
-	responseID, answer, err = e.queryDocumentLocked(ctx, entry, previousResponseID, req.Task, req.Model)
+	responseID, answer, err = e.queryDocumentLocked(ctx, entry, previousResponseID, req.Task, model)
 	if err == nil {
-		return responseID, answer, nil
+		return responseID, answer, model, nil
 	}
 
 	log.Warn("document query failed after reconnect, rebuilding lineage", "error", err)
 	entry.latestResponseID = ""
+	entry.latestModel = ""
 
-	warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, req.Model)
+	warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, model)
 	if warmErr != nil {
-		return "", "", fmt.Errorf("query failed after rebuild warmup: %w", warmErr)
+		return "", "", "", fmt.Errorf("query failed after rebuild warmup: %w", warmErr)
 	}
-	if err := e.docs.UpdateBaseLineage(ctx, doc.ID, warmupResponseID, req.Model); err != nil {
+	if err := e.docs.UpdateBaseLineage(ctx, doc.ID, warmupResponseID, model); err != nil {
 		log.Warn("failed to persist rebuilt base lineage", "error", err)
 	}
 
-	responseID, answer, err = e.queryDocumentLocked(ctx, entry, warmupResponseID, req.Task, req.Model)
+	responseID, answer, err = e.queryDocumentLocked(ctx, entry, warmupResponseID, req.Task, model)
 	if err != nil {
-		return "", "", fmt.Errorf("query failed after rebuild: %w", err)
+		return "", "", "", fmt.Errorf("query failed after rebuild: %w", err)
 	}
-	return responseID, answer, nil
+	return responseID, answer, model, nil
 }
 
-func (e *documentExec) resolveLineageLocked(ctx context.Context, entry *documentSession, threadID, documentID string, doc docstore.Document) (string, error) {
-	if entry.latestResponseID != "" {
-		return entry.latestResponseID, nil
+func (e *documentExec) resolveLineageLocked(
+	ctx context.Context,
+	entry *documentSession,
+	threadID, documentID string,
+	doc docstore.Document,
+	fallbackModel string,
+) (string, string, error) {
+	defaultModel := resolveDocumentModel(doc, fallbackModel)
+
+	threadLineage, err := e.threadDocs.GetLineage(ctx, threadID, documentID)
+	if err != nil {
+		return "", "", fmt.Errorf("load thread document lineage: %w", err)
 	}
-	return e.resolveLineage(ctx, threadID, documentID, doc)
+	if threadLineage.ResponseID != "" {
+		model := threadLineage.Model
+		if strings.TrimSpace(model) == "" {
+			model = defaultModel
+		}
+		if entry.latestModel != "" && entry.latestModel != model {
+			_ = e.closeSessionLocked(entry, true)
+		}
+		if entry.latestResponseID != "" && entry.latestResponseID != threadLineage.ResponseID {
+			_ = e.closeSessionLocked(entry, true)
+		}
+		entry.latestResponseID = threadLineage.ResponseID
+		entry.latestModel = model
+		return threadLineage.ResponseID, model, nil
+	}
+
+	if entry.latestResponseID != "" {
+		model := entry.latestModel
+		if strings.TrimSpace(model) == "" {
+			model = defaultModel
+		}
+		return entry.latestResponseID, model, nil
+	}
+
+	if doc.BaseResponseID != "" && doc.BaseModel == defaultModel {
+		return doc.BaseResponseID, defaultModel, nil
+	}
+
+	return "", defaultModel, nil
 }
 
 func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSession, doc docstore.Document, manifest docsplitter.Manifest, model string) (string, error) {
@@ -311,7 +336,7 @@ func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSe
 		return "", fmt.Errorf("build document warmup response.create payload: %w", err)
 	}
 
-	responseID, _, err := e.executePayloadLocked(ctx, entry, payload)
+	responseID, _, err := e.executePayloadLocked(ctx, entry, payload, model)
 	if err != nil {
 		return "", fmt.Errorf("warmup session failed: %w", err)
 	}
@@ -346,7 +371,7 @@ func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentS
 	if err != nil {
 		return "", "", fmt.Errorf("build document query response.create payload: %w", err)
 	}
-	return e.executePayloadLocked(ctx, entry, payload)
+	return e.executePayloadLocked(ctx, entry, payload, model)
 }
 
 func (e *documentExec) queryDocument(ctx context.Context, previousResponseID, task, model string) (string, string, error) {
@@ -380,7 +405,7 @@ func (e *documentExec) openSessionAndQuery(ctx context.Context, payload map[stri
 	return streamDocumentResponse(ctx, session)
 }
 
-func (e *documentExec) executePayloadLocked(ctx context.Context, entry *documentSession, payload map[string]any) (string, string, error) {
+func (e *documentExec) executePayloadLocked(ctx context.Context, entry *documentSession, payload map[string]any, model string) (string, string, error) {
 	if err := e.ensureConnectedLocked(ctx, entry); err != nil {
 		return "", "", err
 	}
@@ -406,6 +431,7 @@ func (e *documentExec) executePayloadLocked(ctx context.Context, entry *document
 
 	now := e.currentTime()
 	entry.latestResponseID = responseID
+	entry.latestModel = model
 	entry.lastUsedAt = now
 	if entry.connectedAt.IsZero() {
 		entry.connectedAt = now
@@ -543,9 +569,20 @@ func (e *documentExec) closeSessionLocked(entry *documentSession, clearLineage b
 	entry.connectedAt = time.Time{}
 	if clearLineage {
 		entry.latestResponseID = ""
+		entry.latestModel = ""
 		entry.lastUsedAt = time.Time{}
 	}
 	return err
+}
+
+func resolveDocumentModel(doc docstore.Document, fallback string) string {
+	if model := strings.TrimSpace(doc.QueryModel); model != "" {
+		return model
+	}
+	if model := strings.TrimSpace(fallback); model != "" {
+		return model
+	}
+	return "gpt-5.4"
 }
 
 func streamDocumentResponse(ctx context.Context, session *openaiws.Session) (string, string, error) {

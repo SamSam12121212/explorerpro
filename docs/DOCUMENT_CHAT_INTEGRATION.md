@@ -17,7 +17,7 @@ The goal is that after a full context reset, this file is enough to recover the 
 ## Date
 
 - Previous working state captured on: April 10, 2026
-- Updated: April 11, 2026 (worker-local document executor)
+- Updated: April 12, 2026 (per-document model config + PDF viewer details)
 
 ## Core Product Direction
 
@@ -160,6 +160,23 @@ The `documenthandler` service shell exists in the repo, but after the latest cla
 
 This matters because the worker is the only thing that ever touches OpenAI.
 
+### 10. Per-document model selection is a default for new lineage, not a retroactive migration knob
+
+The latest clarification is:
+
+- a document now has a configurable query model
+- that query model applies when creating new document lineage
+- existing thread-local document lineage keeps using the model it already started with
+- changing a document from `mini` to `nano` should not migrate active thread-local document chains
+- clearing the shared base anchor should not wipe already-established thread-local lineage
+
+That means:
+
+- `documents.query_model` is the default model for new threads or fresh rebuilds
+- `thread_documents.latest_model` is the sticky model for an already-established thread-local document chain
+- `documents.base_model` describes the model used for the shared base anchor
+- if the shared base anchor model no longer matches the document's current default query model, it should be treated as unusable for new threads and rebuilt when needed
+
 ## Architecture Position As Of Now
 
 ### What already exists in the repo
@@ -174,6 +191,7 @@ The current repo already has:
 - thread attachment reads on `GET /threads/{thread_id}` and websocket snapshots
 - chat image attachments
 - chat document attachment hydration and a paperclip attachment viewer
+- an embedded `/doc/:documentId` PDF viewer route with a document-details drawer
 - worker-side generated instruction decoration for attached-document discovery
 - a worker that can lower `image_ref` to `input_image` at send time
 - a `documenthandler` service shell that is now wired into Docker but does nothing yet, but it is not the planned owner of OpenAI document execution
@@ -197,11 +215,12 @@ The database schema supports the lineage model, the worker dispatches document t
 
 Implemented behavior:
 
-- `documents` table now has `base_response_id`, `base_model`, `base_initialized_at` columns
-- `thread_documents` table now has `latest_response_id`, `initialized_at`, `last_used_at` columns
+- `documents` table now has `query_model`, `base_response_id`, `base_model`, `base_initialized_at` columns
+- `thread_documents` table now has `latest_response_id`, `latest_model`, `initialized_at`, `last_used_at` columns
 - the new text columns use safe empty-string defaults and the timestamp columns remain nullable, so existing data is unaffected
 - `docstore.Document` struct reads and writes the new lineage fields
 - `docstore.Store` has `UpdateBaseLineage` for persisting the shared base anchor
+- `docstore.Store` now also persists per-document query-model updates
 - `threaddocstore.Store` has `GetLineage` and `UpdateLineage` for thread-local lineage
 - `threaddocstore` has a `FilterAttached` method for validating document IDs against a thread
 - a `query_attached_documents` tool definition is dynamically injected into the outbound tools list when documents are attached to the thread
@@ -211,8 +230,12 @@ Implemented behavior:
 - after `response.completed`, if the only pending tool is a document query, the worker validates the requested document IDs are attached, executes the query via the document executor, builds a real `function_call_output`, and self-publishes a `thread.submit_tool_output` command
 - the document executor opens a separate worker-owned OpenAI WebSocket session per document query
 - the executor resolves lineage: thread-local first, then shared base anchor, then warmup from scratch
+- the executor now resolves model choice alongside lineage:
+  - existing thread-local lineage keeps using its stored `latest_model`
+  - otherwise the document's current `query_model` is used
+  - shared base anchors are only reused when `base_model` matches the current document default model
 - the warmup sends all page images from the manifest as a single user message with XML-tagged page markers
-- after a successful query, the resulting response ID is persisted on `thread_documents.latest_response_id`
+- after a successful query, the resulting response ID is persisted on `thread_documents.latest_response_id`, and the sticky thread-local model is persisted on `thread_documents.latest_model`
 - after a successful warmup, the resulting response ID is persisted on `documents.base_response_id`
 - if a query fails (stale lineage, OpenAI error), the executor retries once with a fresh warmup
 - the executor now keeps a hot reusable session cache keyed by `thread_id + document_id`
@@ -224,16 +247,22 @@ Implemented behavior:
 - if both a document query and another unknown tool are pending, the thread falls back to `waiting_tool` for all tools (no partial auto-handling)
 - the document executor is created once by the service and shared across all actors
 - if the executor is nil (e.g. in tests), the actor falls back to a stub response
+- `PATCH /documents/:id` now supports:
+  - updating the document's default `query_model`
+  - clearing the shared base anchor on the document row
+  - returning document metadata including base-anchor state
 
 Current relevant files:
 
 - `db/migrations/000009_document_lineage.sql`
+- `db/migrations/000010_document_query_model.sql`
 - `internal/docstore/store.go`
 - `internal/threaddocstore/store.go`
+- `internal/httpserver/document_api.go`
 - `internal/worker/docexec.go`
 - `internal/worker/actor.go`
 - `internal/worker/service.go`
-- `internal/worker/actor_test.go`
+- `internal/worker/docexec_test.go`
 
 ### 1. Document upload and split already exist
 
@@ -383,8 +412,8 @@ This is now implemented and should be treated as the current architecture, with 
 
 Implemented durable model:
 
-- `documents` stores the shared base anchor for one document
-- `thread_documents` stores the thread-local latest lineage for that document inside one parent chat thread
+- `documents` stores the per-document default query model plus the shared base anchor for one document
+- `thread_documents` stores the thread-local latest lineage and sticky thread-local model for that document inside one parent chat thread
 
 Implemented execution ownership:
 
@@ -396,8 +425,8 @@ Implemented execution ownership:
 
 Implemented schema:
 
-- `documents`: `base_response_id`, `base_model`, `base_initialized_at`
-- `thread_documents`: `latest_response_id`, `initialized_at`, `last_used_at`
+- `documents`: `query_model`, `base_response_id`, `base_model`, `base_initialized_at`
+- `thread_documents`: `latest_response_id`, `latest_model`, `initialized_at`, `last_used_at`
 
 Still planned schema/extensions:
 
@@ -409,25 +438,56 @@ Still planned schema/extensions:
 Implemented execution behavior:
 
 - first query for a document inside a thread checks `thread_documents.latest_response_id`
-- if present, continue from that thread-local lineage
-- otherwise check `documents.base_response_id`
-- if the base anchor exists, start the thread-local document chain from that anchor
-- if the base anchor does not exist, create it first with `generate:false` on a worker-owned document session
-- after the actual query completes, save the new response ID back to `thread_documents.latest_response_id`
+- if present, continue from that thread-local lineage using `thread_documents.latest_model`
+- changing `documents.query_model` does not retroactively migrate an already-established thread-local document chain
+- otherwise use `documents.query_model` as the default model for this thread's new document chain
+- if `documents.base_response_id` exists and `documents.base_model` matches the current document default model, start the new thread-local document chain from that shared base anchor
+- if the base anchor does not exist, or exists for a different model, create/rebuild it first with `generate:false` on a worker-owned document session
+- after the actual query completes, save the new response ID back to `thread_documents.latest_response_id` and the sticky thread-local model back to `thread_documents.latest_model`
 - if the query fails, retry once with a fresh warmup and persist the rebuilt base anchor
 
 Implemented socket behavior today:
 
 - the parent chat socket and document query sockets are separate worker-owned sessions
 - persisted response IDs are the durable lineage boundary
-- each document query currently opens a fresh session and closes it after completion
-- hot reusable document sockets remain a planned latency optimization, not durable truth
+- hot reusable per-thread/per-document document sessions now exist as a latency optimization
+- those hot sessions are still not durable truth; persisted lineage plus stored model are the durable boundary
 
 Still planned rebuild/staleness behavior:
 
 - explicit base-anchor invalidation when the document changes materially
 - explicit base-anchor invalidation when the prompt/model contract changes materially
 - richer tracking of stale/error state beyond the current one-time rebuild retry
+
+### 8. Document viewer details and model controls now exist
+
+The PDF viewer now exposes document execution metadata and settings directly in the UI.
+
+Implemented behavior:
+
+- the middle-panel PDF viewer has a `Details` button in the toolbar
+- opening that drawer shows:
+  - basic document metadata
+  - the current document `query_model`
+  - whether a shared base response exists
+  - the shared base response ID, model, and initialization time
+- the drawer allows switching the document's default query model between frontier, mini, and nano variants
+- the drawer allows clearing the shared base anchor on the document row
+- the drawer intentionally uses a minimal stacked layout rather than boxed cards
+
+Important semantics exposed by the drawer:
+
+- changing the document default model affects new thread-local lineage only
+- existing thread-local document chains stay on their stored thread-local model
+- clearing the shared base anchor does not clear existing thread-local lineage
+
+Current relevant files:
+
+- `frontend/src/components/PdfViewerPanel.tsx`
+- `frontend/src/api.ts`
+- `frontend/src/constants.ts`
+- `frontend/src/types.ts`
+- `internal/httpserver/document_api.go`
 
 ## Deliberate Limitations Right Now
 
@@ -472,8 +532,8 @@ The `query_attached_documents` tool is now:
 
 The columns are now actively read and written:
 
-- `base_response_id`, `base_model`, `base_initialized_at` on `documents` — populated after warmup
-- `latest_response_id`, `initialized_at`, `last_used_at` on `thread_documents` — populated after each query
+- `query_model`, `base_response_id`, `base_model`, `base_initialized_at` on `documents` — `query_model` is user-configurable; the base-anchor fields are populated after warmup
+- `latest_response_id`, `latest_model`, `initialized_at`, `last_used_at` on `thread_documents` — populated after each query
 
 What is now implemented:
 
@@ -483,6 +543,7 @@ What is now implemented:
 - rebuild-on-error: retry once with fresh warmup if lineage is rejected (Case D)
 - hot per-thread/per-document session reuse for follow-up queries
 - bounded parallel execution across multiple documents in a single tool call
+- sticky thread-local model reuse across later document-default changes
 
 What still does not exist yet:
 
@@ -615,13 +676,14 @@ The document executor is now real. The next sensible steps are:
 
 The current backend shape is now:
 
-- `documents` has lineage columns (`base_response_id`, `base_model`, `base_initialized_at`) — populated after warmup
-- `thread_documents` has lineage columns (`latest_response_id`, `initialized_at`, `last_used_at`) — populated after each query
+- `documents` has document-query settings plus shared-base lineage columns (`query_model`, `base_response_id`, `base_model`, `base_initialized_at`)
+- `thread_documents` has thread-local lineage plus sticky model columns (`latest_response_id`, `latest_model`, `initialized_at`, `last_used_at`)
 - the `query_attached_documents` tool is injected when docs are attached
 - the worker dispatches document tool calls to a real executor
 - the executor keeps hot per-thread/per-document OpenAI sessions for reuse, resolves lineage, queries, persists results
 - multiple documents in one tool call can now run in parallel on separate worker-owned sockets
 - the full round-trip from model tool call → dispatch → document executor → real OpenAI query → self-publish tool output → thread continuation works
+- the document API and PDF viewer now expose model/default-anchor controls for one document at a time
 
 ## Implemented Tool Shape
 
@@ -669,29 +731,30 @@ The intended flow for one document query is now:
 ### Case A: Existing thread-local lineage exists
 
 1. Parent thread asks an attached document question.
-2. Worker-local document executor looks up `thread_documents.latest_response_id`.
-3. Worker-local document executor continues that document chain from the thread-local latest response ID.
-4. Worker-local document executor saves the newly returned response ID back onto `thread_documents`.
+2. Worker-local document executor looks up `thread_documents.latest_response_id` and `thread_documents.latest_model`.
+3. Worker-local document executor continues that document chain from the thread-local latest response ID using the stored thread-local model, even if `documents.query_model` has changed since this thread first used the document.
+4. Worker-local document executor saves the newly returned response ID back onto `thread_documents` and keeps the same sticky thread-local model.
 5. Worker-local document executor returns a normal tool result to the parent thread.
 
 ### Case B: No thread-local lineage, but shared document base anchor exists
 
 1. Parent thread asks an attached document question.
 2. Worker-local document executor does not find a thread-local latest response ID.
-3. Worker-local document executor finds `documents.base_response_id`.
-4. Worker-local document executor starts the new thread-local document chain from that shared base anchor.
-5. Worker-local document executor saves the newly returned response ID onto `thread_documents`.
-6. Worker-local document executor returns a normal tool result to the parent thread.
+3. Worker-local document executor reads `documents.query_model` and finds `documents.base_response_id`.
+4. Worker-local document executor only reuses that shared base anchor if `documents.base_model` matches the current document default model.
+5. Worker-local document executor starts the new thread-local document chain from that shared base anchor.
+6. Worker-local document executor saves the newly returned response ID and sticky model onto `thread_documents`.
+7. Worker-local document executor returns a normal tool result to the parent thread.
 
-### Case C: No thread-local lineage and no shared base anchor yet
+### Case C: No thread-local lineage and no usable shared base anchor yet
 
 1. Parent thread asks an attached document question.
 2. Worker-local document executor finds no thread-local latest response ID.
-3. Worker-local document executor finds no shared document base anchor.
-4. Worker-local document executor sends a document warmup request with `generate:false` on a worker-owned document session.
-5. Worker-local document executor saves the returned response ID onto the `documents` row as the shared base anchor.
+3. Worker-local document executor finds no usable shared document base anchor for the current document default model.
+4. Worker-local document executor sends a document warmup request with `generate:false` on a worker-owned document session using the current document default model.
+5. Worker-local document executor saves the returned response ID onto the `documents` row as the shared base anchor, along with `documents.base_model`.
 6. Worker-local document executor then sends the actual question from the parent thread.
-7. Worker-local document executor saves the returned response ID onto `thread_documents`.
+7. Worker-local document executor saves the returned response ID and sticky model onto `thread_documents`.
 8. Worker-local document executor returns a normal tool result to the parent thread.
 
 ### Case D: Stored lineage is invalid or stale
@@ -702,6 +765,15 @@ If OpenAI rejects the stored lineage, or the system decides the base anchor is s
 2. rebuild the shared base anchor if needed
 3. rebuild the thread-local lineage from the fresh base anchor
 4. continue normally
+
+### Case E: Document default model changes after some threads already used the document
+
+1. A document is first used with one default model, for example `gpt-5.4-mini`.
+2. One or more threads establish thread-local lineage for that document; those thread rows now also store `latest_model = gpt-5.4-mini`.
+3. Later, the document default model is changed to `gpt-5.4-nano`.
+4. Existing threads continue using their stored `latest_model` and do not migrate.
+5. New threads use `documents.query_model = gpt-5.4-nano`.
+6. If the existing shared base anchor was built with the old model, it is treated as unusable for new threads and rebuilt lazily when needed.
 
 ## Socket Policy For Documents
 
@@ -765,6 +837,10 @@ Behavior implemented in the frontend right now:
 - after send, the document is persisted on the thread
 - when a thread has attached docs, the paperclip shows an attachment count
 - clicking the paperclip opens a viewer for thread attachments and pending attachments
+- navigating to `/doc/:documentId` opens the embedded PDF viewer in the middle panel
+- the PDF viewer toolbar has a `Details` button
+- the details drawer shows document execution metadata, lets the user change the document default query model, and can clear the shared base anchor
+- the details drawer is intentionally minimal and not card-heavy
 
 Current behavior after reset/load:
 
@@ -784,6 +860,7 @@ During this work the following checks passed:
 - frontend production build
 - `documenthandler` Go package build/test
 - Docker Compose service registration/build for `documenthandler`
+- targeted worker regression tests for sticky thread-local model behavior and per-document model selection
 
 ## Short Summary
 
@@ -796,15 +873,17 @@ Where we are now:
 - attached-document discovery via generated instructions is real
 - chat-side pending attachment UI is real
 - paperclip-based thread attachment viewer is real
+- embedded PDF viewer details for one document are real
 - the per-document lineage model is now agreed in detail and implemented
 - the worker-only OpenAI ownership rule is now explicitly clarified
-- the lineage schema is in place and actively used (`base_response_id` on documents, `latest_response_id` on thread_documents)
+- the lineage schema plus per-document model schema are in place and actively used (`query_model` / `base_response_id` on documents, `latest_response_id` / `latest_model` on thread_documents)
 - the `query_attached_documents` tool is defined, injected, dispatched, validated, and executed for real
 - the worker-local document executor loads manifests, opens separate OpenAI sessions, resolves lineage, sends page images, persists results, and handles rebuild-on-error
 - hot per-thread/per-document document sessions are now reused for follow-up queries
 - multi-document tool calls now fan out in parallel across separate worker-owned document sessions
 - the full tool call round-trip works end to end (model calls tool → worker dispatches → document executor queries OpenAI → real answer → self-publish → thread continues)
 - lineage is persisted after each query (thread-local) and after each warmup (shared base anchor)
+- existing thread-local document chains stay on their original model when the document default changes later
 
 What comes next:
 
