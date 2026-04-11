@@ -2910,7 +2910,7 @@ func filterSubagentTools(raw string) (string, error) {
 
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		if name, _ := tool["name"].(string); name == "spawn_subagents" || name == toolNameQueryAttachedDocuments {
+		if isInternalRuntimeToolName(toolDefinitionName(tool)) {
 			continue
 		}
 		filtered = append(filtered, tool)
@@ -2934,16 +2934,17 @@ func filterSubagentToolChoice(raw string) (string, error) {
 		return "", nil
 	}
 
-	var choice map[string]any
-	if err := json.Unmarshal([]byte(raw), &choice); err != nil {
+	choice, err := decodeToolChoiceParam(json.RawMessage(raw))
+	if err != nil {
 		return "", fmt.Errorf("decode tool_choice for child filtering: %w", err)
 	}
 
-	if name, _ := choice["name"].(string); name == "spawn_subagents" {
+	filtered, ok := filterSubagentToolChoiceParam(choice)
+	if !ok {
 		return "", nil
 	}
 
-	payload, err := json.Marshal(choice)
+	payload, err := json.Marshal(filtered)
 	if err != nil {
 		return "", fmt.Errorf("marshal filtered child tool_choice: %w", err)
 	}

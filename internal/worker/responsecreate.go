@@ -8,6 +8,7 @@ import (
 	"explorer/internal/threadstore"
 
 	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -133,16 +134,29 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 		if typed == "" {
 			return nil, false, nil
 		}
+		if key == "tool_choice" {
+			raw, err := json.Marshal(typed)
+			if err != nil {
+				return nil, false, fmt.Errorf("marshal tool_choice payload: %w", err)
+			}
+			decoded, err := decodeResponseCreateField(key, raw)
+			if err != nil {
+				return nil, false, err
+			}
+			return decoded, true, nil
+		}
 		return typed, true, nil
 	case shared.ReasoningParam:
 		return normalizeReasoningParam(typed), true, nil
+	case responses.ResponseNewParamsToolChoiceUnion:
+		return normalizeToolChoiceParam(typed), true, nil
 	case map[string]any:
-		if key != "reasoning" {
+		if key != "reasoning" && key != "tool_choice" {
 			return typed, true, nil
 		}
 		raw, err := json.Marshal(typed)
 		if err != nil {
-			return nil, false, fmt.Errorf("marshal reasoning payload: %w", err)
+			return nil, false, fmt.Errorf("marshal %s payload: %w", key, err)
 		}
 		decoded, err := decodeResponseCreateField(key, raw)
 		if err != nil {
@@ -158,11 +172,14 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 }
 
 func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
-	if key != "reasoning" {
+	switch key {
+	case "reasoning":
+		return decodeReasoningParam(raw)
+	case "tool_choice":
+		return decodeToolChoiceParam(raw)
+	default:
 		return rawJSONToAny(raw)
 	}
-
-	return decodeReasoningParam(raw)
 }
 
 func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
@@ -179,6 +196,68 @@ func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 	reasoning.Summary = ""
 	reasoning.GenerateSummary = ""
 	return reasoning
+}
+
+func decodeToolChoiceParam(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {
+	var toolChoice responses.ResponseNewParamsToolChoiceUnion
+	if err := json.Unmarshal(raw, &toolChoice); err != nil {
+		return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice payload: %w", err)
+	}
+
+	return normalizeToolChoiceParam(toolChoice), nil
+}
+
+func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {
+	return toolChoice
+}
+
+func filterSubagentToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) (responses.ResponseNewParamsToolChoiceUnion, bool) {
+	if !param.IsOmitted(toolChoice.OfToolChoiceMode) {
+		return toolChoice, true
+	}
+
+	if choice := toolChoice.OfAllowedTools; choice != nil {
+		filtered := filterSubagentAllowedTools(choice.Tools)
+		if len(filtered) == 0 {
+			return responses.ResponseNewParamsToolChoiceUnion{}, false
+		}
+
+		clone := *choice
+		clone.Tools = filtered
+		toolChoice.OfAllowedTools = &clone
+		return toolChoice, true
+	}
+
+	if choice := toolChoice.OfFunctionTool; choice != nil && isInternalRuntimeToolName(choice.Name) {
+		return responses.ResponseNewParamsToolChoiceUnion{}, false
+	}
+
+	return toolChoice, true
+}
+
+func filterSubagentAllowedTools(tools []map[string]any) []map[string]any {
+	filtered := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		if isInternalRuntimeToolName(toolDefinitionName(tool)) {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+func toolDefinitionName(tool map[string]any) string {
+	name, _ := tool["name"].(string)
+	return name
+}
+
+func isInternalRuntimeToolName(name string) bool {
+	switch name {
+	case "spawn_subagents", toolNameQueryAttachedDocuments:
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureRequiredResponseInclude(payload map[string]any) error {

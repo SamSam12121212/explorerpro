@@ -179,6 +179,26 @@ The next typed builder slice is now done too.
 - the builder boundary is starting to own normalization rules in a more explicit, typed way
 - this keeps reducing custom request-shape code without touching the websocket transport or persistence layers
 
+## Sixth Alignment Step Completed
+
+The next typed request-shape slice is now done too.
+
+### What changed
+
+- `internal/worker/responsecreate.go` now decodes `tool_choice` through `openai-go`'s `responses.ResponseNewParamsToolChoiceUnion`
+- direct request payloads and stored thread `tool_choice` state now both normalize through that same typed builder path
+- child-thread filtering now reuses the same typed `tool_choice` decode instead of assuming the payload is always a JSON object
+- child filtering now correctly preserves string modes such as `"auto"` and `"required"`
+- child filtering now drops runtime-only function choices for `spawn_subagents` and `query_attached_documents`
+- `allowed_tools` child filtering now strips those runtime-only function definitions while keeping any remaining allowed tools intact
+
+### Why this is better
+
+- one more top-level Responses request field is now handled through upstream types instead of custom map decoding
+- child-thread filtering now matches the real Responses shape better because `tool_choice` is not always an object
+- this removes a correctness gap where valid string modes could be mishandled during child-thread spawn
+- the typed `tool_choice` path also gives us a clearer place to keep runtime-only tools out of child continuations without spreading more raw JSON logic around
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -198,7 +218,7 @@ That means:
 
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
-- `openai-go` is only the source of truth for a small subset of outbound request fields so far
+- `openai-go` is only the source of truth for a subset of outbound request fields so far
 - `metadata` is still raw at the builder boundary because our warm-branch helper currently injects non-string values such as `branch_index`
 - thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
@@ -209,8 +229,8 @@ This is acceptable for now, but it is the next area to improve.
 The next good small steps are:
 
 1. Decide the metadata normalization rule for branch-specific fields like `branch_index` so we can safely move `metadata` onto upstream string-map types.
-2. Type `tool_choice` inside `internal/worker/responsecreate.go`, and then reuse the same typed shape in child-thread filtering.
-3. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
+2. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
+3. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
 
 ## Strong Recommendation
 

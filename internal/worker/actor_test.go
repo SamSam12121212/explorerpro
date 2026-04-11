@@ -260,6 +260,49 @@ func TestBuildResponseCreatePayloadNormalizesStoredReasoning(t *testing.T) {
 	}
 }
 
+func TestBuildResponseCreatePayloadPreservesToolChoiceMode(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{}, map[string]any{
+		"model":       "gpt-5.4",
+		"tool_choice": "required",
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if payload["tool_choice"] != "required" {
+		t.Fatalf("tool_choice = %v, want required", payload["tool_choice"])
+	}
+}
+
+func TestBuildResponseCreatePayloadNormalizesStoredToolChoiceMode(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{
+		ToolChoiceJSON: `"auto"`,
+	}, map[string]any{
+		"model": "gpt-5.4",
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if payload["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %v, want auto", payload["tool_choice"])
+	}
+}
+
 func TestFormatAvailableDocumentsBlock(t *testing.T) {
 	t.Parallel()
 
@@ -582,6 +625,124 @@ func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 	}
 	if decoded["branch_parent_response_id"] != "resp_parent" {
 		t.Fatalf("branch_parent_response_id = %v, want resp_parent", decoded["branch_parent_response_id"])
+	}
+}
+
+func TestFilterSubagentToolChoicePreservesMode(t *testing.T) {
+	t.Parallel()
+
+	got, err := filterSubagentToolChoice(`"auto"`)
+	if err != nil {
+		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+	}
+	if got != `"auto"` {
+		t.Fatalf("filterSubagentToolChoice() = %s, want %s", got, `"auto"`)
+	}
+}
+
+func TestFilterSubagentToolChoiceDropsInternalFunctionChoices(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "spawn subagents",
+			raw:  `{"type":"function","name":"spawn_subagents"}`,
+		},
+		{
+			name: "attached documents",
+			raw:  `{"type":"function","name":"query_attached_documents"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := filterSubagentToolChoice(tt.raw)
+			if err != nil {
+				t.Fatalf("filterSubagentToolChoice() error = %v", err)
+			}
+			if got != "" {
+				t.Fatalf("filterSubagentToolChoice() = %s, want empty", got)
+			}
+		})
+	}
+}
+
+func TestFilterSubagentToolChoiceFiltersAllowedTools(t *testing.T) {
+	t.Parallel()
+
+	got, err := filterSubagentToolChoice(`{
+		"type":"allowed_tools",
+		"mode":"required",
+		"tools":[
+			{"type":"function","name":"spawn_subagents"},
+			{"type":"function","name":"query_attached_documents"},
+			{"type":"function","name":"keep_tool"},
+			{"type":"web_search_preview"}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+	}
+	if got == "" {
+		t.Fatal("filterSubagentToolChoice() returned empty result")
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if decoded["mode"] != "required" {
+		t.Fatalf("mode = %v, want required", decoded["mode"])
+	}
+
+	tools, ok := decoded["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools = %#v, want []any", decoded["tools"])
+	}
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2", len(tools))
+	}
+
+	first, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[0] = %#v, want map[string]any", tools[0])
+	}
+	if first["name"] != "keep_tool" {
+		t.Fatalf("tools[0].name = %v, want keep_tool", first["name"])
+	}
+
+	second, ok := tools[1].(map[string]any)
+	if !ok {
+		t.Fatalf("tools[1] = %#v, want map[string]any", tools[1])
+	}
+	if second["type"] != "web_search_preview" {
+		t.Fatalf("tools[1].type = %v, want web_search_preview", second["type"])
+	}
+}
+
+func TestFilterSubagentToolChoiceDropsEmptyAllowedTools(t *testing.T) {
+	t.Parallel()
+
+	got, err := filterSubagentToolChoice(`{
+		"type":"allowed_tools",
+		"mode":"required",
+		"tools":[
+			{"type":"function","name":"spawn_subagents"},
+			{"type":"function","name":"query_attached_documents"}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("filterSubagentToolChoice() = %s, want empty", got)
 	}
 }
 
