@@ -1,9 +1,14 @@
 import { useLocation, useParams } from "react-router";
 import { CollectionDetailView } from "../mid-panel/views/CollectionDetailView";
+import { PdfViewerPanel } from "./PdfViewerPanel";
 
 export function MidPanelHost() {
   const location = useLocation();
-  const { collectionId } = useParams<"collectionId">();
+  const { collectionId, documentId } = useParams<"collectionId" | "documentId">();
+
+  if (documentId) {
+    return <PdfViewerPanel documentId={documentId} />;
+  }
 
   if (location.pathname.startsWith("/collections")) {
     if (collectionId) {

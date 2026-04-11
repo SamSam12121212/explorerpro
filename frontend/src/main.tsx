@@ -18,6 +18,7 @@ ReactDOM.createRoot(rootElement).render(
         <Route path="/collections" element={<App />} />
         <Route path="/collections/:collectionId" element={<App />} />
         <Route path="/documents" element={<App />} />
+        <Route path="/doc/:documentId" element={<App />} />
         <Route path="/repos" element={<App />} />
         <Route path="/thread/:threadId" element={<App />} />
       </Routes>

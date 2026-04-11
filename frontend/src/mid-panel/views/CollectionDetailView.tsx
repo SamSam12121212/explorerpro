@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router";
 import { apiGet, apiPost } from "../../api";
 import { COLLECTIONS_CHANGED_EVENT } from "../../constants";
 import type {
@@ -31,6 +32,7 @@ interface CollectionDetailViewProps {
 }
 
 export function CollectionDetailView({ collectionId }: CollectionDetailViewProps) {
+  const navigate = useNavigate();
   const [detail, setDetail] = useState<CollectionDetailResponse | null>(null);
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
@@ -190,8 +192,13 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
         ) : (
           detail.documents.map((document) => (
             <div
-              className="border-b border-[#2a2a2a] px-5 py-4"
+              className="cursor-pointer border-b border-[#2a2a2a] px-5 py-4 transition hover:bg-[#252525]"
               key={document.id}
+              onClick={() => {
+                if (document.status === "ready") {
+                  void navigate(`/doc/${document.id}`);
+                }
+              }}
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-[#e6e6e6]">

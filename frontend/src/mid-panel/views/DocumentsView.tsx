@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LuEllipsis, LuFileText } from "react-icons/lu";
+import { useNavigate } from "react-router";
 import { apiGet, uploadDocument } from "../../api";
 import type {
   AttachedDocument,
@@ -30,6 +31,7 @@ export function DocumentsView({
   attachedDocumentIds,
   onAttachDocument,
 }: DocumentsViewProps) {
+  const navigate = useNavigate();
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -145,8 +147,13 @@ export function DocumentsView({
 
         {documents.map((document) => (
           <div
-            className="group relative border-b border-[#2a2a2a] px-3 py-3 transition hover:bg-[#252525]"
+            className="group relative border-b border-[#2a2a2a] px-3 py-3 transition hover:bg-[#252525] cursor-pointer"
             key={document.id}
+            onClick={() => {
+              if (document.status === "ready") {
+                void navigate(`/doc/${document.id}`);
+              }
+            }}
           >
             <div className="pr-10">
               <span className="block truncate text-sm font-medium text-[#d4d4d4]">

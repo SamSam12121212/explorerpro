@@ -63,6 +63,12 @@ func (a *documentAPI) handleDocumentRoutes(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		a.handleGetDocument(w, r, docID)
+	case len(parts) == 2 && parts[1] == "source":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		a.handleDocumentSource(w, r, docID)
 	case len(parts) == 2 && parts[1] == "manifest":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -215,6 +221,34 @@ func (a *documentAPI) handleGetDocument(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"document": presentDocument(doc),
 	})
+}
+
+func (a *documentAPI) handleDocumentSource(w http.ResponseWriter, r *http.Request, docID string) {
+	doc, err := a.store.Get(r.Context(), docID)
+	if errors.Is(err, docstore.ErrDocumentNotFound) {
+		writeErrorJSON(w, http.StatusNotFound, "document not found")
+		return
+	}
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("get document: %v", err))
+		return
+	}
+
+	if doc.SourceRef == "" {
+		writeErrorJSON(w, http.StatusNotFound, "source not available")
+		return
+	}
+
+	data, err := a.runtime.Blob().ReadRef(r.Context(), doc.SourceRef)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("read source: %v", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, docID string) {

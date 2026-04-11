@@ -36,7 +36,7 @@ export function LeftSidebar({
   const navigate = useNavigate();
   const activeTab: Tab = location.pathname.startsWith("/collections")
     ? "collections"
-    : location.pathname.startsWith("/documents")
+    : location.pathname.startsWith("/documents") || location.pathname.startsWith("/doc/")
       ? "documents"
       : location.pathname.startsWith("/repos")
         ? "repos"

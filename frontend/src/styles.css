@@ -4,6 +4,29 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
   --font-mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  --explorer-color-app-bg: #1e1e1e;
+  --explorer-color-surface: #252525;
+  --explorer-color-surface-alt: #2a2a2a;
+  --explorer-color-elevated: #2b2b2b;
+  --explorer-color-input: #1f1f1f;
+  --explorer-color-border: #333333;
+  --explorer-color-border-subtle: #2a2a2a;
+  --explorer-color-border-strong: #444444;
+  --explorer-color-text-primary: #d4d4d4;
+  --explorer-color-text-secondary: #b2b2b2;
+  --explorer-color-text-muted: #888888;
+  --explorer-color-text-disabled: #666666;
+  --explorer-color-accent: #007acc;
+  --explorer-color-accent-hover: #1b8de4;
+  --explorer-color-accent-active: #005a9e;
+  --explorer-color-accent-soft: rgba(0, 122, 204, 0.18);
+  --explorer-color-hover: #2d2d2d;
+  --explorer-color-active: #333333;
+  --explorer-color-selected: #094771;
+  --explorer-color-overlay: rgba(0, 0, 0, 0.56);
+  --explorer-color-success: #3fb950;
+  --explorer-color-warning: #cca700;
+  --explorer-color-error: #f44747;
 }
 
 @layer base {
@@ -49,8 +72,8 @@
   }
 
   body {
-    background: #1e1e1e;
-    color: #d4d4d4;
+    background: var(--explorer-color-app-bg);
+    color: var(--explorer-color-text-primary);
     font-family: var(--font-sans);
   }
 
@@ -75,7 +98,7 @@
   .resize-handle {
     @apply relative flex w-2 shrink-0 items-stretch justify-center outline-none;
     cursor: col-resize;
-    background: #1e1e1e;
+    background: var(--explorer-color-app-bg);
   }
 
   .resize-handle::before {
@@ -86,13 +109,13 @@
     left: 50%;
     width: 1px;
     transform: translateX(-50%);
-    background: #333;
+    background: var(--explorer-color-border);
     transition: background 120ms ease;
   }
 
   .resize-handle:hover::before,
   .resize-handle[data-separator="active"]::before {
-    background: #007acc;
+    background: var(--explorer-color-accent);
   }
 
   /* Typing dots animation */
