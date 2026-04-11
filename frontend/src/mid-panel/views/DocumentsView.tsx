@@ -159,11 +159,6 @@ export function DocumentsView({
               <span className="block truncate text-sm font-medium text-[#d4d4d4]">
                 {documentTitle(document)}
               </span>
-              <span className="mt-1 block text-xs text-[#666]">
-                {document.page_count > 0
-                  ? `${document.page_count.toString()} pages`
-                  : document.status}
-              </span>
             </div>
 
             <div

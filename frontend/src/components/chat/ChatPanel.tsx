@@ -422,11 +422,6 @@ export function ChatPanel({
                             <p className="m-0 truncate text-sm text-[#d4d4d4]">
                               {document.filename.trim() || document.id}
                             </p>
-                            <p className="m-0 mt-1 text-xs text-[#777]">
-                              {document.page_count > 0
-                                ? `${document.page_count.toString()} pages`
-                                : document.status}
-                            </p>
                           </div>
                         </div>
                       ))}
@@ -460,11 +455,6 @@ export function ChatPanel({
                           <div className="min-w-0 flex-1">
                             <p className="m-0 truncate text-sm text-[#d4d4d4]">
                               {document.filename.trim() || document.id}
-                            </p>
-                            <p className="m-0 mt-1 text-xs text-[#777]">
-                              {document.page_count > 0
-                                ? `${document.page_count.toString()} pages`
-                                : document.status}
                             </p>
                           </div>
                           <button
