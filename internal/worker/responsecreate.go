@@ -9,6 +9,7 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 func buildResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]any) (json.RawMessage, error) {
@@ -29,24 +30,12 @@ func buildResponseCreatePayloadObject(meta threadstore.ThreadMeta, fields map[st
 	payload := map[string]any{}
 
 	for key, value := range fields {
-		switch typed := value.(type) {
-		case json.RawMessage:
-			if len(typed) == 0 {
-				continue
-			}
-			decoded, err := rawJSONToAny(typed)
-			if err != nil {
-				return nil, err
-			}
-			payload[key] = decoded
-		case string:
-			if typed != "" {
-				payload[key] = typed
-			}
-		default:
-			if value != nil {
-				payload[key] = value
-			}
+		normalized, ok, err := normalizeResponseCreateField(key, value)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			payload[key] = normalized
 		}
 	}
 
@@ -74,12 +63,6 @@ func buildResponseCreatePayloadObject(meta threadstore.ThreadMeta, fields map[st
 		if err := mergeStoredJSONField(payload, "reasoning", meta.ReasoningJSON); err != nil {
 			return nil, err
 		}
-	}
-
-	// Strip reasoning summary fields because we do not consume those events yet.
-	if reasoning, ok := payload["reasoning"].(map[string]any); ok {
-		delete(reasoning, "summary")
-		delete(reasoning, "generate_summary")
 	}
 
 	return payload, nil
@@ -127,12 +110,75 @@ func mergeStoredJSONField(payload map[string]any, key, raw string) error {
 		return nil
 	}
 
-	decoded, err := rawJSONToAny(json.RawMessage(raw))
+	decoded, err := decodeResponseCreateField(key, json.RawMessage(raw))
 	if err != nil {
 		return err
 	}
 	payload[key] = decoded
 	return nil
+}
+
+func normalizeResponseCreateField(key string, value any) (any, bool, error) {
+	switch typed := value.(type) {
+	case json.RawMessage:
+		if len(typed) == 0 {
+			return nil, false, nil
+		}
+		decoded, err := decodeResponseCreateField(key, typed)
+		if err != nil {
+			return nil, false, err
+		}
+		return decoded, true, nil
+	case string:
+		if typed == "" {
+			return nil, false, nil
+		}
+		return typed, true, nil
+	case shared.ReasoningParam:
+		return normalizeReasoningParam(typed), true, nil
+	case map[string]any:
+		if key != "reasoning" {
+			return typed, true, nil
+		}
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal reasoning payload: %w", err)
+		}
+		decoded, err := decodeResponseCreateField(key, raw)
+		if err != nil {
+			return nil, false, err
+		}
+		return decoded, true, nil
+	default:
+		if value == nil {
+			return nil, false, nil
+		}
+		return value, true, nil
+	}
+}
+
+func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
+	if key != "reasoning" {
+		return rawJSONToAny(raw)
+	}
+
+	return decodeReasoningParam(raw)
+}
+
+func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
+	var reasoning shared.ReasoningParam
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return shared.ReasoningParam{}, fmt.Errorf("decode reasoning payload: %w", err)
+	}
+
+	return normalizeReasoningParam(reasoning), nil
+}
+
+func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
+	// We don't consume reasoning summary events yet, so avoid requesting them.
+	reasoning.Summary = ""
+	reasoning.GenerateSummary = ""
+	return reasoning
 }
 
 func ensureRequiredResponseInclude(payload map[string]any) error {

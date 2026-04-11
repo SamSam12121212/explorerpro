@@ -197,6 +197,69 @@ func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
 	}
 }
 
+func TestBuildResponseCreatePayloadStripsReasoningSummaryFields(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{}, map[string]any{
+		"model":     "gpt-5.4",
+		"reasoning": json.RawMessage(`{"effort":"high","summary":"detailed","generate_summary":"concise"}`),
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	reasoning, ok := payload["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %#v, want map[string]any", payload["reasoning"])
+	}
+	if reasoning["effort"] != "high" {
+		t.Fatalf("effort = %v, want high", reasoning["effort"])
+	}
+	if _, exists := reasoning["summary"]; exists {
+		t.Fatalf("summary should be omitted, got %#v", reasoning["summary"])
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
+func TestBuildResponseCreatePayloadNormalizesStoredReasoning(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{
+		ReasoningJSON: `{"effort":"medium","summary":"concise","generate_summary":"detailed"}`,
+	}, map[string]any{
+		"model": "gpt-5.4",
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	reasoning, ok := payload["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %#v, want map[string]any", payload["reasoning"])
+	}
+	if reasoning["effort"] != "medium" {
+		t.Fatalf("effort = %v, want medium", reasoning["effort"])
+	}
+	if _, exists := reasoning["summary"]; exists {
+		t.Fatalf("summary should be omitted, got %#v", reasoning["summary"])
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
 func TestFormatAvailableDocumentsBlock(t *testing.T) {
 	t.Parallel()
 

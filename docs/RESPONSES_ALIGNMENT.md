@@ -163,6 +163,22 @@ The first real `openai-go` adoption is now done.
 - the adoption point is still tightly scoped to the worker builder boundary
 - this proves we can use upstream types without forcing the websocket transport or persistence layers to change
 
+## Fifth Alignment Step Completed
+
+The next typed builder slice is now done too.
+
+### What changed
+
+- `internal/worker/responsecreate.go` now normalizes `reasoning` through `openai-go`'s `shared.ReasoningParam`
+- the builder no longer strips reasoning summary fields by mutating a generic map after decode
+- both direct request reasoning input and stored thread reasoning state now go through the same typed normalization path
+
+### Why this is better
+
+- one more top-level Responses request field is now shaped by upstream types instead of ad hoc map surgery
+- the builder boundary is starting to own normalization rules in a more explicit, typed way
+- this keeps reducing custom request-shape code without touching the websocket transport or persistence layers
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -183,6 +199,7 @@ That means:
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
 - `openai-go` is only the source of truth for a small subset of outbound request fields so far
+- `metadata` is still raw at the builder boundary because our warm-branch helper currently injects non-string values such as `branch_index`
 - thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
 This is acceptable for now, but it is the next area to improve.
@@ -191,9 +208,9 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Type the next low-risk request fields inside `internal/worker/responsecreate.go`, especially `tool_choice` and other top-level non-input fields, while still leaving `input` raw.
-2. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
-3. Keep storing raw JSON even when typed builders/decoders are introduced.
+1. Decide the metadata normalization rule for branch-specific fields like `branch_index` so we can safely move `metadata` onto upstream string-map types.
+2. Type `tool_choice` inside `internal/worker/responsecreate.go`, and then reuse the same typed shape in child-thread filtering.
+3. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
 
 ## Strong Recommendation
 
