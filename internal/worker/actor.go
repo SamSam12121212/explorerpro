@@ -569,7 +569,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	payload, err := buildResponseCreatePayload(meta, map[string]any{
+	payloadJSON, err := buildResponseCreatePayload(meta, map[string]any{
 		"model":                body.Model,
 		"instructions":         effectiveInstructions,
 		"input":                body.InitialInput,
@@ -585,7 +585,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	return a.sendAndStream(meta, cmd.CmdID, payload)
+	return a.sendAndStream(meta, cmd.CmdID, payloadJSON)
 }
 
 func (a *threadActor) handleResume(cmd agentcmd.Command) error {
@@ -1130,6 +1130,10 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 	if err != nil {
 		return err
 	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal recovery response.create payload: %w", err)
+	}
 
 	if err := a.ensureSession(); err != nil {
 		return err
@@ -1141,7 +1145,7 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payload)
+	return a.sendAndStream(meta, cmdID, payloadJSON)
 }
 
 func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMeta) error {
@@ -1324,7 +1328,12 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	a.cancel()
 }
 
-func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any) error {
+func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payloadJSON json.RawMessage) error {
+	payload, err := decodeResponseCreatePayloadObject(payloadJSON)
+	if err != nil {
+		return err
+	}
+
 	if err := a.injectDocumentTools(meta.ID, payload); err != nil {
 		return err
 	}
@@ -1559,7 +1568,7 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	payload, err := buildResponseCreatePayload(meta, map[string]any{
+	payloadJSON, err := buildResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
 		"instructions":         effectiveInstructions,
 		"input":                inputItems,
@@ -1570,7 +1579,7 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payload)
+	return a.sendAndStream(meta, cmdID, payloadJSON)
 }
 
 func (a *threadActor) effectiveInstructions(threadID, base string) (string, error) {
@@ -2426,79 +2435,6 @@ func (a *threadActor) resetSession() {
 	if session != nil {
 		_ = session.Close()
 	}
-}
-
-func buildResponseCreatePayload(meta threadstore.ThreadMeta, fields map[string]any) (map[string]any, error) {
-	payload := map[string]any{}
-
-	for key, value := range fields {
-		switch typed := value.(type) {
-		case json.RawMessage:
-			if len(typed) == 0 {
-				continue
-			}
-			decoded, err := rawJSONToAny(typed)
-			if err != nil {
-				return nil, err
-			}
-			payload[key] = decoded
-		case string:
-			if typed != "" {
-				payload[key] = typed
-			}
-		default:
-			if value != nil {
-				payload[key] = value
-			}
-		}
-	}
-
-	if meta.MetadataJSON != "" {
-		if err := mergeStoredJSONField(payload, "metadata", meta.MetadataJSON); err != nil {
-			return nil, err
-		}
-	}
-	if meta.IncludeJSON != "" {
-		if err := mergeStoredJSONField(payload, "include", meta.IncludeJSON); err != nil {
-			return nil, err
-		}
-	}
-	if meta.ToolsJSON != "" {
-		if err := mergeStoredJSONField(payload, "tools", meta.ToolsJSON); err != nil {
-			return nil, err
-		}
-	}
-	if meta.ToolChoiceJSON != "" {
-		if err := mergeStoredJSONField(payload, "tool_choice", meta.ToolChoiceJSON); err != nil {
-			return nil, err
-		}
-	}
-	if meta.ReasoningJSON != "" {
-		if err := mergeStoredJSONField(payload, "reasoning", meta.ReasoningJSON); err != nil {
-			return nil, err
-		}
-	}
-
-	// Strip reasoning summary fields — we don't consume these events yet.
-	if r, ok := payload["reasoning"].(map[string]any); ok {
-		delete(r, "summary")
-		delete(r, "generate_summary")
-	}
-
-	return payload, nil
-}
-
-func mergeStoredJSONField(payload map[string]any, key, raw string) error {
-	if _, exists := payload[key]; exists {
-		return nil
-	}
-
-	decoded, err := rawJSONToAny(json.RawMessage(raw))
-	if err != nil {
-		return err
-	}
-	payload[key] = decoded
-	return nil
 }
 
 func decodeJSONArray(raw json.RawMessage) ([]json.RawMessage, error) {

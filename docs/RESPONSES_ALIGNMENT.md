@@ -8,7 +8,7 @@ It captures:
 
 - what we are trying to preserve
 - what the codebase is actually doing today
-- what small alignment work has already started
+- what small alignment work has already been completed
 - the next small steps that should follow
 
 The goal is that after a context reset, this file is enough to recover the current direction without re-auditing the repo from scratch.
@@ -107,11 +107,30 @@ The first small cleanup step is now done.
 - we removed one small piece of duplicated schema-ish behavior from the socket layer
 - this creates a cleaner seam for future `openai-go` adoption
 
+## Second Alignment Step Completed
+
+The next small cleanup step is now done too.
+
+### What changed
+
+- there is now one canonical worker-side builder for outbound `response.create` payloads in `internal/worker/responsecreate.go`
+- `buildResponseCreatePayload` now returns canonical JSON bytes rather than a mutable `map[string]any`
+- thread start/continue paths now build outbound payloads through that one file
+- recovery replay still extracts stored client payloads, but now re-marshals them back through the same worker-side send path
+- document warmup/query paths now also build their top-level `response.create` payloads through that one file instead of assembling them inline
+
+### Why this is better
+
+- all outbound `response.create` shaping now starts from one worker boundary
+- document execution no longer has its own duplicate top-level payload assembly
+- the code now has one clear place to improve if we start replacing map-based building with upstream types
+- this is a much better seam for selective `openai-go` adoption than spreading typed code through actor and document runtime code
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
 
-- worker/runtime code builds Responses payloads
+- worker/runtime code builds Responses payloads, ideally through `internal/worker/responsecreate.go`
 - `openaiws` sends and receives wire messages
 - stores persist raw JSON plus minimal runtime metadata
 - any future typed adoption from `openai-go` should happen at payload-build or decode boundaries, not inside websocket transport
@@ -122,9 +141,10 @@ We are not yet fully typed against upstream Responses structs.
 
 That means:
 
-- many payloads are still assembled as `map[string]any`
+- the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
 - `openai-go` is not yet the source of truth for outbound request builders
+- the actor still applies a couple of runtime-only payload mutations after decoding the canonical payload back into an object before send
 
 This is acceptable for now, but it is the next area to improve.
 
@@ -132,10 +152,9 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Remove any remaining schema-like helper behavior from `internal/openaiws` so it stays transport-only.
-2. Introduce one worker-side builder boundary for outbound `response.create` payloads.
-3. Start using `openai-go` types selectively at the builder boundary first, not across the whole runtime at once.
-4. Keep storing raw JSON even when typed builders/decoders are introduced.
+1. Move required include injection and document-tool injection into the worker-side builder boundary so `sendAndStream` no longer has to decode canonical payload JSON just to mutate it.
+2. Start using `openai-go` types selectively inside `internal/worker/responsecreate.go` first, not across the whole runtime at once.
+3. Keep storing raw JSON even when typed builders/decoders are introduced.
 
 ## Strong Recommendation
 
@@ -161,6 +180,6 @@ That keeps the runtime close to Responses shape without tying transport, persist
 - `internal/openaiws/session.go`
 - `internal/worker/actor.go`
 - `internal/worker/docexec.go`
+- `internal/worker/responsecreate.go`
 - `internal/threadstore/store.go`
 - `internal/postgresstore/store.go`
-

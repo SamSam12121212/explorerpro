@@ -163,7 +163,7 @@ func TestExtractResponseCreatePayloadLegacyNestedShape(t *testing.T) {
 func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
 	t.Parallel()
 
-	payload, err := buildResponseCreatePayload(threadstore.ThreadMeta{
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{
 		MetadataJSON:   `{"tenant":"acme"}`,
 		IncludeJSON:    `["reasoning.encrypted_content"]`,
 		ToolsJSON:      `[{"type":"function","name":"spawn_subagents"}]`,
@@ -174,6 +174,11 @@ func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	payload, err := decodeResponseCreatePayloadObject(payloadJSON)
+	if err != nil {
+		t.Fatalf("decodeResponseCreatePayloadObject() error = %v", err)
 	}
 
 	if payload["metadata"] == nil {
