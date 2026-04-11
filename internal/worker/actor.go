@@ -503,6 +503,14 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if err != nil {
 		return fmt.Errorf("normalize thread.start include: %w", err)
 	}
+	body.ToolChoice, err = agentcmd.NormalizeToolChoice(body.ToolChoice)
+	if err != nil {
+		return fmt.Errorf("normalize thread.start tool_choice: %w", err)
+	}
+	body.Reasoning, err = agentcmd.NormalizeReasoning(body.Reasoning)
+	if err != nil {
+		return fmt.Errorf("normalize thread.start reasoning: %w", err)
+	}
 
 	now := time.Now().UTC()
 	if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{

@@ -217,3 +217,72 @@ func TestNormalizeIncludeAddsEncryptedContent(t *testing.T) {
 		t.Fatalf("include = %v, want custom include plus required encrypted content", include)
 	}
 }
+
+func TestNormalizeMetadataCanonicalizesValuesToStrings(t *testing.T) {
+	t.Parallel()
+
+	raw, err := NormalizeMetadata(json.RawMessage(`{
+		"tenant":"acme",
+		"branch_index":2,
+		"enabled":true,
+		"filters":{"region":"eu"}
+	}`))
+	if err != nil {
+		t.Fatalf("NormalizeMetadata() error = %v", err)
+	}
+
+	var metadata map[string]string
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if metadata["tenant"] != "acme" {
+		t.Fatalf("tenant = %q, want acme", metadata["tenant"])
+	}
+	if metadata["branch_index"] != "2" {
+		t.Fatalf("branch_index = %q, want 2", metadata["branch_index"])
+	}
+	if metadata["enabled"] != "true" {
+		t.Fatalf("enabled = %q, want true", metadata["enabled"])
+	}
+	if metadata["filters"] != `{"region":"eu"}` {
+		t.Fatalf("filters = %q, want %q", metadata["filters"], `{"region":"eu"}`)
+	}
+}
+
+func TestNormalizeReasoningStripsSummaryFields(t *testing.T) {
+	t.Parallel()
+
+	raw, err := NormalizeReasoning(json.RawMessage(`{"effort":"high","summary":"detailed","generate_summary":"concise"}`))
+	if err != nil {
+		t.Fatalf("NormalizeReasoning() error = %v", err)
+	}
+
+	var reasoning map[string]any
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if reasoning["effort"] != "high" {
+		t.Fatalf("effort = %v, want high", reasoning["effort"])
+	}
+	if _, exists := reasoning["summary"]; exists {
+		t.Fatalf("summary should be omitted, got %#v", reasoning["summary"])
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
+func TestNormalizeToolChoicePreservesStringMode(t *testing.T) {
+	t.Parallel()
+
+	raw, err := NormalizeToolChoice(json.RawMessage(`"required"`))
+	if err != nil {
+		t.Fatalf("NormalizeToolChoice() error = %v", err)
+	}
+
+	if string(raw) != `"required"` {
+		t.Fatalf("NormalizeToolChoice() = %s, want %s", raw, `"required"`)
+	}
+}

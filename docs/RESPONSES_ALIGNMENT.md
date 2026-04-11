@@ -236,6 +236,23 @@ The next builder-boundary cleanup is now done too.
 - this removes the last meaningful object-vs-bytes split inside worker payload construction
 - it makes future typed builder adoption easier because both execution paths now start from the same canonical object form
 
+## Ninth Alignment Step Completed
+
+The next ingress-alignment cleanup is now done too.
+
+### What changed
+
+- `POST /threads` now normalizes `metadata`, `include`, `tool_choice`, and `reasoning` before writing the initial `thread.start` command body and initial `ThreadMeta`
+- shared field-normalization helpers now live in `internal/agentcmd`, so the API layer and worker use the same canonicalization logic for these top-level request fields
+- `thread.start` still re-normalizes `metadata`, `include`, `tool_choice`, and `reasoning` defensively before storing thread state and sending the first response
+
+### Why this is better
+
+- thread state is now much closer to canonical Responses shape from the moment the thread record is created
+- the API layer no longer stores one version of these fields while the worker later rewrites them into another
+- shared normalization logic reduces the risk of the API layer and worker drifting apart on top-level request-shape rules
+- this closes the remaining gap where canonicalization only happened at worker-send time for some fields
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -263,9 +280,9 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Decide whether to normalize the remaining request fields earlier at API ingress as well, so stored thread state is canonical even before the worker processes the first start command.
-2. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
-3. Consider whether the canonical builder should start producing a typed `openai-go` request struct for a narrow top-level slice, while still leaving `input` raw.
+1. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
+2. Consider whether the canonical builder should start producing a typed `openai-go` request struct for a narrow top-level slice, while still leaving `input` raw.
+3. Decide whether `tools` should remain raw for flexibility or start moving onto more upstream types at the builder boundary too.
 
 ## Strong Recommendation
 

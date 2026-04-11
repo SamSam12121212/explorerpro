@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -203,44 +202,11 @@ func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
 }
 
 func normalizeMetadataJSON(raw json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, nil
-	}
-
-	metadata, err := decodeMetadataParam(raw)
-	if err != nil {
-		return nil, err
-	}
-
-	normalized, err := json.Marshal(metadata)
-	if err != nil {
-		return nil, fmt.Errorf("marshal metadata payload: %w", err)
-	}
-	return normalized, nil
+	return agentcmd.NormalizeMetadata(raw)
 }
 
 func decodeMetadataParam(raw json.RawMessage) (shared.Metadata, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-
-	var metadata map[string]any
-	if err := decoder.Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("decode metadata payload: %w", err)
-	}
-
-	return normalizeMetadataMap(metadata), nil
-}
-
-func normalizeMetadataMap(raw map[string]any) shared.Metadata {
-	if len(raw) == 0 {
-		return shared.Metadata{}
-	}
-
-	metadata := make(shared.Metadata, len(raw))
-	for key, value := range raw {
-		metadata[key] = stringifyMetadataValue(value)
-	}
-	return metadata
+	return agentcmd.DecodeMetadata(raw)
 }
 
 func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
@@ -256,12 +222,7 @@ func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
 }
 
 func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
-	var reasoning shared.ReasoningParam
-	if err := json.Unmarshal(raw, &reasoning); err != nil {
-		return shared.ReasoningParam{}, fmt.Errorf("decode reasoning payload: %w", err)
-	}
-
-	return normalizeReasoningParam(reasoning), nil
+	return agentcmd.DecodeReasoning(raw)
 }
 
 func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
@@ -271,35 +232,8 @@ func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 	return reasoning
 }
 
-func stringifyMetadataValue(value any) string {
-	switch typed := value.(type) {
-	case nil:
-		return "null"
-	case string:
-		return typed
-	case json.Number:
-		return typed.String()
-	case bool:
-		if typed {
-			return "true"
-		}
-		return "false"
-	default:
-		raw, err := json.Marshal(typed)
-		if err != nil {
-			return fmt.Sprintf("%v", typed)
-		}
-		return string(raw)
-	}
-}
-
 func decodeToolChoiceParam(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {
-	var toolChoice responses.ResponseNewParamsToolChoiceUnion
-	if err := json.Unmarshal(raw, &toolChoice); err != nil {
-		return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice payload: %w", err)
-	}
-
-	return normalizeToolChoiceParam(toolChoice), nil
+	return agentcmd.DecodeToolChoice(raw)
 }
 
 func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {

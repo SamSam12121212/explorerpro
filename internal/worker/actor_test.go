@@ -955,6 +955,69 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	}
 }
 
+func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_start"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_start"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+
+	body, err := json.Marshal(agentcmd.StartBody{
+		Model:        "gpt-5.4",
+		InitialInput: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
+		Metadata:     json.RawMessage(`{"branch_index":2}`),
+		ToolChoice:   json.RawMessage(`"required"`),
+		Reasoning:    json.RawMessage(`{"effort":"high","summary":"detailed","generate_summary":"concise"}`),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(StartBody) error = %v", err)
+	}
+
+	cmd := agentcmd.Command{
+		CmdID:        "cmd_start",
+		Kind:         agentcmd.KindThreadStart,
+		ThreadID:     "thread_parent",
+		RootThreadID: "thread_parent",
+		Body:         body,
+	}
+
+	if err := actor.handleStart(cmd); err != nil {
+		t.Fatalf("handleStart() error = %v", err)
+	}
+
+	meta := store.threads["thread_parent"]
+
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(meta.MetadataJSON), &metadata); err != nil {
+		t.Fatalf("json.Unmarshal(meta.MetadataJSON) error = %v", err)
+	}
+	if metadata["branch_index"] != "2" {
+		t.Fatalf("branch_index = %q, want 2", metadata["branch_index"])
+	}
+	if meta.ToolChoiceJSON != `"required"` {
+		t.Fatalf("ToolChoiceJSON = %s, want %s", meta.ToolChoiceJSON, `"required"`)
+	}
+
+	var reasoning map[string]any
+	if err := json.Unmarshal([]byte(meta.ReasoningJSON), &reasoning); err != nil {
+		t.Fatalf("json.Unmarshal(meta.ReasoningJSON) error = %v", err)
+	}
+	if reasoning["effort"] != "high" {
+		t.Fatalf("effort = %v, want high", reasoning["effort"])
+	}
+	if _, exists := reasoning["summary"]; exists {
+		t.Fatalf("summary should be omitted, got %#v", reasoning["summary"])
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
 func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	t.Parallel()
 

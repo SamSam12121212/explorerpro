@@ -201,6 +201,21 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	metadata, err := agentcmd.NormalizeMetadata(req.Metadata)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	toolChoice, err := agentcmd.NormalizeToolChoice(req.ToolChoice)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	reasoning, err := agentcmd.NormalizeReasoning(req.Reasoning)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	attachedDocumentIDs, err := normalizeAttachedDocumentIDs(req.AttachedDocumentIDs)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -231,11 +246,11 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		InitialInput:       initialInput,
 		Model:              req.Model,
 		Instructions:       req.Instructions,
-		Metadata:           req.Metadata,
+		Metadata:           metadata,
 		Include:            include,
 		Tools:              req.Tools,
-		ToolChoice:         req.ToolChoice,
-		Reasoning:          req.Reasoning,
+		ToolChoice:         toolChoice,
+		Reasoning:          reasoning,
 		Store:              req.Store,
 		PreviousResponseID: req.PreviousResponseID,
 	})
@@ -251,11 +266,11 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		Status:         threadstore.ThreadStatusNew,
 		Model:          req.Model,
 		Instructions:   req.Instructions,
-		MetadataJSON:   string(req.Metadata),
+		MetadataJSON:   string(metadata),
 		IncludeJSON:    string(include),
 		ToolsJSON:      string(req.Tools),
-		ToolChoiceJSON: string(req.ToolChoice),
-		ReasoningJSON:  string(req.Reasoning),
+		ToolChoiceJSON: string(toolChoice),
+		ReasoningJSON:  string(reasoning),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}); err != nil {
