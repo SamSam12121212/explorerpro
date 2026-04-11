@@ -199,6 +199,25 @@ The next typed request-shape slice is now done too.
 - this removes a correctness gap where valid string modes could be mishandled during child-thread spawn
 - the typed `tool_choice` path also gives us a clearer place to keep runtime-only tools out of child continuations without spreading more raw JSON logic around
 
+## Seventh Alignment Step Completed
+
+The next typed request-shape slice is now done too.
+
+### What changed
+
+- `internal/worker/responsecreate.go` now decodes `metadata` through `openai-go`'s `shared.Metadata`
+- direct request metadata and stored thread `metadata` now both normalize through the same builder-side path
+- metadata values are now canonicalized as strings, which matches the upstream Responses type instead of preserving arbitrary JSON value types
+- warm-branch metadata merging now operates on string metadata values, including `branch_index`
+- `thread.start` now normalizes metadata before thread state is updated by the worker, so stored runtime metadata converges to the canonical string-map shape as soon as the thread is claimed
+
+### Why this is better
+
+- one more top-level Responses request field is now handled through upstream types instead of generic JSON maps
+- warm-branch metadata is no longer the blocker preventing typed metadata adoption
+- stored thread metadata and outbound request metadata now use the same shape once the worker has processed the start command
+- this removes another pocket of custom schema logic while keeping persistence and transport raw where that still helps
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -219,7 +238,6 @@ That means:
 - the canonical builder still internally assembles payloads as `map[string]any`
 - many decoded items/events are still handled as raw JSON plus small helper structs
 - `openai-go` is only the source of truth for a subset of outbound request fields so far
-- `metadata` is still raw at the builder boundary because our warm-branch helper currently injects non-string values such as `branch_index`
 - thread execution and document execution still use slightly different in-memory builder outputs before final marshal
 
 This is acceptable for now, but it is the next area to improve.
@@ -228,8 +246,8 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Decide the metadata normalization rule for branch-specific fields like `branch_index` so we can safely move `metadata` onto upstream string-map types.
-2. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
+1. Standardize the builder boundary on one in-memory representation before final marshal, instead of thread flow using finalized objects and document flow using raw JSON bytes.
+2. Decide whether to normalize the remaining request fields earlier at API ingress as well, so stored thread state is canonical even before the worker processes the first start command.
 3. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
 
 ## Strong Recommendation

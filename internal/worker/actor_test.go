@@ -303,6 +303,79 @@ func TestBuildResponseCreatePayloadNormalizesStoredToolChoiceMode(t *testing.T) 
 	}
 }
 
+func TestBuildResponseCreatePayloadNormalizesMetadataValuesToStrings(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{}, map[string]any{
+		"model": "gpt-5.4",
+		"metadata": json.RawMessage(`{
+			"tenant":"acme",
+			"branch_index":2,
+			"enabled":true,
+			"filters":{"region":"eu"},
+			"tags":["alpha","beta"],
+			"empty":null
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want map[string]any", payload["metadata"])
+	}
+	if metadata["tenant"] != "acme" {
+		t.Fatalf("tenant = %v, want acme", metadata["tenant"])
+	}
+	if metadata["branch_index"] != "2" {
+		t.Fatalf("branch_index = %v, want 2", metadata["branch_index"])
+	}
+	if metadata["enabled"] != "true" {
+		t.Fatalf("enabled = %v, want true", metadata["enabled"])
+	}
+	if metadata["filters"] != `{"region":"eu"}` {
+		t.Fatalf("filters = %v, want %q", metadata["filters"], `{"region":"eu"}`)
+	}
+	if metadata["tags"] != `["alpha","beta"]` {
+		t.Fatalf("tags = %v, want %q", metadata["tags"], `["alpha","beta"]`)
+	}
+	if metadata["empty"] != "null" {
+		t.Fatalf("empty = %v, want null", metadata["empty"])
+	}
+}
+
+func TestBuildResponseCreatePayloadNormalizesStoredMetadata(t *testing.T) {
+	t.Parallel()
+
+	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{
+		MetadataJSON: `{"tenant":"acme","branch_index":2}`,
+	}, map[string]any{
+		"model": "gpt-5.4",
+	})
+	if err != nil {
+		t.Fatalf("buildResponseCreatePayload() error = %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want map[string]any", payload["metadata"])
+	}
+	if metadata["branch_index"] != "2" {
+		t.Fatalf("branch_index = %v, want 2", metadata["branch_index"])
+	}
+}
+
 func TestFormatAvailableDocumentsBlock(t *testing.T) {
 	t.Parallel()
 
@@ -602,11 +675,11 @@ func TestResolveBranchPreviousResponseIDMissingParentResponse(t *testing.T) {
 func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 	t.Parallel()
 
-	merged, err := mergeMetadataJSON(`{"tenant":"acme"}`, map[string]any{
+	merged, err := mergeMetadataJSON(`{"tenant":"acme"}`, map[string]string{
 		"spawn_mode":                spawnModeWarmBranch,
 		"branch_parent_thread_id":   "thread_parent",
 		"branch_parent_response_id": "resp_parent",
-		"branch_index":              2,
+		"branch_index":              "2",
 	}, true)
 	if err != nil {
 		t.Fatalf("mergeMetadataJSON() error = %v", err)
@@ -623,8 +696,14 @@ func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 	if decoded["spawn_mode"] != spawnModeWarmBranch {
 		t.Fatalf("spawn_mode = %v, want %s", decoded["spawn_mode"], spawnModeWarmBranch)
 	}
+	if decoded["branch_parent_thread_id"] != "thread_parent" {
+		t.Fatalf("branch_parent_thread_id = %v, want thread_parent", decoded["branch_parent_thread_id"])
+	}
 	if decoded["branch_parent_response_id"] != "resp_parent" {
 		t.Fatalf("branch_parent_response_id = %v, want resp_parent", decoded["branch_parent_response_id"])
+	}
+	if decoded["branch_index"] != "2" {
+		t.Fatalf("branch_index = %v, want 2", decoded["branch_index"])
 	}
 }
 

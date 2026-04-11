@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -134,10 +135,10 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 		if typed == "" {
 			return nil, false, nil
 		}
-		if key == "tool_choice" {
+		if key == "tool_choice" || key == "metadata" {
 			raw, err := json.Marshal(typed)
 			if err != nil {
-				return nil, false, fmt.Errorf("marshal tool_choice payload: %w", err)
+				return nil, false, fmt.Errorf("marshal %s payload: %w", key, err)
 			}
 			decoded, err := decodeResponseCreateField(key, raw)
 			if err != nil {
@@ -146,12 +147,14 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 			return decoded, true, nil
 		}
 		return typed, true, nil
+	case shared.Metadata:
+		return normalizeSharedMetadataParam(typed), true, nil
 	case shared.ReasoningParam:
 		return normalizeReasoningParam(typed), true, nil
 	case responses.ResponseNewParamsToolChoiceUnion:
 		return normalizeToolChoiceParam(typed), true, nil
 	case map[string]any:
-		if key != "reasoning" && key != "tool_choice" {
+		if key != "metadata" && key != "reasoning" && key != "tool_choice" {
 			return typed, true, nil
 		}
 		raw, err := json.Marshal(typed)
@@ -167,12 +170,25 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 		if value == nil {
 			return nil, false, nil
 		}
+		if key == "metadata" {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return nil, false, fmt.Errorf("marshal metadata payload: %w", err)
+			}
+			decoded, err := decodeResponseCreateField(key, raw)
+			if err != nil {
+				return nil, false, err
+			}
+			return decoded, true, nil
+		}
 		return value, true, nil
 	}
 }
 
 func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
 	switch key {
+	case "metadata":
+		return decodeMetadataParam(raw)
 	case "reasoning":
 		return decodeReasoningParam(raw)
 	case "tool_choice":
@@ -180,6 +196,59 @@ func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
 	default:
 		return rawJSONToAny(raw)
 	}
+}
+
+func normalizeMetadataJSON(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+
+	metadata, err := decodeMetadataParam(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	normalized, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("marshal metadata payload: %w", err)
+	}
+	return normalized, nil
+}
+
+func decodeMetadataParam(raw json.RawMessage) (shared.Metadata, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+
+	var metadata map[string]any
+	if err := decoder.Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("decode metadata payload: %w", err)
+	}
+
+	return normalizeMetadataMap(metadata), nil
+}
+
+func normalizeMetadataMap(raw map[string]any) shared.Metadata {
+	if len(raw) == 0 {
+		return shared.Metadata{}
+	}
+
+	metadata := make(shared.Metadata, len(raw))
+	for key, value := range raw {
+		metadata[key] = stringifyMetadataValue(value)
+	}
+	return metadata
+}
+
+func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
+	if len(raw) == 0 {
+		return shared.Metadata{}
+	}
+
+	metadata := make(shared.Metadata, len(raw))
+	for key, value := range raw {
+		metadata[key] = value
+	}
+	return metadata
 }
 
 func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
@@ -196,6 +265,28 @@ func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 	reasoning.Summary = ""
 	reasoning.GenerateSummary = ""
 	return reasoning
+}
+
+func stringifyMetadataValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return typed
+	case json.Number:
+		return typed.String()
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprintf("%v", typed)
+		}
+		return string(raw)
+	}
 }
 
 func decodeToolChoiceParam(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {

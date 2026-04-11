@@ -24,6 +24,7 @@ import (
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 var (
@@ -493,6 +494,10 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	body.InitialInput, err = normalizeInputItems(body.InitialInput)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start initial_input: %w", err)
+	}
+	body.Metadata, err = normalizeMetadataJSON(body.Metadata)
+	if err != nil {
+		return fmt.Errorf("normalize thread.start metadata: %w", err)
 	}
 	body.Include, err = agentcmd.NormalizeInclude(body.Include)
 	if err != nil {
@@ -2616,11 +2621,11 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 			}
 			childIncludeJSON = string(normalizedInclude)
 		}
-		childMetadataJSON, err = mergeMetadataJSON(childMetadataJSON, map[string]any{
+		childMetadataJSON, err = mergeMetadataJSON(childMetadataJSON, map[string]string{
 			"spawn_mode":                spawnMode,
 			"branch_parent_thread_id":   parentMeta.ID,
 			"branch_parent_response_id": branchPreviousResponseID,
-			"branch_index":              index + 1,
+			"branch_index":              strconv.Itoa(index + 1),
 		}, spawnMode == spawnModeWarmBranch)
 		if err != nil {
 			return "", fmt.Errorf("merge child metadata: %w", err)
@@ -2868,17 +2873,19 @@ func resolveBranchPreviousResponseID(request spawnRequest, parentMeta threadstor
 	return previousResponseID, nil
 }
 
-func mergeMetadataJSON(existing string, extra map[string]any, enabled bool) (string, error) {
+func mergeMetadataJSON(existing string, extra map[string]string, enabled bool) (string, error) {
 	existing = strings.TrimSpace(existing)
 	if !enabled && existing == "" {
 		return "", nil
 	}
 
-	payload := map[string]any{}
+	payload := shared.Metadata{}
 	if existing != "" {
-		if err := json.Unmarshal([]byte(existing), &payload); err != nil {
+		decoded, err := decodeMetadataParam(json.RawMessage(existing))
+		if err != nil {
 			return "", fmt.Errorf("decode metadata json: %w", err)
 		}
+		payload = decoded
 	}
 	if enabled {
 		for key, value := range extra {
