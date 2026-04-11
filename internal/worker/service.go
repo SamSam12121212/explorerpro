@@ -26,12 +26,15 @@ import (
 )
 
 const (
-	commandAckWait   = 30 * time.Minute
-	workerLeaseTTL   = 2 * time.Minute
-	socketExpiryTTL  = 55 * time.Minute
-	socketRotateLead = 5 * time.Minute
-	commandQueueSize = 128
-	recoverySweepTTL = 15 * time.Second
+	commandAckWait         = 30 * time.Minute
+	workerLeaseTTL         = 2 * time.Minute
+	socketExpiryTTL        = 55 * time.Minute
+	socketRotateLead       = 5 * time.Minute
+	commandQueueSize       = 128
+	recoverySweepTTL       = 15 * time.Second
+	documentSessionIdleTTL = 10 * time.Minute
+	documentSessionMaxTTL  = 50 * time.Minute
+	documentQueryParallel  = 4
 )
 
 type Service struct {
@@ -80,6 +83,9 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		SessionFactory: sessionFactory,
 		Docs:           docStore,
 		ThreadDocs:     threadDocs,
+		SessionIdleTTL: documentSessionIdleTTL,
+		SessionMaxTTL:  documentSessionMaxTTL,
+		MaxParallel:    documentQueryParallel,
 	})
 
 	return &Service{
@@ -376,6 +382,12 @@ func (s *Service) runRecoveryLoop(ctx context.Context) {
 }
 
 func (s *Service) recoverThreads(ctx context.Context) {
+	if s.docExec != nil {
+		if err := s.docExec.CloseIdleSessions(time.Now().UTC()); err != nil {
+			s.logger.Warn("failed to close idle document sessions", "error", err)
+		}
+	}
+
 	for _, status := range recoverySweepStatuses() {
 		threadIDs, err := s.sweepStore.ListThreadIDsByStatus(ctx, status)
 		if err != nil {

@@ -185,6 +185,7 @@ func (a *threadActor) Close() error {
 	if session != nil {
 		errs = append(errs, session.Close())
 	}
+	a.closeDocumentSessions(meta.ID)
 
 	if meta.ID != "" && meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		errs = append(errs, a.store.ReleaseOwnership(context.Background(), meta.ID, a.workerID, meta.SocketGeneration))
@@ -1005,6 +1006,7 @@ func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
 			return err
 		}
 	}
+	a.closeDocumentSessions(meta.ID)
 
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
@@ -1029,6 +1031,7 @@ func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
 	a.stopIdleLoop()
 	a.stopLeaseLoop()
 	a.resetSession()
+	a.closeDocumentSessions(meta.ID)
 
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
@@ -1138,6 +1141,7 @@ func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMet
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
 	a.resetSession()
+	a.closeDocumentSessions(meta.ID)
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -1308,6 +1312,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	if session != nil {
 		_ = session.Close()
 	}
+	a.closeDocumentSessions(a.threadID)
 
 	a.cancel()
 }
@@ -2307,10 +2312,20 @@ func (a *threadActor) currentMeta() threadstore.ThreadMeta {
 	return a.meta
 }
 
+func (a *threadActor) closeDocumentSessions(threadID string) {
+	if a.docExec == nil || strings.TrimSpace(threadID) == "" {
+		return
+	}
+	if err := a.docExec.CloseThread(threadID); err != nil {
+		a.logger.Warn("failed to close document sessions", "thread_id", threadID, "error", err)
+	}
+}
+
 func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta) error {
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
 	a.resetSession()
+	a.closeDocumentSessions(meta.ID)
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {

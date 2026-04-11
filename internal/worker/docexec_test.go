@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +131,182 @@ func TestQueryDocumentOmitsInstructions(t *testing.T) {
 	}
 }
 
+func TestExecuteReusesThreadDocumentSession(t *testing.T) {
+	ctx := context.Background()
+	blob := newTestBlobStore(t)
+
+	doc := writeReadyTestDocument(t, ctx, blob, "doc_1", "report.pdf")
+
+	conn := &fakeDocConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_warm"}}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_warm"}`),
+			[]byte(`{"type":"response.created","response":{"id":"resp_query_1"}}`),
+			[]byte(`{"type":"response.output_text.delta","delta":"first"}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_query_1"}`),
+			[]byte(`{"type":"response.created","response":{"id":"resp_query_2"}}`),
+			[]byte(`{"type":"response.output_text.delta","delta":"second"}`),
+			[]byte(`{"type":"response.completed","response_id":"resp_query_2"}`),
+		},
+	}
+	dialer := &countingDocDialer{conn: conn}
+
+	docs := &fakeExecDocStore{
+		documents: map[string]docstore.Document{
+			doc.ID: doc,
+		},
+	}
+	threadDocs := &fakeExecThreadDocStore{
+		lineage: map[string]string{},
+	}
+
+	exec := newDocumentExec(documentExecConfig{
+		Blob: blob,
+		SessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(testOpenAIWSConfig(), dialer)
+		},
+		Docs:           docs,
+		ThreadDocs:     threadDocs,
+		SessionIdleTTL: time.Hour,
+		SessionMaxTTL:  time.Hour,
+		MaxParallel:    2,
+	})
+
+	first := exec.Execute(ctx, docExecRequest{
+		ThreadID:    "thread_1",
+		DocumentIDs: []string{doc.ID},
+		Task:        "Summarize the document.",
+		Model:       "gpt-5.4",
+	})
+	second := exec.Execute(ctx, docExecRequest{
+		ThreadID:    "thread_1",
+		DocumentIDs: []string{doc.ID},
+		Task:        "What changed in the follow-up?",
+		Model:       "gpt-5.4",
+	})
+
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("unexpected result lengths: first=%d second=%d", len(first), len(second))
+	}
+	if first[0].Answer != "first" || first[0].ResponseID != "resp_query_1" {
+		t.Fatalf("first result = %#v, want answer=first response_id=resp_query_1", first[0])
+	}
+	if second[0].Answer != "second" || second[0].ResponseID != "resp_query_2" {
+		t.Fatalf("second result = %#v, want answer=second response_id=resp_query_2", second[0])
+	}
+	if got := dialer.Dials(); got != 1 {
+		t.Fatalf("dial count = %d, want 1 reused session", got)
+	}
+	if got := threadDocs.Lineage("thread_1", doc.ID); got != "resp_query_2" {
+		t.Fatalf("stored lineage = %q, want %q", got, "resp_query_2")
+	}
+	if got := docs.Document(doc.ID).BaseResponseID; got != "resp_warm" {
+		t.Fatalf("base_response_id = %q, want %q", got, "resp_warm")
+	}
+
+	if len(conn.writes) != 3 {
+		t.Fatalf("writes = %d, want 3 (warmup + 2 queries)", len(conn.writes))
+	}
+
+	warmPayload := decodeSentResponseCreateAt(t, conn, 0)
+	if got := warmPayload["generate"]; got != false {
+		t.Fatalf("warmup generate = %v, want false", got)
+	}
+
+	firstQueryPayload := decodeSentResponseCreateAt(t, conn, 1)
+	if got := firstQueryPayload["previous_response_id"]; got != "resp_warm" {
+		t.Fatalf("first query previous_response_id = %v, want %q", got, "resp_warm")
+	}
+
+	secondQueryPayload := decodeSentResponseCreateAt(t, conn, 2)
+	if got := secondQueryPayload["previous_response_id"]; got != "resp_query_1" {
+		t.Fatalf("second query previous_response_id = %v, want %q", got, "resp_query_1")
+	}
+}
+
+func TestExecuteQueriesDocumentsInParallel(t *testing.T) {
+	ctx := context.Background()
+	blob := newTestBlobStore(t)
+
+	doc1 := writeReadyTestDocument(t, ctx, blob, "doc_1", "doc-1.pdf")
+	doc2 := writeReadyTestDocument(t, ctx, blob, "doc_2", "doc-2.pdf")
+
+	conn1 := &delayedDocConn{
+		fakeDocConn: &fakeDocConn{
+			reads: [][]byte{
+				[]byte(`{"type":"response.created","response":{"id":"resp_doc_1"}}`),
+				[]byte(`{"type":"response.output_text.delta","delta":"alpha"}`),
+				[]byte(`{"type":"response.completed","response_id":"resp_doc_1"}`),
+			},
+		},
+		delay: 150 * time.Millisecond,
+	}
+	conn2 := &delayedDocConn{
+		fakeDocConn: &fakeDocConn{
+			reads: [][]byte{
+				[]byte(`{"type":"response.created","response":{"id":"resp_doc_2"}}`),
+				[]byte(`{"type":"response.output_text.delta","delta":"beta"}`),
+				[]byte(`{"type":"response.completed","response_id":"resp_doc_2"}`),
+			},
+		},
+		delay: 150 * time.Millisecond,
+	}
+	dialer := &queueDocDialer{
+		conns: []openaiws.Conn{conn1, conn2},
+	}
+
+	exec := newDocumentExec(documentExecConfig{
+		Blob: blob,
+		SessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(testOpenAIWSConfig(), dialer)
+		},
+		Docs: &fakeExecDocStore{
+			documents: map[string]docstore.Document{
+				doc1.ID: doc1,
+				doc2.ID: doc2,
+			},
+		},
+		ThreadDocs: &fakeExecThreadDocStore{
+			lineage: map[string]string{
+				threadDocKey("thread_parallel", doc1.ID): "resp_prev_1",
+				threadDocKey("thread_parallel", doc2.ID): "resp_prev_2",
+			},
+		},
+		SessionIdleTTL: time.Hour,
+		SessionMaxTTL:  time.Hour,
+		MaxParallel:    2,
+	})
+
+	start := time.Now()
+	results := exec.Execute(ctx, docExecRequest{
+		ThreadID:    "thread_parallel",
+		DocumentIDs: []string{doc1.ID, doc2.ID},
+		Task:        "Summarize the attached document.",
+		Model:       "gpt-5.4",
+	})
+	elapsed := time.Since(start)
+
+	if elapsed >= 250*time.Millisecond {
+		t.Fatalf("Execute() took %s, want parallel execution under 250ms", elapsed)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results length = %d, want 2", len(results))
+	}
+	if results[0].DocumentID != doc1.ID || results[1].DocumentID != doc2.ID {
+		t.Fatalf("results document order = %#v, want [%s %s]", results, doc1.ID, doc2.ID)
+	}
+	gotAnswers := map[string]bool{
+		results[0].Answer: true,
+		results[1].Answer: true,
+	}
+	if !gotAnswers["alpha"] || !gotAnswers["beta"] {
+		t.Fatalf("answers = %#v, want alpha and beta", results)
+	}
+	if got := dialer.Dials(); got != 2 {
+		t.Fatalf("dial count = %d, want 2", got)
+	}
+}
+
 func newTestBlobStore(t *testing.T) *blobstore.LocalStore {
 	t.Helper()
 
@@ -169,6 +347,23 @@ func decodeSentResponseCreate(t *testing.T, conn *fakeDocConn) map[string]any {
 	return payload
 }
 
+func decodeSentResponseCreateAt(t *testing.T, conn *fakeDocConn, index int) map[string]any {
+	t.Helper()
+
+	if len(conn.writes) <= index {
+		t.Fatalf("writes = %d, want index %d", len(conn.writes), index)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(conn.writes[index], &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got := payload["type"]; got != "response.create" {
+		t.Fatalf("type = %v, want %q", got, "response.create")
+	}
+	return payload
+}
+
 func decodeSingleMessageContent(t *testing.T, payload map[string]any) []any {
 	t.Helper()
 
@@ -197,6 +392,172 @@ type fakeDocDialer struct {
 
 func (d *fakeDocDialer) Dial(context.Context, openaiws.DialRequest) (openaiws.Conn, error) {
 	return d.conn, nil
+}
+
+type countingDocDialer struct {
+	mu    sync.Mutex
+	conn  openaiws.Conn
+	dials int
+}
+
+func (d *countingDocDialer) Dial(context.Context, openaiws.DialRequest) (openaiws.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dials++
+	return d.conn, nil
+}
+
+func (d *countingDocDialer) Dials() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dials
+}
+
+type queueDocDialer struct {
+	mu    sync.Mutex
+	conns []openaiws.Conn
+	dials int
+}
+
+func (d *queueDocDialer) Dial(context.Context, openaiws.DialRequest) (openaiws.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if len(d.conns) == 0 {
+		return nil, fmt.Errorf("no queued doc connections")
+	}
+
+	conn := d.conns[0]
+	d.conns = d.conns[1:]
+	d.dials++
+	return conn, nil
+}
+
+func (d *queueDocDialer) Dials() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dials
+}
+
+type delayedDocConn struct {
+	*fakeDocConn
+	delay     time.Duration
+	readCount int
+	mu        sync.Mutex
+}
+
+func (c *delayedDocConn) Read(ctx context.Context) ([]byte, error) {
+	c.mu.Lock()
+	shouldDelay := c.readCount == 0 && c.delay > 0
+	c.readCount++
+	c.mu.Unlock()
+
+	if shouldDelay {
+		time.Sleep(c.delay)
+	}
+
+	return c.fakeDocConn.Read(ctx)
+}
+
+type fakeExecDocStore struct {
+	mu        sync.Mutex
+	documents map[string]docstore.Document
+}
+
+func (s *fakeExecDocStore) Get(_ context.Context, id string) (docstore.Document, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, ok := s.documents[id]
+	if !ok {
+		return docstore.Document{}, docstore.ErrDocumentNotFound
+	}
+	return doc, nil
+}
+
+func (s *fakeExecDocStore) UpdateBaseLineage(_ context.Context, id, baseResponseID, baseModel string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, ok := s.documents[id]
+	if !ok {
+		return docstore.ErrDocumentNotFound
+	}
+	doc.BaseResponseID = baseResponseID
+	doc.BaseModel = baseModel
+	s.documents[id] = doc
+	return nil
+}
+
+func (s *fakeExecDocStore) Document(id string) docstore.Document {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.documents[id]
+}
+
+type fakeExecThreadDocStore struct {
+	mu      sync.Mutex
+	lineage map[string]string
+}
+
+func (s *fakeExecThreadDocStore) GetLineage(_ context.Context, threadID, documentID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lineage[threadDocKey(threadID, documentID)], nil
+}
+
+func (s *fakeExecThreadDocStore) UpdateLineage(_ context.Context, threadID, documentID, responseID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lineage == nil {
+		s.lineage = map[string]string{}
+	}
+	s.lineage[threadDocKey(threadID, documentID)] = responseID
+	return nil
+}
+
+func (s *fakeExecThreadDocStore) Lineage(threadID, documentID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lineage[threadDocKey(threadID, documentID)]
+}
+
+func threadDocKey(threadID, documentID string) string {
+	return threadID + "::" + documentID
+}
+
+func writeReadyTestDocument(t *testing.T, ctx context.Context, blob *blobstore.LocalStore, docID, filename string) docstore.Document {
+	t.Helper()
+
+	imageRef := blob.Ref("documents", docID, "pages", "page-0001.png")
+	if err := blob.WriteRef(ctx, imageRef, []byte("png")); err != nil {
+		t.Fatalf("WriteRef(image) error = %v", err)
+	}
+
+	manifest := docsplitter.Manifest{
+		DocumentID: docID,
+		Filename:   filename,
+		PageCount:  1,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: imageRef, ContentType: "image/png"},
+		},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("json.Marshal(manifest) error = %v", err)
+	}
+
+	manifestRef := blob.Ref("documents", docID, "manifest.json")
+	if err := blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
+		t.Fatalf("WriteRef(manifest) error = %v", err)
+	}
+
+	return docstore.Document{
+		ID:          docID,
+		Filename:    filename,
+		ManifestRef: manifestRef,
+		Status:      "ready",
+	}
 }
 
 type fakeDocConn struct {

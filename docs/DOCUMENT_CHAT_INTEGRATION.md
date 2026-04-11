@@ -215,6 +215,10 @@ Implemented behavior:
 - after a successful query, the resulting response ID is persisted on `thread_documents.latest_response_id`
 - after a successful warmup, the resulting response ID is persisted on `documents.base_response_id`
 - if a query fails (stale lineage, OpenAI error), the executor retries once with a fresh warmup
+- the executor now keeps a hot reusable session cache keyed by `thread_id + document_id`
+- repeated queries for the same document in the same thread can therefore reuse a live worker-owned document socket and continue from the latest hot response ID
+- documents within one `query_attached_documents` call now execute in parallel (bounded worker-local fan-out)
+- idle or over-age hot document sessions are closed by the worker sweep, and thread-owned document sessions are closed when thread ownership is released
 - the self-published command follows the normal `handleSubmitToolOutput` path, so the thread continues cleanly
 - the document query tool is stripped from subagent tools via `filterSubagentTools` to prevent children from querying documents directly
 - if both a document query and another unknown tool are pending, the thread falls back to `waiting_tool` for all tools (no partial auto-handling)
@@ -477,10 +481,12 @@ What is now implemented:
 - shared base-anchor reuse (Case B)
 - warmup bootstrap when no lineage exists (Case C)
 - rebuild-on-error: retry once with fresh warmup if lineage is rejected (Case D)
+- hot per-thread/per-document session reuse for follow-up queries
+- bounded parallel execution across multiple documents in a single tool call
 
 What still does not exist yet:
 
-- no idle/rotation policy yet specifically for hot worker-owned document sockets (each query opens a fresh session for now)
+- no dedicated ping/heartbeat loop or explicit rotation command path yet for hot document sessions
 - no prompt/model version tracking for base anchor staleness detection
 
 ### 4. The worker now has two fully implemented tool runners
@@ -582,6 +588,8 @@ Current owner:
 - it checks thread-local lineage first, then shared base anchor
 - if no usable lineage exists, the executor warms the document by sending all page images
 - then the executor runs the actual question on a separate worker-owned document session
+- the executor keeps a hot per-thread/per-document session around for reuse when follow-up queries hit the same attached document
+- if multiple documents are queried in one tool call, the executor fans them out in parallel using separate worker-owned document sessions
 - lineage is persisted after each successful warmup and query
 - if lineage is rejected by OpenAI, the executor retries once with a fresh warmup
 - thread resumes with tool output via self-published `thread.submit_tool_output`
@@ -597,11 +605,11 @@ The document executor is now real. The next sensible steps are:
 
 1. **Live end-to-end validation** — upload a PDF, attach it to a chat thread, ask a document question, and verify the full round-trip works with real OpenAI responses.
 
-2. **Document session socket pooling** — currently each document query opens a fresh WebSocket session and closes it immediately after. A hot-session cache per document would improve latency for follow-up queries in the same thread.
+2. **Live latency/robustness validation** — verify hot document sessions are actually reused across follow-up questions in the same thread, and verify reconnect/rebuild behavior after forced socket loss.
 
 3. **Prompt/model version tracking** — the `base_prompt_version` and `base_manifest_ref` fields discussed in the design are not yet stored. This would enable invalidating the base anchor when the document analysis prompt or model contract changes materially.
 
-4. **Multi-document parallelism** — currently documents in a single `query_attached_documents` call are queried sequentially. Parallel execution using multiple worker-owned sockets would improve throughput.
+4. **Document-session observability** — add metrics/logging for cache hits, reconnects, rebuilds, idle closes, and parallel fan-out so we can tune concurrency and TTLs with real traffic.
 
 5. **Decide `documenthandler` role** — the service shell exists but does nothing. If there is non-OpenAI document work (e.g., OCR, text extraction), it could go here. Otherwise it can be removed.
 
@@ -611,7 +619,8 @@ The current backend shape is now:
 - `thread_documents` has lineage columns (`latest_response_id`, `initialized_at`, `last_used_at`) — populated after each query
 - the `query_attached_documents` tool is injected when docs are attached
 - the worker dispatches document tool calls to a real executor
-- the executor opens its own OpenAI session, resolves lineage, queries, persists results
+- the executor keeps hot per-thread/per-document OpenAI sessions for reuse, resolves lineage, queries, persists results
+- multiple documents in one tool call can now run in parallel on separate worker-owned sockets
 - the full round-trip from model tool call → dispatch → document executor → real OpenAI query → self-publish tool output → thread continuation works
 
 ## Implemented Tool Shape
@@ -792,13 +801,14 @@ Where we are now:
 - the lineage schema is in place and actively used (`base_response_id` on documents, `latest_response_id` on thread_documents)
 - the `query_attached_documents` tool is defined, injected, dispatched, validated, and executed for real
 - the worker-local document executor loads manifests, opens separate OpenAI sessions, resolves lineage, sends page images, persists results, and handles rebuild-on-error
+- hot per-thread/per-document document sessions are now reused for follow-up queries
+- multi-document tool calls now fan out in parallel across separate worker-owned document sessions
 - the full tool call round-trip works end to end (model calls tool → worker dispatches → document executor queries OpenAI → real answer → self-publish → thread continues)
 - lineage is persisted after each query (thread-local) and after each warmup (shared base anchor)
 
 What comes next:
 
 - live end-to-end validation with a real PDF and OpenAI
-- document session socket pooling for lower-latency follow-up queries
 - prompt/model version tracking for base anchor staleness detection
-- multi-document parallel execution
+- document-session observability and tuning
 - decide whether `documenthandler` needs any non-OpenAI role
