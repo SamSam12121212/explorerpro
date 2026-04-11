@@ -286,3 +286,38 @@ func TestNormalizeToolChoicePreservesStringMode(t *testing.T) {
 		t.Fatalf("NormalizeToolChoice() = %s, want %s", raw, `"required"`)
 	}
 }
+
+func TestNormalizeToolsPreservesSupportedTools(t *testing.T) {
+	t.Parallel()
+
+	raw, err := NormalizeTools(json.RawMessage(`[
+		{"type":"function","name":"lookup","parameters":{"type":"object"},"strict":true},
+		{"type":"web_search_preview"}
+	]`))
+	if err != nil {
+		t.Fatalf("NormalizeTools() error = %v", err)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2", len(tools))
+	}
+	if tools[0]["name"] != "lookup" {
+		t.Fatalf("tools[0].name = %v, want lookup", tools[0]["name"])
+	}
+	if tools[1]["type"] != "web_search_preview" {
+		t.Fatalf("tools[1].type = %v, want web_search_preview", tools[1]["type"])
+	}
+}
+
+func TestNormalizeToolsRejectsUnknownTool(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NormalizeTools(json.RawMessage(`[{"type":"definitely_not_a_tool"}]`)); err == nil {
+		t.Fatal("expected NormalizeTools() to reject unknown tool")
+	}
+}

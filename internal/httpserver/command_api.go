@@ -211,6 +211,11 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tools, err := agentcmd.NormalizeTools(req.Tools)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	reasoning, err := agentcmd.NormalizeReasoning(req.Reasoning)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -248,7 +253,7 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		Instructions:       req.Instructions,
 		Metadata:           metadata,
 		Include:            include,
-		Tools:              req.Tools,
+		Tools:              tools,
 		ToolChoice:         toolChoice,
 		Reasoning:          reasoning,
 		Store:              req.Store,
@@ -268,7 +273,7 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		Instructions:   req.Instructions,
 		MetadataJSON:   string(metadata),
 		IncludeJSON:    string(include),
-		ToolsJSON:      string(req.Tools),
+		ToolsJSON:      string(tools),
 		ToolChoiceJSON: string(toolChoice),
 		ReasoningJSON:  string(reasoning),
 		CreatedAt:      now,

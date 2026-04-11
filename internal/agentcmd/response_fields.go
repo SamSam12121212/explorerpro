@@ -81,6 +81,23 @@ func NormalizeToolChoice(raw json.RawMessage) (json.RawMessage, error) {
 	return normalized, nil
 }
 
+func NormalizeTools(raw json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+
+	tools, err := DecodeTools(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	normalized, err := json.Marshal(tools)
+	if err != nil {
+		return nil, fmt.Errorf("marshal tools payload: %w", err)
+	}
+	return normalized, nil
+}
+
 func DecodeToolChoice(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {
 	var toolChoice responses.ResponseNewParamsToolChoiceUnion
 	if err := json.Unmarshal(raw, &toolChoice); err != nil {
@@ -88,6 +105,21 @@ func DecodeToolChoice(raw json.RawMessage) (responses.ResponseNewParamsToolChoic
 	}
 
 	return normalizeToolChoiceParam(toolChoice), nil
+}
+
+func DecodeTools(raw json.RawMessage) ([]responses.ToolUnionParam, error) {
+	var tools []responses.ToolUnionParam
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return nil, fmt.Errorf("decode tools payload: %w", err)
+	}
+
+	for idx, tool := range tools {
+		if !isRecognizedToolParam(tool) {
+			return nil, fmt.Errorf("decode tools payload: unsupported tool at index %d", idx)
+		}
+	}
+
+	return tools, nil
 }
 
 func normalizeMetadataMap(raw map[string]any) shared.Metadata {
@@ -111,6 +143,34 @@ func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 
 func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {
 	return toolChoice
+}
+
+func normalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
+	cloned := make([]responses.ToolUnionParam, len(tools))
+	copy(cloned, tools)
+	return cloned
+}
+
+func NormalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
+	return normalizeToolsParam(tools)
+}
+
+func isRecognizedToolParam(tool responses.ToolUnionParam) bool {
+	return tool.OfFunction != nil ||
+		tool.OfFileSearch != nil ||
+		tool.OfComputer != nil ||
+		tool.OfComputerUsePreview != nil ||
+		tool.OfWebSearch != nil ||
+		tool.OfMcp != nil ||
+		tool.OfCodeInterpreter != nil ||
+		tool.OfImageGeneration != nil ||
+		tool.OfLocalShell != nil ||
+		tool.OfShell != nil ||
+		tool.OfCustom != nil ||
+		tool.OfNamespace != nil ||
+		tool.OfToolSearch != nil ||
+		tool.OfWebSearchPreview != nil ||
+		tool.OfApplyPatch != nil
 }
 
 func stringifyMetadataValue(value any) string {

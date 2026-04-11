@@ -154,8 +154,23 @@ func normalizeResponseCreateField(key string, value any) (any, bool, error) {
 		return normalizeSharedMetadataParam(typed), true, nil
 	case shared.ReasoningParam:
 		return normalizeReasoningParam(typed), true, nil
+	case []responses.ToolUnionParam:
+		return normalizeToolsParam(typed), true, nil
 	case responses.ResponseNewParamsToolChoiceUnion:
 		return normalizeToolChoiceParam(typed), true, nil
+	case []any:
+		if key != "tools" {
+			return typed, true, nil
+		}
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal tools payload: %w", err)
+		}
+		decoded, err := decodeResponseCreateField(key, raw)
+		if err != nil {
+			return nil, false, err
+		}
+		return decoded, true, nil
 	case map[string]any:
 		if key != "metadata" && key != "reasoning" && key != "tool_choice" {
 			return typed, true, nil
@@ -194,6 +209,8 @@ func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
 		return decodeMetadataParam(raw)
 	case "reasoning":
 		return decodeReasoningParam(raw)
+	case "tools":
+		return decodeToolsParam(raw)
 	case "tool_choice":
 		return decodeToolChoiceParam(raw)
 	default:
@@ -219,6 +236,38 @@ func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
 		metadata[key] = value
 	}
 	return metadata
+}
+
+func decodeToolsParam(raw json.RawMessage) ([]responses.ToolUnionParam, error) {
+	return agentcmd.DecodeTools(raw)
+}
+
+func normalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
+	return agentcmd.NormalizeToolsParam(tools)
+}
+
+func decodePayloadTools(value any) ([]responses.ToolUnionParam, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case []responses.ToolUnionParam:
+		return normalizeToolsParam(typed), nil
+	case []any:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tools payload: %w", err)
+		}
+		return decodeToolsParam(raw)
+	default:
+		return nil, fmt.Errorf("tools payload has unsupported type %T", value)
+	}
+}
+
+func toolParamName(tool responses.ToolUnionParam) string {
+	if name := tool.GetName(); name != nil {
+		return *name
+	}
+	return ""
 }
 
 func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
@@ -303,8 +352,8 @@ func ensureRequiredResponseInclude(payload map[string]any) error {
 	return nil
 }
 
-func queryAttachedDocumentsToolDef() (map[string]any, error) {
-	return marshalJSONObject(responses.ToolUnionParam{
+func queryAttachedDocumentsToolDef() responses.ToolUnionParam {
+	return responses.ToolUnionParam{
 		OfFunction: &responses.FunctionToolParam{
 			Name:        toolNameQueryAttachedDocuments,
 			Description: openai.String("Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Describe what you need in the task field; mention specific page numbers there if needed."),
@@ -326,22 +375,5 @@ func queryAttachedDocumentsToolDef() (map[string]any, error) {
 				"required": []string{"document_ids", "task"},
 			},
 		},
-	})
-}
-
-func marshalJSONObject(value any) (map[string]any, error) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("marshal json object: %w", err)
 	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, fmt.Errorf("decode json object: %w", err)
-	}
-	if decoded == nil {
-		return nil, fmt.Errorf("value did not encode as a json object")
-	}
-
-	return decoded, nil
 }

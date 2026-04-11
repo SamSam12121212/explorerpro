@@ -253,6 +253,25 @@ The next ingress-alignment cleanup is now done too.
 - shared normalization logic reduces the risk of the API layer and worker drifting apart on top-level request-shape rules
 - this closes the remaining gap where canonicalization only happened at worker-send time for some fields
 
+## Tenth Alignment Step Completed
+
+The next top-level request field slice is now done too.
+
+### What changed
+
+- shared normalization helpers in `internal/agentcmd` now normalize `tools` through `openai-go`'s request-side tool union
+- `POST /threads` now normalizes `tools` before writing the initial `thread.start` body and initial `ThreadMeta`
+- `thread.start` now defensively re-normalizes `tools` before storing thread state and sending the first response
+- the canonical payload builder now decodes `tools` into typed `responses.ToolUnionParam` slices
+- document-tool injection and child-tool filtering now operate on typed tool definitions instead of generic `[]any` or `[]map[string]any`
+
+### Why this is better
+
+- `tools` was the biggest remaining top-level request field still intentionally raw, and it now sits much closer to the real Responses request shape
+- the API layer, worker builder, and child-thread filtering now share one request-side understanding of tool definitions
+- runtime-only tool injection and filtering now happen against typed tool objects rather than ad hoc maps
+- this moves the remaining alignment work away from individual top-level fields and toward the request builder structure itself
+
 ## Current Rule Going Forward
 
 For now, the intended rule is:
@@ -280,9 +299,9 @@ This is acceptable for now, but it is the next area to improve.
 
 The next good small steps are:
 
-1. Pick the next top-level request fields worth typing at the builder boundary, but only where the change removes real custom shape logic rather than just moving it around.
-2. Consider whether the canonical builder should start producing a typed `openai-go` request struct for a narrow top-level slice, while still leaving `input` raw.
-3. Decide whether `tools` should remain raw for flexibility or start moving onto more upstream types at the builder boundary too.
+1. Consider whether the canonical builder should start producing a typed `openai-go` request struct for a narrow top-level slice, while still leaving `input` raw.
+2. Decide whether `input` should remain the deliberate raw boundary, or whether a small subset of input item construction is now worth moving onto upstream types too.
+3. Continue replacing raw decode/encode pockets in child-thread command construction only where it clearly removes duplicate request-shape logic.
 
 ## Strong Recommendation
 

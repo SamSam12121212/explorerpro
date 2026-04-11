@@ -24,6 +24,7 @@ import (
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
+	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
 
@@ -502,6 +503,10 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	body.Include, err = agentcmd.NormalizeInclude(body.Include)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start include: %w", err)
+	}
+	body.Tools, err = agentcmd.NormalizeTools(body.Tools)
+	if err != nil {
+		return fmt.Errorf("normalize thread.start tools: %w", err)
 	}
 	body.ToolChoice, err = agentcmd.NormalizeToolChoice(body.ToolChoice)
 	if err != nil {
@@ -1661,21 +1666,17 @@ func (a *threadActor) injectDocumentTools(threadID string, payload map[string]an
 		return nil
 	}
 
-	existing, _ := payload["tools"].([]any)
-	for _, t := range existing {
-		if m, ok := t.(map[string]any); ok {
-			if name, _ := m["name"].(string); name == toolNameQueryAttachedDocuments {
-				return nil
-			}
+	existing, err := decodePayloadTools(payload["tools"])
+	if err != nil {
+		return fmt.Errorf("decode tools for document injection: %w", err)
+	}
+	for _, tool := range existing {
+		if toolParamName(tool) == toolNameQueryAttachedDocuments {
+			return nil
 		}
 	}
 
-	toolDef, err := queryAttachedDocumentsToolDef()
-	if err != nil {
-		return fmt.Errorf("build %s tool definition: %w", toolNameQueryAttachedDocuments, err)
-	}
-
-	payload["tools"] = append(existing, toolDef)
+	payload["tools"] = append(existing, queryAttachedDocumentsToolDef())
 	return nil
 }
 
@@ -2918,14 +2919,14 @@ func filterSubagentTools(raw string) (string, error) {
 		return "", nil
 	}
 
-	var tools []map[string]any
-	if err := json.Unmarshal([]byte(raw), &tools); err != nil {
+	tools, err := agentcmd.DecodeTools(json.RawMessage(raw))
+	if err != nil {
 		return "", fmt.Errorf("decode tools for child filtering: %w", err)
 	}
 
-	filtered := make([]map[string]any, 0, len(tools))
+	filtered := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		if isInternalRuntimeToolName(toolDefinitionName(tool)) {
+		if isInternalRuntimeToolName(toolParamName(tool)) {
 			continue
 		}
 		filtered = append(filtered, tool)

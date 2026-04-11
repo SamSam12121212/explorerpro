@@ -471,17 +471,12 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 		t.Fatalf("include = %v, want [%q]", include, responses.ResponseIncludableReasoningEncryptedContent)
 	}
 
-	tools, ok := payload["tools"].([]any)
+	tools, ok := payload["tools"].([]responses.ToolUnionParam)
 	if !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
 	}
-
-	toolMap, ok := tools[0].(map[string]any)
-	if !ok {
-		t.Fatalf("tool = %#v, want map", tools[0])
-	}
-	if toolMap["name"] != toolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %v, want %q", toolMap["name"], toolNameQueryAttachedDocuments)
+	if toolParamName(tools[0]) != toolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[0]), toolNameQueryAttachedDocuments)
 	}
 }
 
@@ -971,6 +966,7 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 		Model:        "gpt-5.4",
 		InitialInput: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
 		Metadata:     json.RawMessage(`{"branch_index":2}`),
+		Tools:        json.RawMessage(`[{"type":"function","name":"lookup","parameters":{"type":"object"},"strict":true}]`),
 		ToolChoice:   json.RawMessage(`"required"`),
 		Reasoning:    json.RawMessage(`{"effort":"high","summary":"detailed","generate_summary":"concise"}`),
 	})
@@ -1001,6 +997,13 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 	}
 	if meta.ToolChoiceJSON != `"required"` {
 		t.Fatalf("ToolChoiceJSON = %s, want %s", meta.ToolChoiceJSON, `"required"`)
+	}
+	var tools []map[string]any
+	if err := json.Unmarshal([]byte(meta.ToolsJSON), &tools); err != nil {
+		t.Fatalf("json.Unmarshal(meta.ToolsJSON) error = %v", err)
+	}
+	if len(tools) != 1 || tools[0]["name"] != "lookup" {
+		t.Fatalf("tools = %#v, want one lookup tool", tools)
 	}
 
 	var reasoning map[string]any
@@ -1444,24 +1447,17 @@ func (c *actorTestConn) Close(code openaiws.CloseCode, reason string) error {
 func TestQueryAttachedDocumentsToolDef(t *testing.T) {
 	t.Parallel()
 
-	def, err := queryAttachedDocumentsToolDef()
-	if err != nil {
-		t.Fatalf("queryAttachedDocumentsToolDef() error = %v", err)
+	def := queryAttachedDocumentsToolDef()
+	if def.OfFunction == nil {
+		t.Fatal("function tool missing")
 	}
-	if def["type"] != "function" {
-		t.Fatalf("type = %v, want function", def["type"])
+	if def.OfFunction.Name != "query_attached_documents" {
+		t.Fatalf("name = %q, want query_attached_documents", def.OfFunction.Name)
 	}
-	if def["name"] != "query_attached_documents" {
-		t.Fatalf("name = %v, want query_attached_documents", def["name"])
-	}
-
-	params, ok := def["parameters"].(map[string]any)
-	if !ok {
-		t.Fatal("parameters missing")
-	}
+	params := def.OfFunction.Parameters
 	props, ok := params["properties"].(map[string]any)
 	if !ok {
-		t.Fatal("properties missing")
+		t.Fatal("parameters missing")
 	}
 	if _, ok := props["document_ids"]; !ok {
 		t.Fatal("document_ids property missing")
@@ -1491,17 +1487,12 @@ func TestInjectDocumentToolsAddsToolWhenDocsAttached(t *testing.T) {
 		t.Fatalf("injectDocumentTools() error = %v", err)
 	}
 
-	tools, ok := payload["tools"].([]any)
+	tools, ok := payload["tools"].([]responses.ToolUnionParam)
 	if !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
 	}
-
-	toolMap, ok := tools[0].(map[string]any)
-	if !ok {
-		t.Fatal("tool is not a map")
-	}
-	if toolMap["name"] != "query_attached_documents" {
-		t.Fatalf("name = %v, want query_attached_documents", toolMap["name"])
+	if toolParamName(tools[0]) != "query_attached_documents" {
+		t.Fatalf("name = %q, want query_attached_documents", toolParamName(tools[0]))
 	}
 }
 
@@ -1544,14 +1535,14 @@ func TestInjectDocumentToolsAppendsToExistingTools(t *testing.T) {
 
 	payload := map[string]any{
 		"model": "gpt-5.4",
-		"tools": []any{map[string]any{"type": "function", "name": "spawn_subagents"}},
+		"tools": []any{map[string]any{"type": "function", "name": "spawn_subagents", "parameters": map[string]any{"type": "object"}, "strict": true}},
 	}
 
 	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
 		t.Fatalf("injectDocumentTools() error = %v", err)
 	}
 
-	tools := payload["tools"].([]any)
+	tools := payload["tools"].([]responses.ToolUnionParam)
 	if len(tools) != 2 {
 		t.Fatalf("tools count = %d, want 2", len(tools))
 	}
