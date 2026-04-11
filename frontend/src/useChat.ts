@@ -498,7 +498,7 @@ export function useChat() {
         }
       }, retryDelay);
     };
-  }, [disconnectThreadStream, handleThreadStreamMessage]);
+  }, [disconnectThreadStream, handleThreadStreamMessage, logThreadStreamMessage]);
 
   async function loadThread(nextThreadId: string) {
     setBusy(true);

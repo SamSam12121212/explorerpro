@@ -3,6 +3,7 @@ import {
   type PluginRegistry,
   type ThemeConfig,
   type ToolbarItem,
+  type UIPlugin,
   type UISchema,
 } from "@embedpdf/react-pdf-viewer";
 
@@ -71,30 +72,36 @@ const PDF_VIEWER_THEME: ThemeConfig = {
 };
 
 function buildToolbarPatch(schema: UISchema): Partial<UISchema> | null {
-  const mainToolbar = schema.toolbars[MAIN_TOOLBAR_ID];
-  if (!mainToolbar) {
+  const mainToolbar = Object.hasOwn(schema.toolbars, MAIN_TOOLBAR_ID)
+    ? schema.toolbars[MAIN_TOOLBAR_ID]
+    : null;
+  if (mainToolbar === null) {
     return null;
   }
 
   let changed = false;
-  const nextItems = mainToolbar.items.map((item) => {
+  const nextItems: ToolbarItem[] = [];
+  for (const item of mainToolbar.items) {
     if (item.type !== "group") {
-      return item;
+      nextItems.push(item);
+      continue;
     }
 
     const hiddenItemIds = GROUP_ITEM_IDS_TO_HIDE.get(item.id);
     if (!hiddenItemIds) {
-      return item;
+      nextItems.push(item);
+      continue;
     }
 
     const filteredItems = item.items.filter((child) => !hiddenItemIds.has(child.id));
     if (filteredItems.length === item.items.length) {
-      return item;
+      nextItems.push(item);
+      continue;
     }
 
     changed = true;
-    return { ...item, items: filteredItems } satisfies ToolbarItem;
-  });
+    nextItems.push({ ...item, items: filteredItems } satisfies ToolbarItem);
+  }
 
   if (!changed) {
     return null;
@@ -111,11 +118,12 @@ function buildToolbarPatch(schema: UISchema): Partial<UISchema> | null {
 }
 
 function handleViewerReady(registry: PluginRegistry) {
-  const ui = registry.getPlugin("ui")?.provides?.();
-  if (!ui) {
+  const uiPlugin = registry.getPlugin<UIPlugin>("ui");
+  if (uiPlugin === null) {
     return;
   }
 
+  const ui = uiPlugin.provides();
   const patch = buildToolbarPatch(ui.getSchema());
   if (patch) {
     ui.mergeSchema(patch);
