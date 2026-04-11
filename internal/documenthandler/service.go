@@ -10,9 +10,9 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// Service is the future home for document-tool execution. For now it only
-// owns lifecycle and dependency wiring so we can run it as a first-class
-// backend service.
+// Service currently exists only as a lifecycle/dependency shell for
+// document-adjacent backend work. It is intentionally not the OpenAI
+// document executor; worker-owned document execution lives in the worker.
 type Service struct {
 	logger *slog.Logger
 	js     nats.JetStreamContext

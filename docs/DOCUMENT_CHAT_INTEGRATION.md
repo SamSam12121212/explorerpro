@@ -199,7 +199,7 @@ Implemented behavior:
 
 - `documents` table now has `base_response_id`, `base_model`, `base_initialized_at` columns
 - `thread_documents` table now has `latest_response_id`, `initialized_at`, `last_used_at` columns
-- all new columns are nullable / have safe defaults so existing data is unaffected
+- the new text columns use safe empty-string defaults and the timestamp columns remain nullable, so existing data is unaffected
 - `docstore.Document` struct reads and writes the new lineage fields
 - `docstore.Store` has `UpdateBaseLineage` for persisting the shared base anchor
 - `threaddocstore.Store` has `GetLineage` and `UpdateLineage` for thread-local lineage
@@ -373,40 +373,36 @@ Current relevant files:
 - `internal/worker/service.go`
 - `internal/worker/actor_test.go`
 
-### 7. The per-document lineage model is now agreed in detail, but not implemented yet
+### 7. The per-document lineage model now exists in a first pass
 
-This is the newest planning state and should be treated as the intended next architecture.
+This is now implemented and should be treated as the current architecture, with a few schema/versioning extensions still left for later.
 
-Agreed durable model:
+Implemented durable model:
 
-- `documents` row stores the shared base anchor for one document
+- `documents` stores the shared base anchor for one document
 - `thread_documents` stores the thread-local latest lineage for that document inside one parent chat thread
 
-Agreed execution ownership:
+Implemented execution ownership:
 
-- the worker is the only process that ever talks to OpenAI
-- a worker-local document executor owns document sockets
+- the worker is the only process that talks to OpenAI
+- a worker-local document executor owns OpenAI document queries
 - `generate:false` warmups happen in the worker
 - actual document questions happen in the worker
 - other services may assist with non-OpenAI work only
 
-Planned `documents` row additions:
+Implemented schema:
 
-- `base_response_id`
-- `base_model`
+- `documents`: `base_response_id`, `base_model`, `base_initialized_at`
+- `thread_documents`: `latest_response_id`, `initialized_at`, `last_used_at`
+
+Still planned schema/extensions:
+
 - `base_prompt_version`
-- `base_initialized_at`
 - `base_manifest_ref` or equivalent document-version marker
+- optional `status` on `thread_documents`
+- optional `last_error` on `thread_documents`
 
-Planned `thread_documents` additions:
-
-- `latest_response_id`
-- `initialized_at`
-- `last_used_at`
-- optional `status`
-- optional `last_error`
-
-Agreed execution behavior:
+Implemented execution behavior:
 
 - first query for a document inside a thread checks `thread_documents.latest_response_id`
 - if present, continue from that thread-local lineage
@@ -414,43 +410,43 @@ Agreed execution behavior:
 - if the base anchor exists, start the thread-local document chain from that anchor
 - if the base anchor does not exist, create it first with `generate:false` on a worker-owned document session
 - after the actual query completes, save the new response ID back to `thread_documents.latest_response_id`
+- if the query fails, retry once with a fresh warmup and persist the rebuilt base anchor
 
-Agreed rebuild behavior:
+Implemented socket behavior today:
 
-- if OpenAI returns a lineage error such as missing previous response state, rebuild
-- if the document changes materially, rebuild the shared base anchor
-- if the prompt or model contract changes materially, rebuild the shared base anchor
-- thread-local lineage should be treated as disposable and rebuildable from the shared base anchor
+- the parent chat socket and document query sockets are separate worker-owned sessions
+- persisted response IDs are the durable lineage boundary
+- each document query currently opens a fresh session and closes it after completion
+- hot reusable document sockets remain a planned latency optimization, not durable truth
 
-Agreed socket behavior:
+Still planned rebuild/staleness behavior:
 
-- a hot worker-owned document socket is allowed and useful
-- a hot worker-owned document socket is not the durable truth
-- sockets should be reopenable from persisted response lineage
-- document sockets should be closable on idle timeout, worker pressure, or planned rotation
-- the system should assume sockets are temporary but response IDs are durable enough for continuation
+- explicit base-anchor invalidation when the document changes materially
+- explicit base-anchor invalidation when the prompt/model contract changes materially
+- richer tracking of stale/error state beyond the current one-time rebuild retry
 
 ## Deliberate Limitations Right Now
 
 These are intentional and should not be mistaken for bugs in the current slice.
 
-### 1. Attached documents are discoverable, but not real document inputs yet
+### 1. Attached documents are not injected into the parent thread input payload
 
 Right now document attachments:
 
 - are sent to the API on thread create/resume
 - are persisted in backend thread attachment state
-- are not included in thread input items
+- are not included directly in the parent thread `input` items
 - are discoverable to the model only through generated outgoing instructions
-- are not lowered into any OpenAI-side document prompt shape yet
-- are not executable through a document tool yet
+- are not materialized as page images on the parent chat socket
+- are accessed through `query_attached_documents` when the model chooses to use them
 
 They now exist as:
 
 - persistent thread attachment state
 - generated instruction-level discovery context
+- tool-available document execution context
 
-They still do not exist as real document execution context.
+They still do not exist as raw durable engine payload on the main chat thread.
 
 ### 2. The document tool is now a real executor
 
@@ -498,14 +494,22 @@ All other tool calls still leave the thread in `waiting_tool`.
 
 Both follow the same pattern: detect the tool call, execute it, build the output, self-publish `thread.submit_tool_output`.
 
-### 5. The backend thread attachment model is still only a first pass
+### 5. The chat composer still expects text or images to submit
+
+Current frontend behavior:
+
+- documents can be queued above the composer and persisted alongside a send
+- a send still requires message text or at least one image attachment
+- a document-only turn is not yet supported through the composer
+
+### 6. The backend thread attachment model is still only a first pass
 
 What still does not exist yet:
 
 - no dedicated attach/detach endpoint for thread documents
 - no persisted detach/remove flow for already attached thread documents
 - no inheritance rules yet for child threads or warm branches
-- no server-side validation yet that a future document tool can only access attached docs
+- no broader attachment-management API beyond attach-on-create/resume plus runtime validation inside `query_attached_documents`
 
 ## What We Agreed Not To Do
 
@@ -530,6 +534,8 @@ What is acceptable:
 - continuing a document query from stored response lineage
 - keeping a worker-owned document socket warm temporarily if it improves latency
 - submitting `function_call_output` back to the parent thread
+
+I still dont like some of the stuff we have put in the worker for documents as it's straying abit, but for now, it's fine, but we should revist once we get it working to see what can be safely pulled away from the worker.
 
 That is runtime/session ownership, not document preparation.
 
