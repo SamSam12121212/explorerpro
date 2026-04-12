@@ -3,6 +3,7 @@ package httpserver
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,6 +261,20 @@ func TestNormalizeResumeBodyNormalizesReasoning(t *testing.T) {
 	}
 	if _, exists := reasoning["generate_summary"]; exists {
 		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
+func TestNormalizeResumeBodyRejectsPreparedInputRef(t *testing.T) {
+	t.Parallel()
+
+	_, err := normalizeResumeBody(json.RawMessage(`{
+		"prepared_input_ref":"blob://prepared-inputs/pi_456.json"
+	}`))
+	if err == nil {
+		t.Fatal("expected normalizeResumeBody() to reject prepared_input_ref")
+	}
+	if !strings.Contains(err.Error(), "internal-only") {
+		t.Fatalf("error = %v, want internal-only message", err)
 	}
 }
 

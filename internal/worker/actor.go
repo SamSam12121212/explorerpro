@@ -20,6 +20,7 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
+	"explorer/internal/preparedinput"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
@@ -482,9 +483,6 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(body.PreparedInputRef) != "" {
-		return fmt.Errorf("thread.start prepared_input_ref is not implemented yet")
-	}
 
 	a.logger.Info("starting thread",
 		"cmd_id", cmd.CmdID,
@@ -495,9 +493,13 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if strings.TrimSpace(body.PreviousResponseID) != "" && !boolOrDefault(body.Store, true) {
 		return fmt.Errorf("thread.start previous_response_id requires store=true")
 	}
-	body.InitialInput, err = normalizeInputItems(body.InitialInput)
-	if err != nil {
-		return fmt.Errorf("normalize thread.start initial_input: %w", err)
+	if !isBlankInputJSON(body.InitialInput) {
+		body.InitialInput, err = normalizeInputItems(body.InitialInput)
+		if err != nil {
+			return fmt.Errorf("normalize thread.start initial_input: %w", err)
+		}
+	} else {
+		body.InitialInput = nil
 	}
 	body.Metadata, err = normalizeMetadataJSON(body.Metadata)
 	if err != nil {
@@ -581,8 +583,10 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if strings.TrimSpace(body.PreviousResponseID) != "" {
 		inputResponseID = body.PreviousResponseID
 	}
-	if err := a.appendInputItems(meta.ID, inputResponseID, body.InitialInput); err != nil {
-		return err
+	if !isBlankInputJSON(body.InitialInput) {
+		if err := a.appendInputItems(meta.ID, inputResponseID, body.InitialInput); err != nil {
+			return err
+		}
 	}
 
 	effectiveInstructions, err := a.effectiveInstructions(meta.ID, body.Instructions)
@@ -601,6 +605,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		"reasoning":            body.Reasoning,
 		"store":                boolOrDefault(body.Store, true),
 		"previous_response_id": body.PreviousResponseID,
+		"prepared_input_ref":   body.PreparedInputRef,
 	})
 	if err != nil {
 		return err
@@ -613,9 +618,6 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	body, err := cmd.ResumeBody()
 	if err != nil {
 		return err
-	}
-	if strings.TrimSpace(body.PreparedInputRef) != "" {
-		return fmt.Errorf("thread.resume prepared_input_ref is not implemented yet")
 	}
 
 	meta, err := a.store.LoadThread(a.ctx, cmd.ThreadID)
@@ -657,11 +659,13 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 		return err
 	}
 
-	if err := a.appendInputItems(meta.ID, meta.LastResponseID, body.InputItems); err != nil {
-		return err
+	if !isBlankInputJSON(body.InputItems) {
+		if err := a.appendInputItems(meta.ID, meta.LastResponseID, body.InputItems); err != nil {
+			return err
+		}
 	}
 
-	return a.continueWithInputItems(meta, cmd.CmdID, body.InputItems)
+	return a.continueWithPreparedInput(meta, cmd.CmdID, body.InputItems, body.PreparedInputRef)
 }
 
 func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
@@ -1367,7 +1371,12 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
-	wirePayload, stats, err := a.lowerResponseCreatePayload(payload)
+	sendPayload, err := a.materializePreparedInputPayload(payload)
+	if err != nil {
+		return err
+	}
+
+	wirePayload, stats, err := a.lowerResponseCreatePayload(sendPayload)
 	if err != nil {
 		return err
 	}
@@ -1565,6 +1574,10 @@ func stringValue(value any) string {
 }
 
 func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage) error {
+	return a.continueWithPreparedInput(meta, cmdID, inputItems, "")
+}
+
+func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, preparedInputRef string) error {
 	effectiveInstructions, err := a.effectiveInstructions(meta.ID, meta.Instructions)
 	if err != nil {
 		return err
@@ -1574,6 +1587,7 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 		"model":                meta.Model,
 		"instructions":         effectiveInstructions,
 		"input":                inputItems,
+		"prepared_input_ref":   preparedInputRef,
 		"previous_response_id": meta.LastResponseID,
 		"store":                true,
 	})
@@ -2192,6 +2206,55 @@ func (a *threadActor) appendInputItems(threadID, responseID string, itemsRaw jso
 	}
 
 	return nil
+}
+
+func (a *threadActor) materializePreparedInputPayload(payload map[string]any) (map[string]any, error) {
+	sendPayload, ok := cloneAny(payload).(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("response.create payload must be an object")
+	}
+
+	ref := strings.TrimSpace(stringValue(sendPayload["prepared_input_ref"]))
+	if ref == "" {
+		return sendPayload, nil
+	}
+
+	inputValue, err := a.loadPreparedInputValue(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	sendPayload["input"] = inputValue
+	delete(sendPayload, "prepared_input_ref")
+	return sendPayload, nil
+}
+
+func (a *threadActor) loadPreparedInputValue(ref string) (any, error) {
+	if a.blob == nil {
+		return nil, fmt.Errorf("blob store is not configured")
+	}
+
+	store, err := preparedinput.NewStore(a.blob)
+	if err != nil {
+		return nil, err
+	}
+
+	artifact, err := store.Read(a.ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("load prepared input %q: %w", ref, err)
+	}
+
+	normalized, err := normalizeInputItems(artifact.Input)
+	if err != nil {
+		return nil, fmt.Errorf("normalize prepared input %q: %w", ref, err)
+	}
+
+	value, err := decodeResponseCreateField("input", normalized)
+	if err != nil {
+		return nil, fmt.Errorf("decode prepared input %q: %w", ref, err)
+	}
+
+	return value, nil
 }
 
 func (a *threadActor) appendItem(entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
@@ -2925,6 +2988,11 @@ func normalizeInputItems(raw json.RawMessage) (json.RawMessage, error) {
 	default:
 		return nil, fmt.Errorf("input must be an array, an item object, or a JSON string")
 	}
+}
+
+func isBlankInputJSON(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "null"
 }
 
 func defaultString(value, fallback string) string {

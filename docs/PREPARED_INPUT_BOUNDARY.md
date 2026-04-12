@@ -137,6 +137,13 @@ So the planned handoff is:
 - artifact body lives outside NATS
 - worker resolves the ref at execution time
 
+Important boundary:
+
+- `prepared_input_ref` is an internal command detail
+- it is not part of the public frontend or public HTTP API contract
+- frontend clients should send semantic inputs such as user text and `attached_document_ids`
+- backend command producers may attach `prepared_input_ref` later when a turn requires source-specific prepared input
+
 ## Planned Command Direction
 
 This is a planned extension to the command shapes.
@@ -168,6 +175,8 @@ The intended rule is:
 
 - the heavy source-specific input should not need to ride inline inside the command
 - the worker should load it by ref
+
+These examples describe internal command shapes, not public API request bodies.
 
 We may continue to allow inline `initial_input` / `input_items` for simple cases, but prepared refs should be the path for large or source-specific materialized input.
 
@@ -328,6 +337,8 @@ The prepared-input boundary is specifically about moving source-specific `input`
 
 - 2026-04-12: Task 1 completed. Added the first `internal/preparedinput` foundation with artifact validation plus blob-backed read/write helpers. This creates the initial contract for storing prepared `input` outside worker core before we touch command or worker behavior.
 - 2026-04-12: Task 2 completed. Extended the internal command model with `prepared_input_ref` for `thread.start` and `thread.resume`, and made the worker reject that field explicitly until prepared-input consumption is implemented. This keeps the schema moving forward without silently ignoring new command bodies.
+- 2026-04-12: Task 3 completed. The worker now resolves `prepared_input_ref` at send time, strips it from the OpenAI wire payload, and keeps the persisted `client.response.create` checkpoint compact by storing the ref instead of the expanded prepared input. Recovery replay now re-materializes prepared input from the stored ref. Resume-command normalization also now accepts `prepared_input_ref` without inline `input_items`.
+- 2026-04-12: Task 4 completed. Tightened the public API boundary so `prepared_input_ref` remains internal-only. The public HTTP resume endpoint now rejects it explicitly, and this note now states that frontend clients should only send semantic thread input such as text and `attached_document_ids`.
 
 Files touched:
 
@@ -337,3 +348,7 @@ Files touched:
 - `internal/agentcmd/command.go`
 - `internal/agentcmd/command_test.go`
 - `internal/worker/actor.go`
+- `internal/httpserver/command_api.go`
+- `internal/httpserver/command_api_test.go`
+- `internal/worker/actor_test.go`
+- `internal/worker/actor_recovery_harness_test.go`

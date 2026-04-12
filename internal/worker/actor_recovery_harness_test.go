@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"explorer/internal/agentcmd"
+	"explorer/internal/blobstore"
 	"explorer/internal/openaiws"
+	"explorer/internal/preparedinput"
 	"explorer/internal/threadstore"
 )
 
@@ -262,6 +264,86 @@ func TestActorRecoveryHarnessReconcileFromCheckpointReplaysLatestCreate(t *testi
 	}
 	if final.ActiveResponseID != "" {
 		t.Fatalf("ActiveResponseID = %q, want empty", final.ActiveResponseID)
+	}
+}
+
+func TestActorRecoveryHarnessReconcileFromPreparedInputRefCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:               "thread_parent",
+		Status:           threadstore.ThreadStatusReconciling,
+		Model:            "gpt-5.4",
+		ActiveResponseID: "resp_active",
+	}
+
+	blob, err := blobstore.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	preparedStore, err := preparedinput.NewStore(blob)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	ref, err := preparedStore.Write(context.Background(), "pi_reconcile", preparedinput.Artifact{
+		Version: preparedinput.VersionV1,
+		Input:   []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"replayed prepared"}]}]`),
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	store.latestClientCreateByID["thread_parent"] = json.RawMessage(`{
+		"type":"response.create",
+		"model":"gpt-5.4",
+		"prepared_input_ref":"` + ref + `",
+		"store":true
+	}`)
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_replayed"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_replayed"}}`),
+		},
+	}
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.blob = blob
+
+	if err := actor.reconcileFromCheckpoint(store.threads["thread_parent"], "cmd_reconcile"); err != nil {
+		t.Fatalf("reconcileFromCheckpoint() error = %v", err)
+	}
+
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal(conn.writes[0], &sent); err != nil {
+		t.Fatalf("json.Unmarshal(sent) error = %v", err)
+	}
+
+	if _, exists := sent["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be sent to OpenAI, got %#v", sent["prepared_input_ref"])
+	}
+
+	items, ok := sent["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("input = %#v, want one prepared item", sent["input"])
+	}
+
+	message, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("message = %#v, want object", items[0])
+	}
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %#v, want one text part", message["content"])
+	}
+	part, ok := content[0].(map[string]any)
+	if !ok || part["text"] != "replayed prepared" {
+		t.Fatalf("content[0] = %#v, want replayed prepared", content[0])
 	}
 }
 

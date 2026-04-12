@@ -19,6 +19,7 @@ import (
 	"explorer/internal/blobstore"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
+	"explorer/internal/preparedinput"
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -1068,6 +1069,201 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 	}
 }
 
+func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_start"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_start"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+
+	blob, err := blobstore.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	actor.blob = blob
+
+	preparedStore, err := preparedinput.NewStore(blob)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	ref, err := preparedStore.Write(context.Background(), "pi_start", preparedinput.Artifact{
+		Version: preparedinput.VersionV1,
+		Input:   []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"prepared hello"}]}]`),
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	body, err := json.Marshal(agentcmd.StartBody{
+		Model:            "gpt-5.4",
+		PreparedInputRef: ref,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(StartBody) error = %v", err)
+	}
+
+	cmd := agentcmd.Command{
+		CmdID:        "cmd_start_prepared",
+		Kind:         agentcmd.KindThreadStart,
+		ThreadID:     "thread_parent",
+		RootThreadID: "thread_parent",
+		Body:         body,
+	}
+
+	if err := actor.handleStart(cmd); err != nil {
+		t.Fatalf("handleStart() error = %v", err)
+	}
+
+	if len(store.appendedItems) != 0 {
+		t.Fatalf("appendedItems = %d, want 0", len(store.appendedItems))
+	}
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal(conn.writes[0], &sent); err != nil {
+		t.Fatalf("json.Unmarshal(sent) error = %v", err)
+	}
+
+	if _, exists := sent["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be sent to OpenAI, got %#v", sent["prepared_input_ref"])
+	}
+
+	items, ok := sent["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("input = %#v, want one prepared item", sent["input"])
+	}
+
+	message, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("message = %#v, want object", items[0])
+	}
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %#v, want one text part", message["content"])
+	}
+	part, ok := content[0].(map[string]any)
+	if !ok || part["text"] != "prepared hello" {
+		t.Fatalf("content[0] = %#v, want prepared hello", content[0])
+	}
+
+	foundCheckpoint := false
+	for _, entry := range store.appendedEvents {
+		if entry.EventType != "client.response.create" {
+			continue
+		}
+		foundCheckpoint = true
+		if !strings.Contains(entry.PayloadJSON, ref) {
+			t.Fatalf("checkpoint payload = %s, want prepared_input_ref %q", entry.PayloadJSON, ref)
+		}
+		if strings.Contains(entry.PayloadJSON, "prepared hello") {
+			t.Fatalf("checkpoint payload should stay compact, got %s", entry.PayloadJSON)
+		}
+	}
+	if !foundCheckpoint {
+		t.Fatal("expected client.response.create checkpoint to be appended")
+	}
+}
+
+func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:             "thread_parent",
+		Status:         threadstore.ThreadStatusReady,
+		Model:          "gpt-5.4",
+		LastResponseID: "resp_prev",
+	}
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_resume"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_resume"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+
+	blob, err := blobstore.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	actor.blob = blob
+
+	preparedStore, err := preparedinput.NewStore(blob)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	ref, err := preparedStore.Write(context.Background(), "pi_resume", preparedinput.Artifact{
+		Version: preparedinput.VersionV1,
+		Input:   []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"prepared continue"}]}]`),
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	body, err := json.Marshal(agentcmd.ResumeBody{
+		PreparedInputRef: ref,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(ResumeBody) error = %v", err)
+	}
+
+	cmd := agentcmd.Command{
+		CmdID:        "cmd_resume_prepared",
+		Kind:         agentcmd.KindThreadResume,
+		ThreadID:     "thread_parent",
+		RootThreadID: "thread_parent",
+		Body:         body,
+	}
+
+	if err := actor.handleResume(cmd); err != nil {
+		t.Fatalf("handleResume() error = %v", err)
+	}
+
+	if len(store.appendedItems) != 0 {
+		t.Fatalf("appendedItems = %d, want 0", len(store.appendedItems))
+	}
+	if len(conn.writes) != 1 {
+		t.Fatalf("writes = %d, want 1", len(conn.writes))
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal(conn.writes[0], &sent); err != nil {
+		t.Fatalf("json.Unmarshal(sent) error = %v", err)
+	}
+
+	if sent["previous_response_id"] != "resp_prev" {
+		t.Fatalf("previous_response_id = %v, want resp_prev", sent["previous_response_id"])
+	}
+	if _, exists := sent["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be sent to OpenAI, got %#v", sent["prepared_input_ref"])
+	}
+
+	items, ok := sent["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("input = %#v, want one prepared item", sent["input"])
+	}
+
+	message, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("message = %#v, want object", items[0])
+	}
+	content, ok := message["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %#v, want one text part", message["content"])
+	}
+	part, ok := content[0].(map[string]any)
+	if !ok || part["text"] != "prepared continue" {
+		t.Fatalf("content[0] = %#v, want prepared continue", content[0])
+	}
+}
+
 func TestTransientCommandRetryDelay(t *testing.T) {
 	t.Parallel()
 
@@ -1794,7 +1990,7 @@ func TestOutputItemLogEventTypeIncludesItemTypeForAdded(t *testing.T) {
 
 	event := openaiws.ServerEvent{
 		Type: openaiws.EventTypeResponseOutputItemAdded,
-		Raw: json.RawMessage(`{"type":"response.output_item.added","item":{"id":"msg_123","type":"message"}}`),
+		Raw:  json.RawMessage(`{"type":"response.output_item.added","item":{"id":"msg_123","type":"message"}}`),
 	}
 
 	got := outputItemLogEventType(event)
@@ -1808,7 +2004,7 @@ func TestOutputItemLogEventTypeIncludesItemTypeForDone(t *testing.T) {
 
 	event := openaiws.ServerEvent{
 		Type: openaiws.EventTypeResponseOutputItemDone,
-		Raw: json.RawMessage(`{"type":"response.output_item.done","item":{"id":"rs_123","type":"reasoning"}}`),
+		Raw:  json.RawMessage(`{"type":"response.output_item.done","item":{"id":"rs_123","type":"reasoning"}}`),
 	}
 
 	got := outputItemLogEventType(event)

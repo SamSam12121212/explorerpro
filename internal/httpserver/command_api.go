@@ -1051,11 +1051,17 @@ func normalizeResumeBody(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, fmt.Errorf("decode resume body: %w", err)
 	}
 
-	inputItems, err := normalizeResponseInput(payload["input_items"])
-	if err != nil {
-		return nil, fmt.Errorf("normalize input_items: %w", err)
+	if rawPreparedInputRef, ok := payload["prepared_input_ref"]; ok && !isBlankJSON(rawPreparedInputRef) {
+		return nil, fmt.Errorf("prepared_input_ref is internal-only and is not accepted by the public API")
 	}
-	payload["input_items"] = inputItems
+
+	if rawInputItems, ok := payload["input_items"]; ok && !isBlankJSON(rawInputItems) {
+		inputItems, err := normalizeResponseInput(rawInputItems)
+		if err != nil {
+			return nil, fmt.Errorf("normalize input_items: %w", err)
+		}
+		payload["input_items"] = inputItems
+	}
 
 	if reasoningRaw, ok := payload["reasoning"]; ok {
 		reasoning, err := agentcmd.NormalizeReasoning(reasoningRaw)
