@@ -1057,6 +1057,18 @@ func normalizeResumeBody(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	payload["input_items"] = inputItems
 
+	if reasoningRaw, ok := payload["reasoning"]; ok {
+		reasoning, err := agentcmd.NormalizeReasoning(reasoningRaw)
+		if err != nil {
+			return nil, fmt.Errorf("normalize reasoning: %w", err)
+		}
+		if len(reasoning) == 0 {
+			delete(payload, "reasoning")
+		} else {
+			payload["reasoning"] = reasoning
+		}
+	}
+
 	normalized, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal resume body: %w", err)

@@ -610,6 +610,7 @@ export function useChat() {
           kind: "thread.resume",
           body: {
             input_items: inputItems,
+            reasoning: { effort: reasoningEffort, summary: "concise" },
             attached_document_ids: documents.map((document) => document.id),
           },
         });

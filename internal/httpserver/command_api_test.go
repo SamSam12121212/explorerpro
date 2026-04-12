@@ -231,6 +231,38 @@ func TestNormalizeResumeBodyPreservesAttachedDocumentIDs(t *testing.T) {
 	}
 }
 
+func TestNormalizeResumeBodyNormalizesReasoning(t *testing.T) {
+	t.Parallel()
+
+	got, err := normalizeResumeBody(json.RawMessage(`{
+		"input_items":"hello",
+		"reasoning":{"effort":"high","summary":"detailed","generate_summary":"concise"}
+	}`))
+	if err != nil {
+		t.Fatalf("normalizeResumeBody() error = %v", err)
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	var reasoning map[string]any
+	if err := json.Unmarshal(payload["reasoning"], &reasoning); err != nil {
+		t.Fatalf("json.Unmarshal(reasoning) error = %v", err)
+	}
+
+	if reasoning["effort"] != "high" {
+		t.Fatalf("effort = %v, want high", reasoning["effort"])
+	}
+	if _, exists := reasoning["summary"]; exists {
+		t.Fatalf("summary should be omitted, got %#v", reasoning["summary"])
+	}
+	if _, exists := reasoning["generate_summary"]; exists {
+		t.Fatalf("generate_summary should be omitted, got %#v", reasoning["generate_summary"])
+	}
+}
+
 func stringJSON(value any) string {
 	data, err := json.Marshal(value)
 	if err != nil {
