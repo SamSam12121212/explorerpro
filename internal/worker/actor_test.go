@@ -17,6 +17,7 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
+	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
@@ -378,48 +379,46 @@ func TestBuildResponseCreatePayloadNormalizesStoredMetadata(t *testing.T) {
 	}
 }
 
-func TestFormatAvailableDocumentsBlock(t *testing.T) {
-	t.Parallel()
-
-	got := formatAvailableDocumentsBlock([]docstore.Document{
-		{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
-		{ID: "doc_2", Filename: ""},
-		{ID: "", Filename: "skip-me.pdf"},
-	})
-
-	want := "<available_documents>\n" +
-		`<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />` + "\n" +
-		`<document id="doc_2" name="doc_2" />` + "\n" +
-		"</available_documents>"
-	if got != want {
-		t.Fatalf("formatAvailableDocumentsBlock() = %q, want %q", got, want)
-	}
-}
-
-func TestEffectiveInstructionsAppendsAvailableDocuments(t *testing.T) {
+func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 	t.Parallel()
 
 	actor := &threadActor{
 		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {
-					{ID: "doc_1", Filename: "report.pdf"},
-				},
-			},
-		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			if req.ThreadID != "thread_123" {
+				t.Fatalf("ThreadID = %q, want %q", req.ThreadID, "thread_123")
+			}
+			if req.Instructions != "Be concise." {
+				t.Fatalf("Instructions = %q, want %q", req.Instructions, "Be concise.")
+			}
+			return doccmd.RuntimeContextResponse{
+				RequestID:    req.RequestID,
+				Status:       doccmd.PrepareStatusOK,
+				Instructions: "Be concise.\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>",
+				Tools:        json.RawMessage(`[{"type":"function","name":"lookup"},{"type":"function","name":"query_attached_documents"}]`),
+			}, nil
+		}),
 	}
 
-	got, err := actor.effectiveInstructions("thread_123", "Be concise.")
-	if err != nil {
-		t.Fatalf("effectiveInstructions() error = %v", err)
+	payload := map[string]any{
+		"instructions": "Be concise.",
+		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	want := "Be concise.\n\n<available_documents>\n" +
-		`<document id="doc_1" name="report.pdf" />` + "\n" +
-		"</available_documents>"
-	if got != want {
-		t.Fatalf("effectiveInstructions() = %q, want %q", got, want)
+	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
+	}
+
+	if got := payload["instructions"]; got != "Be concise.\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>" {
+		t.Fatalf("instructions = %v, want runtime-augmented instructions", got)
+	}
+
+	tools, ok := payload["tools"].([]responses.ToolUnionParam)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools = %#v, want 2 tools", payload["tools"])
+	}
+	if toolParamName(tools[1]) != doccmd.ToolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryAttachedDocuments)
 	}
 }
 
@@ -448,11 +447,14 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 
 	actor := &threadActor{
 		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
-			},
-		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			return doccmd.RuntimeContextResponse{
+				RequestID:    req.RequestID,
+				Status:       doccmd.PrepareStatusOK,
+				Instructions: req.Instructions,
+				Tools:        json.RawMessage(`[{"type":"function","name":"query_attached_documents"}]`),
+			}, nil
+		}),
 	}
 
 	payload, err := actor.buildThreadResponseCreatePayload(threadstore.ThreadMeta{
@@ -477,8 +479,8 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 	if !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
 	}
-	if toolParamName(tools[0]) != toolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %q, want %q", toolParamName(tools[0]), toolNameQueryAttachedDocuments)
+	if toolParamName(tools[0]) != doccmd.ToolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[0]), doccmd.ToolNameQueryAttachedDocuments)
 	}
 }
 
@@ -915,6 +917,13 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 			},
 		},
 	}
+	actor.docRuntime = fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+		return doccmd.RuntimeContextResponse{
+			RequestID:    req.RequestID,
+			Status:       doccmd.PrepareStatusOK,
+			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>",
+		}, nil
+	})
 
 	body, err := json.Marshal(agentcmd.StartBody{
 		Model:        "gpt-5.4",
@@ -1041,6 +1050,13 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 			},
 		},
 	}
+	actor.docRuntime = fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+		return doccmd.RuntimeContextResponse{
+			RequestID:    req.RequestID,
+			Status:       doccmd.PrepareStatusOK,
+			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"doc_2\" name=\"followup.pdf\" />\n</available_documents>",
+		}, nil
+	})
 
 	meta := threadstore.ThreadMeta{
 		ID:               "thread_parent",
@@ -1571,6 +1587,12 @@ func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID str
 	return attached, nil
 }
 
+type fakeDocRuntimeContextClient func(context.Context, doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error)
+
+func (f fakeDocRuntimeContextClient) RuntimeContext(ctx context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+	return f(ctx, req)
+}
+
 func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {
 	return d.conn, nil
 }
@@ -1641,107 +1663,33 @@ func (c *actorTestConn) Close(code openaiws.CloseCode, reason string) error {
 	return nil
 }
 
-func TestQueryAttachedDocumentsToolDef(t *testing.T) {
-	t.Parallel()
-
-	def := queryAttachedDocumentsToolDef()
-	if def.OfFunction == nil {
-		t.Fatal("function tool missing")
-	}
-	if def.OfFunction.Name != "query_attached_documents" {
-		t.Fatalf("name = %q, want query_attached_documents", def.OfFunction.Name)
-	}
-	params := def.OfFunction.Parameters
-	props, ok := params["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("parameters missing")
-	}
-	if _, ok := props["document_ids"]; !ok {
-		t.Fatal("document_ids property missing")
-	}
-	if _, ok := props["task"]; !ok {
-		t.Fatal("task property missing")
-	}
-}
-
-func TestInjectDocumentToolsAddsToolWhenDocsAttached(t *testing.T) {
+func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 	t.Parallel()
 
 	actor := &threadActor{
 		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
-			},
-		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusOK,
+			}, nil
+		}),
 	}
 
 	payload := map[string]any{
-		"model": "gpt-5.4",
+		"instructions": "Be concise.",
+		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
-		t.Fatalf("injectDocumentTools() error = %v", err)
+	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
-	tools, ok := payload["tools"].([]responses.ToolUnionParam)
-	if !ok || len(tools) != 1 {
-		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
+	if _, exists := payload["instructions"]; exists {
+		t.Fatalf("instructions should be deleted, got %#v", payload["instructions"])
 	}
-	if toolParamName(tools[0]) != "query_attached_documents" {
-		t.Fatalf("name = %q, want query_attached_documents", toolParamName(tools[0]))
-	}
-}
-
-func TestInjectDocumentToolsSkipsWhenNoDocsAttached(t *testing.T) {
-	t.Parallel()
-
-	actor := &threadActor{
-		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{},
-		},
-	}
-
-	payload := map[string]any{
-		"model": "gpt-5.4",
-		"tools": []any{map[string]any{"type": "function", "name": "lookup"}},
-	}
-
-	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
-		t.Fatalf("injectDocumentTools() error = %v", err)
-	}
-
-	tools := payload["tools"].([]any)
-	if len(tools) != 1 {
-		t.Fatalf("tools count = %d, want 1 (unchanged)", len(tools))
-	}
-}
-
-func TestInjectDocumentToolsAppendsToExistingTools(t *testing.T) {
-	t.Parallel()
-
-	actor := &threadActor{
-		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: "doc_1", Filename: "report.pdf"}},
-			},
-		},
-	}
-
-	payload := map[string]any{
-		"model": "gpt-5.4",
-		"tools": []any{map[string]any{"type": "function", "name": "spawn_subagents", "parameters": map[string]any{"type": "object"}, "strict": true}},
-	}
-
-	if err := actor.injectDocumentTools("thread_123", payload); err != nil {
-		t.Fatalf("injectDocumentTools() error = %v", err)
-	}
-
-	tools := payload["tools"].([]responses.ToolUnionParam)
-	if len(tools) != 2 {
-		t.Fatalf("tools count = %d, want 2", len(tools))
+	if _, exists := payload["tools"]; exists {
+		t.Fatalf("tools should be deleted, got %#v", payload["tools"])
 	}
 }
 

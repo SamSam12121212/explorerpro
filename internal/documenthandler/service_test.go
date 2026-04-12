@@ -48,7 +48,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 				PageCount:   1,
 			},
 		},
-	}, blob)
+	}, &fakeThreadDocStore{}, blob)
 	svc.now = func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -113,7 +113,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 }
 
 func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, newTestBlobStore(t))
 
 	resp := svc.prepareInput(context.Background(), doccmd.PrepareInputRequest{
 		RequestID:  "req_unsupported",
@@ -129,6 +129,66 @@ func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
 	}
 }
 
+func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{
+		documentsByThread: map[string][]docstore.Document{
+			"thread_123": {
+				{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
+			},
+		},
+	}, newTestBlobStore(t))
+
+	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
+		RequestID:    "docctx_123",
+		ThreadID:     "thread_123",
+		Instructions: "Be concise.",
+		Tools:        json.RawMessage(`[{"type":"function","name":"lookup"}]`),
+	})
+
+	if resp.Status != doccmd.PrepareStatusOK {
+		t.Fatalf("status = %q, want %q (error=%q)", resp.Status, doccmd.PrepareStatusOK, resp.Error)
+	}
+
+	wantInstructions := "Be concise.\n\n<available_documents>\n" +
+		`<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />` + "\n" +
+		"</available_documents>"
+	if resp.Instructions != wantInstructions {
+		t.Fatalf("instructions = %q, want %q", resp.Instructions, wantInstructions)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal(resp.Tools, &tools); err != nil {
+		t.Fatalf("json.Unmarshal(tools) error = %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2", len(tools))
+	}
+	if tools[1]["name"] != doccmd.ToolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryAttachedDocuments)
+	}
+}
+
+func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, newTestBlobStore(t))
+
+	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
+		RequestID:    "docctx_123",
+		ThreadID:     "thread_123",
+		Instructions: "Be concise.",
+		Tools:        json.RawMessage(`[{"type":"function","name":"lookup"}]`),
+	})
+
+	if resp.Status != doccmd.PrepareStatusOK {
+		t.Fatalf("status = %q, want %q (error=%q)", resp.Status, doccmd.PrepareStatusOK, resp.Error)
+	}
+	if resp.Instructions != "Be concise." {
+		t.Fatalf("instructions = %q, want %q", resp.Instructions, "Be concise.")
+	}
+	if string(resp.Tools) != `[{"type":"function","name":"lookup"}]` {
+		t.Fatalf("tools = %s, want base tools", string(resp.Tools))
+	}
+}
+
 type fakeDocStore struct {
 	documents map[string]docstore.Document
 }
@@ -139,6 +199,22 @@ func (s *fakeDocStore) Get(_ context.Context, id string) (docstore.Document, err
 		return docstore.Document{}, docstore.ErrDocumentNotFound
 	}
 	return doc, nil
+}
+
+type fakeThreadDocStore struct {
+	documentsByThread map[string][]docstore.Document
+	err               error
+}
+
+func (s *fakeThreadDocStore) ListDocuments(_ context.Context, threadID string, _ int64) ([]docstore.Document, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	documents := s.documentsByThread[threadID]
+	cloned := make([]docstore.Document, len(documents))
+	copy(cloned, documents)
+	return cloned, nil
 }
 
 func newTestBlobStore(t *testing.T) *blobstore.LocalStore {

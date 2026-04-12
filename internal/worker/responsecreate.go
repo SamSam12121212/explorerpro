@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	"explorer/internal/agentcmd"
+	"explorer/internal/doccmd"
 	"explorer/internal/threadstore"
 
-	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
@@ -78,7 +78,7 @@ func (a *threadActor) buildThreadResponseCreatePayload(meta threadstore.ThreadMe
 }
 
 func (a *threadActor) finalizeThreadResponseCreatePayload(threadID string, payload map[string]any) error {
-	if err := a.injectDocumentTools(threadID, payload); err != nil {
+	if err := a.applyDocumentRuntimeContext(threadID, payload); err != nil {
 		return err
 	}
 
@@ -328,7 +328,7 @@ func toolDefinitionName(tool map[string]any) string {
 
 func isInternalRuntimeToolName(name string) bool {
 	switch name {
-	case "spawn_subagents", toolNameQueryAttachedDocuments:
+	case "spawn_subagents", doccmd.ToolNameQueryAttachedDocuments:
 		return true
 	default:
 		return false
@@ -347,30 +347,4 @@ func ensureRequiredResponseInclude(payload map[string]any) error {
 	}
 	payload["include"] = normalized
 	return nil
-}
-
-func queryAttachedDocumentsToolDef() responses.ToolUnionParam {
-	return responses.ToolUnionParam{
-		OfFunction: &responses.FunctionToolParam{
-			Name:        toolNameQueryAttachedDocuments,
-			Description: openai.String("Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Describe what you need in the task field; mention specific page numbers there if needed."),
-			Strict:      openai.Bool(true),
-			Parameters: map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"properties": map[string]any{
-					"document_ids": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "IDs of the attached documents to query.",
-					},
-					"task": map[string]any{
-						"type":        "string",
-						"description": "What to look for or ask about in the documents.",
-					},
-				},
-				"required": []string{"document_ids", "task"},
-			},
-		},
-	}
 }

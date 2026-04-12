@@ -47,6 +47,7 @@ type Service struct {
 	workerID     string
 	store        *threadstore.Store
 	threadDocs   *threaddocstore.Store
+	docClient    *documenthandler.Client
 	docExec      *documentExec
 	sweepStore   serviceSweepStore
 	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -74,6 +75,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	store := threadstore.New(runtime.Redis().Raw(), postgresstore.New(runtime.Postgres().Pool()))
 	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
 	docStore := docstore.New(runtime.Postgres().Pool())
+	docClient := documenthandler.NewClient(runtime.NATS().Conn())
 
 	sessionFactory := func() *openaiws.Session { return openaiws.NewSession(openAIConfig, dialer) }
 
@@ -83,7 +85,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		OpenAIConfig:   openAIConfig,
 		SessionFactory: sessionFactory,
 		Docs:           docStore,
-		PreparedInputs: documenthandler.NewClient(runtime.NATS().Conn()),
+		PreparedInputs: docClient,
 		ThreadDocs:     threadDocs,
 		SessionIdleTTL: documentSessionIdleTTL,
 		SessionMaxTTL:  documentSessionMaxTTL,
@@ -99,6 +101,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		workerID:     resolveWorkerID(cfg.ServiceName),
 		store:        store,
 		threadDocs:   threadDocs,
+		docClient:    docClient,
 		docExec:      docExec,
 		sweepStore:   store,
 		actors:       map[string]*threadActor{},
@@ -250,6 +253,7 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		Logger:         s.logger.With("thread_id", threadID),
 		Store:          s.store,
 		ThreadDocs:     s.threadDocs,
+		DocRuntime:     s.docClient,
 		DocExec:        s.docExec,
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,

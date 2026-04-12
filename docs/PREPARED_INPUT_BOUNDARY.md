@@ -344,6 +344,7 @@ The prepared-input boundary is specifically about moving source-specific `input`
 - 2026-04-12: Task 4 completed. Tightened the public API boundary so `prepared_input_ref` remains internal-only. The public HTTP resume endpoint now rejects it explicitly, and this note now states that frontend clients should only send semantic thread input such as text and `attached_document_ids`.
 - 2026-04-12: Task 5 completed. Defined the first internal request/reply contract for document prepared-input building in `internal/doccmd`, and wired `documenthandler` to subscribe on `doc.prepare_input`. The handler currently returns a structured `noop/not implemented` response, which gives us a stable non-OpenAI seam before adding real document materialization.
 - 2026-04-12: Task 6 completed. `documenthandler` now builds real document warmup prepared-input artifacts from manifest state and stores them in blob storage, using generic `image_ref` items rather than inlined base64. The worker’s document warmup path now requests that artifact over internal NATS, carries only `prepared_input_ref` through runtime payload assembly, and reuses the same source-agnostic prepared-input resolution plus blob-ref lowering path used by thread sends before the OpenAI wire send.
+- 2026-04-12: Task 7 completed. Attached-document runtime augmentation now also flows through `documenthandler`. The worker no longer formats `<available_documents>` blocks or appends the `query_attached_documents` tool definition itself; instead it requests runtime `instructions` and `tools` over an internal `doc.runtime_context` contract right before send. This keeps public thread metadata unchanged while moving another document-specific formatting boundary out of worker core.
 
 Files touched:
 
@@ -364,6 +365,9 @@ Files touched:
 - `internal/documenthandler/service_test.go`
 - `cmd/documenthandler/main.go`
 - `internal/worker/prepared_payload.go`
+- `internal/worker/responsecreate.go`
 - `internal/worker/docexec.go`
 - `internal/worker/docexec_test.go`
 - `internal/worker/service.go`
+- `internal/worker/actor.go`
+- `internal/worker/actor_test.go`

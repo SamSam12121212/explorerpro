@@ -39,3 +39,26 @@ func (c *Client) PrepareInput(ctx context.Context, req doccmd.PrepareInputReques
 
 	return resp, nil
 }
+
+func (c *Client) RuntimeContext(ctx context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+	if c == nil || c.nc == nil {
+		return doccmd.RuntimeContextResponse{}, fmt.Errorf("document handler nats connection is required")
+	}
+
+	data, err := doccmd.EncodeRuntimeContextRequest(req)
+	if err != nil {
+		return doccmd.RuntimeContextResponse{}, err
+	}
+
+	msg, err := c.nc.RequestWithContext(ctx, doccmd.RuntimeContextSubject, data)
+	if err != nil {
+		return doccmd.RuntimeContextResponse{}, fmt.Errorf("request runtime context: %w", err)
+	}
+
+	resp, err := doccmd.DecodeRuntimeContextResponse(msg.Data)
+	if err != nil {
+		return doccmd.RuntimeContextResponse{}, err
+	}
+
+	return resp, nil
+}

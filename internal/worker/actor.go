@@ -15,6 +15,7 @@ import (
 
 	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
+	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
@@ -45,6 +46,7 @@ type threadActorConfig struct {
 	Logger         *slog.Logger
 	Store          actorStore
 	ThreadDocs     threadDocumentStore
+	DocRuntime     docRuntimeContextClient
 	DocExec        *documentExec
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
@@ -86,6 +88,7 @@ type threadActor struct {
 	logger       *slog.Logger
 	store        actorStore
 	threadDocs   threadDocumentStore
+	docRuntime   docRuntimeContextClient
 	docExec      *documentExec
 	blob         *blobstore.LocalStore
 	cfg          openaiws.Config
@@ -114,6 +117,10 @@ type payloadLoweringStats struct {
 	LoweredBlobRefs    int
 }
 
+type docRuntimeContextClient interface {
+	RuntimeContext(ctx context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error)
+}
+
 type deltaLogState struct {
 	firstRaw      string
 	lastRaw       string
@@ -130,6 +137,7 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		logger:         cfg.Logger,
 		store:          cfg.Store,
 		threadDocs:     cfg.ThreadDocs,
+		docRuntime:     cfg.DocRuntime,
 		docExec:        cfg.DocExec,
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
@@ -586,14 +594,9 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		}
 	}
 
-	effectiveInstructions, err := a.effectiveInstructions(meta.ID, body.Instructions)
-	if err != nil {
-		return err
-	}
-
 	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                body.Model,
-		"instructions":         effectiveInstructions,
+		"instructions":         body.Instructions,
 		"input":                body.InitialInput,
 		"metadata":             body.Metadata,
 		"include":              body.Include,
@@ -1467,14 +1470,9 @@ func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID 
 }
 
 func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, preparedInputRef string) error {
-	effectiveInstructions, err := a.effectiveInstructions(meta.ID, meta.Instructions)
-	if err != nil {
-		return err
-	}
-
 	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
-		"instructions":         effectiveInstructions,
+		"instructions":         meta.Instructions,
 		"input":                inputItems,
 		"prepared_input_ref":   preparedInputRef,
 		"previous_response_id": meta.LastResponseID,
@@ -1487,107 +1485,65 @@ func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmd
 	return a.sendAndStream(meta, cmdID, payload)
 }
 
-func (a *threadActor) effectiveInstructions(threadID, base string) (string, error) {
-	if a.threadDocs == nil {
-		return base, nil
-	}
-
-	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 200)
-	if err != nil {
-		return "", fmt.Errorf("list thread documents for response.create instructions: %w", err)
-	}
-	if len(documents) == 0 {
-		return base, nil
-	}
-
-	block := formatAvailableDocumentsBlock(documents)
-	if block == "" {
-		return base, nil
-	}
-
-	trimmedBase := strings.TrimRight(base, "\n")
-	if strings.TrimSpace(trimmedBase) == "" {
-		return block, nil
-	}
-
-	return trimmedBase + "\n\n" + block, nil
-}
-
-func formatAvailableDocumentsBlock(documents []docstore.Document) string {
-	var builder strings.Builder
-	count := 0
-
-	for _, document := range documents {
-		id := strings.TrimSpace(document.ID)
-		if id == "" {
-			continue
-		}
-
-		name := strings.TrimSpace(document.Filename)
-		if name == "" {
-			name = id
-		}
-
-		if count == 0 {
-			builder.WriteString("<available_documents>\n")
-		}
-		builder.WriteString(`<document id="`)
-		builder.WriteString(escapePromptAttribute(id))
-		builder.WriteString(`" name="`)
-		builder.WriteString(escapePromptAttribute(name))
-		builder.WriteString(`" />`)
-		builder.WriteByte('\n')
-		count++
-	}
-
-	if count == 0 {
-		return ""
-	}
-
-	builder.WriteString("</available_documents>")
-	return builder.String()
-}
-
-func escapePromptAttribute(value string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		`"`, "&quot;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\n", "&#10;",
-		"\r", "&#13;",
-		"\t", "&#9;",
-	)
-	return replacer.Replace(value)
-}
-
-const toolNameQueryAttachedDocuments = "query_attached_documents"
-
-func (a *threadActor) injectDocumentTools(threadID string, payload map[string]any) error {
-	if a.threadDocs == nil {
+func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[string]any) error {
+	if a.docRuntime == nil {
 		return nil
 	}
 
-	docs, err := a.threadDocs.ListDocuments(a.ctx, threadID, 1)
+	rawTools, err := marshalRuntimeContextTools(payload["tools"])
 	if err != nil {
-		return fmt.Errorf("check thread documents for tool injection: %w", err)
+		return err
 	}
-	if len(docs) == 0 {
+
+	requestID := fmt.Sprintf("docctx_%s_%d", threadID, time.Now().UTC().UnixNano())
+	resp, err := a.docRuntime.RuntimeContext(a.ctx, doccmd.RuntimeContextRequest{
+		RequestID:    requestID,
+		ThreadID:     threadID,
+		Instructions: stringValue(payload["instructions"]),
+		Tools:        rawTools,
+	})
+	if err != nil {
+		return fmt.Errorf("load document runtime context: %w", err)
+	}
+	if resp.RequestID != requestID {
+		return fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID)
+	}
+	if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
+		if strings.TrimSpace(resp.Error) == "" {
+			resp.Error = fmt.Sprintf("runtime context returned status %q", resp.Status)
+		}
+		return fmt.Errorf("document runtime context: %s", resp.Error)
+	}
+
+	if strings.TrimSpace(resp.Instructions) == "" {
+		delete(payload, "instructions")
+	} else {
+		payload["instructions"] = resp.Instructions
+	}
+
+	if len(resp.Tools) == 0 {
+		delete(payload, "tools")
 		return nil
 	}
 
-	existing, err := decodePayloadTools(payload["tools"])
+	decoded, err := decodeToolsParam(resp.Tools)
 	if err != nil {
-		return fmt.Errorf("decode tools for document injection: %w", err)
+		return fmt.Errorf("decode document runtime tools: %w", err)
 	}
-	for _, tool := range existing {
-		if toolParamName(tool) == toolNameQueryAttachedDocuments {
-			return nil
-		}
-	}
-
-	payload["tools"] = append(existing, queryAttachedDocumentsToolDef())
+	payload["tools"] = decoded
 	return nil
+}
+
+func marshalRuntimeContextTools(value any) (json.RawMessage, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal runtime context tools: %w", err)
+	}
+	return raw, nil
 }
 
 type docQueryRequest struct {
@@ -1598,13 +1554,13 @@ type docQueryRequest struct {
 func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 	var req docQueryRequest
 	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
-		return docQueryRequest{}, fmt.Errorf("decode %s arguments: %w", toolNameQueryAttachedDocuments, err)
+		return docQueryRequest{}, fmt.Errorf("decode %s arguments: %w", doccmd.ToolNameQueryAttachedDocuments, err)
 	}
 	if len(req.DocumentIDs) == 0 {
-		return docQueryRequest{}, fmt.Errorf("%s requires at least one document_id", toolNameQueryAttachedDocuments)
+		return docQueryRequest{}, fmt.Errorf("%s requires at least one document_id", doccmd.ToolNameQueryAttachedDocuments)
 	}
 	if strings.TrimSpace(req.Task) == "" {
-		return docQueryRequest{}, fmt.Errorf("%s requires a non-empty task", toolNameQueryAttachedDocuments)
+		return docQueryRequest{}, fmt.Errorf("%s requires a non-empty task", doccmd.ToolNameQueryAttachedDocuments)
 	}
 	return req, nil
 }
@@ -1809,7 +1765,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 						}
 						pendingSpawn = &req
 						pendingSpawnCallID = call.CallID
-					} else if err == nil && call.Name == toolNameQueryAttachedDocuments {
+					} else if err == nil && call.Name == doccmd.ToolNameQueryAttachedDocuments {
 						req, err := decodeDocQueryRequest(call.Arguments)
 						if err != nil {
 							a.logger.Warn("invalid document query arguments, falling back to waiting_tool",
