@@ -135,6 +135,19 @@ func normalizeMetadataMap(raw map[string]any) shared.Metadata {
 }
 
 func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
+	return NormalizeReasoningParam(reasoning)
+}
+
+func NormalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
+	// GPT-5.4 rejects legacy/unsupported efforts like `minimal`, so we coerce
+	// anything outside the supported set to `none` before sending it upstream.
+	switch reasoning.Effort {
+	case "":
+	case shared.ReasoningEffortNone, shared.ReasoningEffortLow, shared.ReasoningEffortMedium, shared.ReasoningEffortHigh, shared.ReasoningEffortXhigh:
+	default:
+		reasoning.Effort = shared.ReasoningEffortNone
+	}
+
 	// We don't consume reasoning summary events yet, so avoid requesting them.
 	reasoning.Summary = ""
 	reasoning.GenerateSummary = ""

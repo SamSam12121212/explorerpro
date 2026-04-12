@@ -576,6 +576,8 @@ export function useChat() {
 
     try {
       const inputItems = buildUserInputItems(text, images);
+      // Keep request payloads on supported efforts only; GPT-5.4 rejects `minimal`.
+      const reasoning = { effort: reasoningEffort, summary: "concise" } as const;
       const terminalStatuses = ["failed", "incomplete", "cancelled"];
       let currentThreadId = threadId;
       if (currentThreadId && terminalStatuses.includes(lastThreadStatusRef.current ?? "")) {
@@ -589,7 +591,7 @@ export function useChat() {
           input: inputItems,
           attached_document_ids: documents.map((document) => document.id),
           tools: EXPLORER_TOOLS,
-          reasoning: { effort: reasoningEffort, summary: "concise" },
+          reasoning,
           store: true,
         });
 
@@ -610,7 +612,7 @@ export function useChat() {
           kind: "thread.resume",
           body: {
             input_items: inputItems,
-            reasoning: { effort: reasoningEffort, summary: "concise" },
+            reasoning,
             attached_document_ids: documents.map((document) => document.id),
           },
         });

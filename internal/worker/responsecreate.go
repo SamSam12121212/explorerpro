@@ -275,10 +275,7 @@ func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
 }
 
 func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
-	// We don't consume reasoning summary events yet, so avoid requesting them.
-	reasoning.Summary = ""
-	reasoning.GenerateSummary = ""
-	return reasoning
+	return agentcmd.NormalizeReasoningParam(reasoning)
 }
 
 func decodeToolChoiceParam(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {

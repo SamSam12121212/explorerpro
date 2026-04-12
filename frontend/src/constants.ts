@@ -16,9 +16,9 @@ export const DEFAULT_INSTRUCTIONS = [
   "After child results return, synthesize one final answer for the user.",
 ].join(" ");
 
+// GPT-5.4 does not support `minimal`; use `none` for the lowest effort.
 export const REASONING_OPTIONS: { value: ReasoningEffort; label: string }[] = [
   { value: "none", label: "\u00B7 (none)" },
-  { value: "minimal", label: "\u00B7\u00B7 (minimal)" },
   { value: "low", label: "\u00B7\u00B7\u00B7 (low)" },
   { value: "medium", label: "\u00B7\u00B7\u00B7\u00B7 (medium)" },
   { value: "high", label: "\u00B7\u00B7\u00B7\u00B7\u00B7 (high)" },

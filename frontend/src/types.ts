@@ -3,7 +3,6 @@ export type HealthState = "checking" | "online" | "degraded" | "offline";
 /** Matches OpenAI Responses API / openai-go `shared.ReasoningEffort`. */
 export type ReasoningEffort =
   | "none"
-  | "minimal"
   | "low"
   | "medium"
   | "high"
