@@ -384,6 +384,13 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 
 	actor := &threadActor{
 		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {
+					{ID: "doc_1", Filename: "report.pdf"},
+				},
+			},
+		},
 		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
 			if req.ThreadID != "thread_123" {
 				t.Fatalf("ThreadID = %q, want %q", req.ThreadID, "thread_123")
@@ -422,6 +429,39 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 	}
 }
 
+func TestApplyDocumentRuntimeContextSkipsWhenNoDocumentsAttached(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{},
+		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, _ doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			t.Fatal("RuntimeContext should not be called when no documents are attached")
+			return doccmd.RuntimeContextResponse{}, nil
+		}),
+	}
+
+	payload := map[string]any{
+		"instructions": "Be concise.",
+		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
+	}
+
+	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
+	}
+
+	if got := payload["instructions"]; got != "Be concise." {
+		t.Fatalf("instructions = %v, want original instructions", got)
+	}
+
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want original tools", payload["tools"])
+	}
+}
+
 func TestEnsureRequiredResponseIncludeAddsEncryptedContent(t *testing.T) {
 	t.Parallel()
 
@@ -447,6 +487,13 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 
 	actor := &threadActor{
 		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {
+					{ID: "doc_1", Filename: "report.pdf"},
+				},
+			},
+		},
 		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
 			return doccmd.RuntimeContextResponse{
 				RequestID:    req.RequestID,
@@ -1668,6 +1715,13 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 
 	actor := &threadActor{
 		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {
+					{ID: "doc_1", Filename: "report.pdf"},
+				},
+			},
+		},
 		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
 			return doccmd.RuntimeContextResponse{
 				RequestID: req.RequestID,

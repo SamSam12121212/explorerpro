@@ -1489,6 +1489,17 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[s
 	if a.docRuntime == nil {
 		return nil
 	}
+	if a.threadDocs == nil {
+		return nil
+	}
+
+	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 1)
+	if err != nil {
+		return fmt.Errorf("list attached documents for runtime context: %w", err)
+	}
+	if len(documents) == 0 {
+		return nil
+	}
 
 	rawTools, err := marshalRuntimeContextTools(payload["tools"])
 	if err != nil {
