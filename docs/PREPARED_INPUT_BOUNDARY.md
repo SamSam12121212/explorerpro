@@ -327,9 +327,13 @@ The prepared-input boundary is specifically about moving source-specific `input`
 ## Progress
 
 - 2026-04-12: Task 1 completed. Added the first `internal/preparedinput` foundation with artifact validation plus blob-backed read/write helpers. This creates the initial contract for storing prepared `input` outside worker core before we touch command or worker behavior.
+- 2026-04-12: Task 2 completed. Extended the internal command model with `prepared_input_ref` for `thread.start` and `thread.resume`, and made the worker reject that field explicitly until prepared-input consumption is implemented. This keeps the schema moving forward without silently ignoring new command bodies.
 
 Files touched:
 
 - `docs/PREPARED_INPUT_BOUNDARY.md`
 - `internal/preparedinput/preparedinput.go`
 - `internal/preparedinput/preparedinput_test.go`
+- `internal/agentcmd/command.go`
+- `internal/agentcmd/command_test.go`
+- `internal/worker/actor.go`

@@ -49,6 +49,7 @@ type Command struct {
 
 type StartBody struct {
 	InitialInput       json.RawMessage `json:"initial_input"`
+	PreparedInputRef   string          `json:"prepared_input_ref,omitempty"`
 	Model              string          `json:"model"`
 	Instructions       string          `json:"instructions,omitempty"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
@@ -61,8 +62,9 @@ type StartBody struct {
 }
 
 type ResumeBody struct {
-	InputItems json.RawMessage `json:"input_items"`
-	Reasoning  json.RawMessage `json:"reasoning,omitempty"`
+	InputItems       json.RawMessage `json:"input_items"`
+	PreparedInputRef string          `json:"prepared_input_ref,omitempty"`
+	Reasoning        json.RawMessage `json:"reasoning,omitempty"`
 }
 
 type SubmitToolOutputBody struct {
@@ -135,8 +137,8 @@ func (c Command) StartBody() (StartBody, error) {
 		return StartBody{}, fmt.Errorf("thread.start missing model")
 	}
 
-	if len(body.InitialInput) == 0 {
-		return StartBody{}, fmt.Errorf("thread.start missing initial_input")
+	if len(body.InitialInput) == 0 && strings.TrimSpace(body.PreparedInputRef) == "" {
+		return StartBody{}, fmt.Errorf("thread.start missing initial_input or prepared_input_ref")
 	}
 
 	return body, nil
@@ -148,8 +150,8 @@ func (c Command) ResumeBody() (ResumeBody, error) {
 		return ResumeBody{}, err
 	}
 
-	if len(body.InputItems) == 0 {
-		return ResumeBody{}, fmt.Errorf("thread.resume missing input_items")
+	if len(body.InputItems) == 0 && strings.TrimSpace(body.PreparedInputRef) == "" {
+		return ResumeBody{}, fmt.Errorf("thread.resume missing input_items or prepared_input_ref")
 	}
 
 	return body, nil

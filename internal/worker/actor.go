@@ -482,6 +482,9 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(body.PreparedInputRef) != "" {
+		return fmt.Errorf("thread.start prepared_input_ref is not implemented yet")
+	}
 
 	a.logger.Info("starting thread",
 		"cmd_id", cmd.CmdID,
@@ -610,6 +613,9 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	body, err := cmd.ResumeBody()
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(body.PreparedInputRef) != "" {
+		return fmt.Errorf("thread.resume prepared_input_ref is not implemented yet")
 	}
 
 	meta, err := a.store.LoadThread(a.ctx, cmd.ThreadID)

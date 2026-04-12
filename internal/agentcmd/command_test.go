@@ -79,6 +79,53 @@ func TestStartBody(t *testing.T) {
 	}
 }
 
+func TestStartBodyAcceptsPreparedInputRef(t *testing.T) {
+	cmd, err := Decode([]byte(`{
+		"cmd_id":"cmd_prepared",
+		"kind":"thread.start",
+		"thread_id":"thread_prepared",
+		"body":{
+			"model":"gpt-5.4",
+			"prepared_input_ref":"blob://prepared-inputs/pi_123.json"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	body, err := cmd.StartBody()
+	if err != nil {
+		t.Fatalf("StartBody() error = %v", err)
+	}
+
+	if body.PreparedInputRef != "blob://prepared-inputs/pi_123.json" {
+		t.Fatalf("PreparedInputRef = %q, want %q", body.PreparedInputRef, "blob://prepared-inputs/pi_123.json")
+	}
+}
+
+func TestResumeBodyAcceptsPreparedInputRef(t *testing.T) {
+	cmd, err := Decode([]byte(`{
+		"cmd_id":"cmd_resume_prepared",
+		"kind":"thread.resume",
+		"thread_id":"thread_123",
+		"body":{
+			"prepared_input_ref":"blob://prepared-inputs/pi_456.json"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	body, err := cmd.ResumeBody()
+	if err != nil {
+		t.Fatalf("ResumeBody() error = %v", err)
+	}
+
+	if body.PreparedInputRef != "blob://prepared-inputs/pi_456.json" {
+		t.Fatalf("PreparedInputRef = %q, want %q", body.PreparedInputRef, "blob://prepared-inputs/pi_456.json")
+	}
+}
+
 func TestWorkerCommandWildcard(t *testing.T) {
 	if got := WorkerCommandWildcard("worker-a"); got != "agent.worker.worker-a.cmd.>" {
 		t.Fatalf("WorkerCommandWildcard() = %q", got)
