@@ -14,6 +14,7 @@ import (
 	"explorer/internal/agentcmd"
 	"explorer/internal/config"
 	"explorer/internal/docstore"
+	"explorer/internal/documenthandler"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
@@ -82,6 +83,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		OpenAIConfig:   openAIConfig,
 		SessionFactory: sessionFactory,
 		Docs:           docStore,
+		PreparedInputs: documenthandler.NewClient(runtime.NATS().Conn()),
 		ThreadDocs:     threadDocs,
 		SessionIdleTTL: documentSessionIdleTTL,
 		SessionMaxTTL:  documentSessionMaxTTL,

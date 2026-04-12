@@ -3,13 +3,11 @@ package worker
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +18,6 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
-	"explorer/internal/preparedinput"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
@@ -1422,24 +1419,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 }
 
 func (a *threadActor) lowerResponseCreatePayload(payload map[string]any) (map[string]any, payloadLoweringStats, error) {
-	cloned := cloneAny(payload)
-	root, ok := cloned.(map[string]any)
-	if !ok {
-		return nil, payloadLoweringStats{}, fmt.Errorf("response.create payload must be an object")
-	}
-
-	stats := payloadLoweringStats{}
-	input, ok := root["input"]
-	if !ok {
-		return root, stats, nil
-	}
-
-	lowered, err := a.lowerInputValue(input, &stats)
-	if err != nil {
-		return nil, payloadLoweringStats{}, err
-	}
-	root["input"] = lowered
-	return root, stats, nil
+	return lowerResponseCreatePayloadWithBlob(a.ctx, a.blob, payload)
 }
 
 func cloneAny(value any) any {
@@ -1462,110 +1442,19 @@ func cloneAny(value any) any {
 }
 
 func (a *threadActor) lowerInputValue(value any, stats *payloadLoweringStats) (any, error) {
-	items, ok := value.([]any)
-	if !ok {
-		return value, nil
-	}
-	stats.InputItemsCount = len(items)
-
-	lowered := make([]any, len(items))
-	for index, item := range items {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			lowered[index] = item
-			continue
-		}
-
-		loweredItem, err := a.lowerInputItem(itemMap, stats)
-		if err != nil {
-			return nil, err
-		}
-		lowered[index] = loweredItem
-	}
-
-	return lowered, nil
+	return lowerInputValueWithBlob(a.ctx, a.blob, value, stats)
 }
 
 func (a *threadActor) lowerInputItem(item map[string]any, stats *payloadLoweringStats) (map[string]any, error) {
-	if item["type"] != "message" {
-		return item, nil
-	}
-
-	content, ok := item["content"].([]any)
-	if !ok {
-		return item, nil
-	}
-
-	loweredContent := make([]any, len(content))
-	for index, part := range content {
-		partMap, ok := part.(map[string]any)
-		if !ok {
-			loweredContent[index] = part
-			continue
-		}
-
-		loweredPart, err := a.lowerMessageContentItem(partMap, stats)
-		if err != nil {
-			return nil, err
-		}
-		loweredContent[index] = loweredPart
-	}
-
-	item["content"] = loweredContent
-	return item, nil
+	return lowerInputItemWithBlob(a.ctx, a.blob, item, stats)
 }
 
 func (a *threadActor) lowerMessageContentItem(item map[string]any, stats *payloadLoweringStats) (map[string]any, error) {
-	typeName := stringValue(item["type"])
-	switch typeName {
-	case "image_ref":
-		stats.LoweredImageInputs++
-		stats.LoweredBlobRefs++
-		return a.buildInputImageFromBlobRef(item, stringValue(item["image_ref"]))
-	case "input_image":
-		imageURL := stringValue(item["image_url"])
-		if strings.HasPrefix(imageURL, "blob://") {
-			stats.LoweredImageInputs++
-			stats.LoweredBlobRefs++
-			return a.buildInputImageFromBlobRef(item, imageURL)
-		}
-	}
-
-	return item, nil
+	return lowerMessageContentItemWithBlob(a.ctx, a.blob, item, stats)
 }
 
 func (a *threadActor) buildInputImageFromBlobRef(item map[string]any, ref string) (map[string]any, error) {
-	if a.blob == nil {
-		return nil, fmt.Errorf("blob store is not configured")
-	}
-	if strings.TrimSpace(ref) == "" {
-		return nil, fmt.Errorf("image input is missing image_ref")
-	}
-
-	data, err := a.blob.ReadRef(a.ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-
-	contentType := strings.TrimSpace(stringValue(item["content_type"]))
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
-	if !strings.HasPrefix(contentType, "image/") {
-		return nil, fmt.Errorf("blob ref %s is not an image (detected %s)", ref, contentType)
-	}
-
-	detail := strings.TrimSpace(stringValue(item["detail"]))
-	if detail == "" {
-		detail = "auto"
-	}
-
-	dataURL := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
-	return map[string]any{
-		"type":      "input_image",
-		"image_url": dataURL,
-		"detail":    detail,
-	}, nil
+	return buildInputImageFromBlobRefWithBlob(a.ctx, a.blob, item, ref)
 }
 
 func stringValue(value any) string {
@@ -2209,52 +2098,11 @@ func (a *threadActor) appendInputItems(threadID, responseID string, itemsRaw jso
 }
 
 func (a *threadActor) materializePreparedInputPayload(payload map[string]any) (map[string]any, error) {
-	sendPayload, ok := cloneAny(payload).(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("response.create payload must be an object")
-	}
-
-	ref := strings.TrimSpace(stringValue(sendPayload["prepared_input_ref"]))
-	if ref == "" {
-		return sendPayload, nil
-	}
-
-	inputValue, err := a.loadPreparedInputValue(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	sendPayload["input"] = inputValue
-	delete(sendPayload, "prepared_input_ref")
-	return sendPayload, nil
+	return materializePreparedInputPayloadWithBlob(a.ctx, a.blob, payload)
 }
 
 func (a *threadActor) loadPreparedInputValue(ref string) (any, error) {
-	if a.blob == nil {
-		return nil, fmt.Errorf("blob store is not configured")
-	}
-
-	store, err := preparedinput.NewStore(a.blob)
-	if err != nil {
-		return nil, err
-	}
-
-	artifact, err := store.Read(a.ctx, ref)
-	if err != nil {
-		return nil, fmt.Errorf("load prepared input %q: %w", ref, err)
-	}
-
-	normalized, err := normalizeInputItems(artifact.Input)
-	if err != nil {
-		return nil, fmt.Errorf("normalize prepared input %q: %w", ref, err)
-	}
-
-	value, err := decodeResponseCreateField("input", normalized)
-	if err != nil {
-		return nil, fmt.Errorf("decode prepared input %q: %w", ref, err)
-	}
-
-	return value, nil
+	return loadPreparedInputValueFromBlob(a.ctx, a.blob, ref)
 }
 
 func (a *threadActor) appendItem(entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {

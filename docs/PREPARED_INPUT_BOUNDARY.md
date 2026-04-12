@@ -89,8 +89,8 @@ Source-specific materialization will produce a prepared input artifact outside w
 
 That artifact is:
 
-- Responses-compatible `input`
-- already expanded for the specific source
+- Responses-shaped `input`
+- already expanded for the specific source at the semantic level
 - stored outside the command envelope
 - referenced by `prepared_input_ref`
 
@@ -102,6 +102,8 @@ This lets the worker remain agnostic to whether the input came from:
 - a future source type
 
 The worker should not need branching like "if document do X" at the payload-materialization boundary.
+
+The prepared artifact may still contain generic blob-backed refs such as `image_ref`. In that case the worker performs only source-agnostic lowering of those generic refs before the OpenAI wire send.
 
 ### Worker responsibility after this change
 
@@ -341,6 +343,7 @@ The prepared-input boundary is specifically about moving source-specific `input`
 - 2026-04-12: Task 3 completed. The worker now resolves `prepared_input_ref` at send time, strips it from the OpenAI wire payload, and keeps the persisted `client.response.create` checkpoint compact by storing the ref instead of the expanded prepared input. Recovery replay now re-materializes prepared input from the stored ref. Resume-command normalization also now accepts `prepared_input_ref` without inline `input_items`.
 - 2026-04-12: Task 4 completed. Tightened the public API boundary so `prepared_input_ref` remains internal-only. The public HTTP resume endpoint now rejects it explicitly, and this note now states that frontend clients should only send semantic thread input such as text and `attached_document_ids`.
 - 2026-04-12: Task 5 completed. Defined the first internal request/reply contract for document prepared-input building in `internal/doccmd`, and wired `documenthandler` to subscribe on `doc.prepare_input`. The handler currently returns a structured `noop/not implemented` response, which gives us a stable non-OpenAI seam before adding real document materialization.
+- 2026-04-12: Task 6 completed. `documenthandler` now builds real document warmup prepared-input artifacts from manifest state and stores them in blob storage, using generic `image_ref` items rather than inlined base64. The worker’s document warmup path now requests that artifact over internal NATS, carries only `prepared_input_ref` through runtime payload assembly, and reuses the same source-agnostic prepared-input resolution plus blob-ref lowering path used by thread sends before the OpenAI wire send.
 
 Files touched:
 
@@ -356,5 +359,11 @@ Files touched:
 - `internal/worker/actor_recovery_harness_test.go`
 - `internal/doccmd/command.go`
 - `internal/doccmd/command_test.go`
+- `internal/documenthandler/client.go`
 - `internal/documenthandler/service.go`
+- `internal/documenthandler/service_test.go`
 - `cmd/documenthandler/main.go`
+- `internal/worker/prepared_payload.go`
+- `internal/worker/docexec.go`
+- `internal/worker/docexec_test.go`
+- `internal/worker/service.go`

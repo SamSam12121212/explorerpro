@@ -2,15 +2,29 @@ package documenthandler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
-	"explorer/internal/blobstore"
 	"explorer/internal/doccmd"
+	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
+	"explorer/internal/preparedinput"
 
 	"github.com/nats-io/nats.go"
 )
+
+type documentStore interface {
+	Get(ctx context.Context, id string) (docstore.Document, error)
+}
+
+type documentBlobStore interface {
+	Ref(parts ...string) string
+	ReadRef(ctx context.Context, ref string) ([]byte, error)
+	WriteRef(ctx context.Context, ref string, data []byte) error
+}
 
 // Service currently exists only as a lifecycle/dependency shell for
 // document-adjacent backend work. It is intentionally not the OpenAI
@@ -19,17 +33,19 @@ type Service struct {
 	logger *slog.Logger
 	nc     *nats.Conn
 	js     nats.JetStreamContext
-	docs   *docstore.Store
-	blob   *blobstore.LocalStore
+	docs   documentStore
+	blob   documentBlobStore
+	now    func() time.Time
 }
 
-func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs *docstore.Store, blob *blobstore.LocalStore) *Service {
+func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, blob documentBlobStore) *Service {
 	return &Service{
 		logger: logger,
 		nc:     nc,
 		js:     js,
 		docs:   docs,
 		blob:   blob,
+		now:    func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -53,12 +69,12 @@ func (s *Service) Run(ctx context.Context) error {
 			s.logger.Info("document handler service stopping", "reason", ctx.Err())
 			return nil
 		case msg := <-ch:
-			s.handlePrepareInput(msg)
+			s.handlePrepareInput(ctx, msg)
 		}
 	}
 }
 
-func (s *Service) handlePrepareInput(msg *nats.Msg) {
+func (s *Service) handlePrepareInput(ctx context.Context, msg *nats.Msg) {
 	req, err := doccmd.DecodePrepareInputRequest(msg.Data)
 	if err != nil {
 		s.logger.Error("invalid prepare input request", "error", err)
@@ -77,11 +93,7 @@ func (s *Service) handlePrepareInput(msg *nats.Msg) {
 		"document_id", req.DocumentID,
 	)
 
-	s.respondPrepareInput(msg, doccmd.PrepareInputResponse{
-		RequestID: req.RequestID,
-		Status:    doccmd.PrepareStatusNoop,
-		Error:     "document prepared-input materialization is not implemented yet",
-	})
+	s.respondPrepareInput(msg, s.prepareInput(ctx, req))
 }
 
 func (s *Service) respondPrepareInput(msg *nats.Msg, resp doccmd.PrepareInputResponse) {
@@ -110,4 +122,145 @@ func (s *Service) respondPrepareInput(msg *nats.Msg, resp doccmd.PrepareInputRes
 			"error", err,
 		)
 	}
+}
+
+func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputRequest) doccmd.PrepareInputResponse {
+	if strings.TrimSpace(req.Kind) != doccmd.PrepareKindWarmup {
+		return doccmd.PrepareInputResponse{
+			RequestID: req.RequestID,
+			Status:    doccmd.PrepareStatusError,
+			Error:     fmt.Sprintf("unsupported prepare input kind %q", req.Kind),
+		}
+	}
+
+	ref, err := s.prepareWarmupInput(ctx, req)
+	if err != nil {
+		return doccmd.PrepareInputResponse{
+			RequestID: req.RequestID,
+			Status:    doccmd.PrepareStatusError,
+			Error:     err.Error(),
+		}
+	}
+
+	return doccmd.PrepareInputResponse{
+		RequestID:        req.RequestID,
+		Status:           doccmd.PrepareStatusOK,
+		PreparedInputRef: ref,
+	}
+}
+
+func (s *Service) prepareWarmupInput(ctx context.Context, req doccmd.PrepareInputRequest) (string, error) {
+	doc, err := s.docs.Get(ctx, req.DocumentID)
+	if err != nil {
+		return "", fmt.Errorf("load document: %w", err)
+	}
+	if strings.TrimSpace(doc.ManifestRef) == "" {
+		return "", fmt.Errorf("document has no manifest (not yet split)")
+	}
+
+	manifest, err := s.loadManifest(ctx, doc.ManifestRef)
+	if err != nil {
+		return "", err
+	}
+
+	inputJSON, err := buildWarmupInput(doc, manifest)
+	if err != nil {
+		return "", err
+	}
+
+	store, err := preparedinput.NewStore(s.blob)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := store.Write(ctx, req.RequestID, preparedinput.Artifact{
+		Version:    preparedinput.VersionV1,
+		Input:      inputJSON,
+		SourceKind: doccmd.PrepareKindWarmup,
+		CreatedAt:  s.now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return ref, nil
+}
+
+func (s *Service) loadManifest(ctx context.Context, manifestRef string) (docsplitter.Manifest, error) {
+	data, err := s.blob.ReadRef(ctx, manifestRef)
+	if err != nil {
+		return docsplitter.Manifest{}, fmt.Errorf("read manifest blob: %w", err)
+	}
+
+	var manifest docsplitter.Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return docsplitter.Manifest{}, fmt.Errorf("decode manifest json: %w", err)
+	}
+
+	return manifest, nil
+}
+
+func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (json.RawMessage, error) {
+	content := make([]any, 0, len(manifest.Pages)*3+2)
+
+	content = append(content, map[string]any{
+		"type": "input_text",
+		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
+			escapePromptAttribute(doc.Filename),
+			escapePromptAttribute(doc.ID),
+			manifest.PageCount),
+	})
+
+	for _, page := range manifest.Pages {
+		content = append(content, map[string]any{
+			"type": "input_text",
+			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
+		})
+
+		image := map[string]any{
+			"type":      "image_ref",
+			"image_ref": page.ImageRef,
+			"detail":    "high",
+		}
+		if strings.TrimSpace(page.ContentType) != "" {
+			image["content_type"] = page.ContentType
+		}
+		content = append(content, image)
+
+		content = append(content, map[string]any{
+			"type": "input_text",
+			"text": "</pdf_page>",
+		})
+	}
+
+	content = append(content, map[string]any{
+		"type": "input_text",
+		"text": "</pdf>",
+	})
+
+	inputJSON, err := json.Marshal([]any{
+		map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": content,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal document warmup input: %w", err)
+	}
+
+	return inputJSON, nil
+}
+
+func escapePromptAttribute(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\n", "&#10;",
+		"\r", "&#13;",
+		"\t", "&#9;",
+	)
+	return replacer.Replace(value)
 }

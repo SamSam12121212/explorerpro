@@ -4,24 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"explorer/internal/blobstore"
+	"explorer/internal/doccmd"
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
+	"explorer/internal/preparedinput"
 	"explorer/internal/threaddocstore"
 )
 
 func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T) {
 	ctx := context.Background()
 	blob := newTestBlobStore(t)
-	imageRef := blob.Ref("pages", "page-1.png")
-	if err := blob.WriteRef(ctx, imageRef, []byte("png")); err != nil {
-		t.Fatalf("WriteRef() error = %v", err)
-	}
+	doc := writeReadyTestDocument(t, ctx, blob, "doc_123", "report.pdf")
+	preparer := newFakeWarmupPreparer(t, ctx, blob, doc)
 
 	conn := &fakeDocConn{
 		reads: [][]byte{
@@ -31,27 +32,24 @@ func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T)
 	}
 
 	exec := &documentExec{
-		blob: blob,
+		blob:           blob,
+		preparedInputs: preparer,
 		sessionFactory: func() *openaiws.Session {
 			return openaiws.NewSession(testOpenAIWSConfig(), &fakeDocDialer{conn: conn})
 		},
+		now: func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) },
 	}
 
-	gotID, err := exec.warmDocument(ctx, docstore.Document{
-		ID:       "doc_123",
-		Filename: "report.pdf",
-	}, docsplitter.Manifest{
-		PageCount: 1,
-		Pages: []docsplitter.PageEntry{
-			{PageNumber: 1, ImageRef: imageRef, ContentType: "image/png"},
-		},
-	}, "gpt-5.4")
+	gotID, err := exec.warmDocument(ctx, "thread_123", doc, "gpt-5.4")
 	if err != nil {
 		t.Fatalf("warmDocument() error = %v", err)
 	}
 
 	if gotID != "resp_warm" {
 		t.Fatalf("warmDocument() response ID = %q, want %q", gotID, "resp_warm")
+	}
+	if preparer.RequestCount() != 1 {
+		t.Fatalf("prepare request count = %d, want 1", preparer.RequestCount())
 	}
 
 	payload := decodeSentResponseCreate(t, conn)
@@ -62,10 +60,24 @@ func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T)
 	if _, exists := payload["instructions"]; exists {
 		t.Fatalf("instructions should be omitted, got %#v", payload["instructions"])
 	}
+	if _, exists := payload["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be sent to OpenAI, got %#v", payload["prepared_input_ref"])
+	}
 
 	content := decodeSingleMessageContent(t, payload)
 	if len(content) != 5 {
 		t.Fatalf("content length = %d, want 5", len(content))
+	}
+
+	imageItem, ok := content[2].(map[string]any)
+	if !ok {
+		t.Fatalf("content[2] type = %T, want map[string]any", content[2])
+	}
+	if got := imageItem["type"]; got != "input_image" {
+		t.Fatalf("content[2].type = %v, want %q", got, "input_image")
+	}
+	if imageURL, _ := imageItem["image_url"].(string); !strings.HasPrefix(imageURL, "data:image/png;base64,") {
+		t.Fatalf("content[2].image_url = %v, want data URL", imageItem["image_url"])
 	}
 
 	const removedPrompt = "The document above has been loaded. Confirm receipt and readiness."
@@ -137,6 +149,7 @@ func TestExecuteReusesThreadDocumentSession(t *testing.T) {
 	blob := newTestBlobStore(t)
 
 	doc := writeReadyTestDocument(t, ctx, blob, "doc_1", "report.pdf")
+	preparer := newFakeWarmupPreparer(t, ctx, blob, doc)
 
 	conn := &fakeDocConn{
 		reads: [][]byte{
@@ -167,6 +180,7 @@ func TestExecuteReusesThreadDocumentSession(t *testing.T) {
 			return openaiws.NewSession(testOpenAIWSConfig(), dialer)
 		},
 		Docs:           docs,
+		PreparedInputs: preparer,
 		ThreadDocs:     threadDocs,
 		SessionIdleTTL: time.Hour,
 		SessionMaxTTL:  time.Hour,
@@ -207,6 +221,9 @@ func TestExecuteReusesThreadDocumentSession(t *testing.T) {
 	if got := docs.Document(doc.ID).BaseResponseID; got != "resp_warm" {
 		t.Fatalf("base_response_id = %q, want %q", got, "resp_warm")
 	}
+	if preparer.RequestCount() != 1 {
+		t.Fatalf("prepare request count = %d, want 1", preparer.RequestCount())
+	}
 
 	if len(conn.writes) != 3 {
 		t.Fatalf("writes = %d, want 3 (warmup + 2 queries)", len(conn.writes))
@@ -234,6 +251,7 @@ func TestExecuteUsesDocumentQueryModel(t *testing.T) {
 
 	doc := writeReadyTestDocument(t, ctx, blob, "doc_1", "report.pdf")
 	doc.QueryModel = "gpt-5.4-mini"
+	preparer := newFakeWarmupPreparer(t, ctx, blob, doc)
 
 	conn := &fakeDocConn{
 		reads: [][]byte{
@@ -255,6 +273,7 @@ func TestExecuteUsesDocumentQueryModel(t *testing.T) {
 				doc.ID: doc,
 			},
 		},
+		PreparedInputs: preparer,
 		ThreadDocs:     &fakeExecThreadDocStore{lineage: map[string]string{}, models: map[string]string{}},
 		SessionIdleTTL: time.Hour,
 		SessionMaxTTL:  time.Hour,
@@ -691,9 +710,117 @@ func writeReadyTestDocument(t *testing.T, ctx context.Context, blob *blobstore.L
 		ID:          docID,
 		Filename:    filename,
 		ManifestRef: manifestRef,
+		PageCount:   1,
 		Status:      "ready",
 		QueryModel:  "gpt-5.4",
 	}
+}
+
+type fakeDocPreparedInputClient struct {
+	mu       sync.Mutex
+	refs     map[string]string
+	requests []doccmd.PrepareInputRequest
+}
+
+func newFakeWarmupPreparer(t *testing.T, ctx context.Context, blob *blobstore.LocalStore, docs ...docstore.Document) *fakeDocPreparedInputClient {
+	t.Helper()
+
+	refs := make(map[string]string, len(docs))
+	for _, doc := range docs {
+		refs[doc.ID] = writeWarmupPreparedInputRef(t, ctx, blob, doc)
+	}
+	return &fakeDocPreparedInputClient{refs: refs}
+}
+
+func (c *fakeDocPreparedInputClient) PrepareInput(_ context.Context, req doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.requests = append(c.requests, req)
+	ref := c.refs[req.DocumentID]
+	if ref == "" {
+		return doccmd.PrepareInputResponse{
+			RequestID: req.RequestID,
+			Status:    doccmd.PrepareStatusError,
+			Error:     "missing prepared input ref",
+		}, nil
+	}
+
+	return doccmd.PrepareInputResponse{
+		RequestID:        req.RequestID,
+		Status:           doccmd.PrepareStatusOK,
+		PreparedInputRef: ref,
+	}, nil
+}
+
+func (c *fakeDocPreparedInputClient) RequestCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.requests)
+}
+
+func writeWarmupPreparedInputRef(t *testing.T, ctx context.Context, blob *blobstore.LocalStore, doc docstore.Document) string {
+	t.Helper()
+
+	manifestJSON, err := blob.ReadRef(ctx, doc.ManifestRef)
+	if err != nil {
+		t.Fatalf("ReadRef(manifest) error = %v", err)
+	}
+
+	var manifest docsplitter.Manifest
+	if err := json.Unmarshal(manifestJSON, &manifest); err != nil {
+		t.Fatalf("json.Unmarshal(manifest) error = %v", err)
+	}
+
+	content := []any{
+		map[string]any{
+			"type": "input_text",
+			"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`, doc.Filename, doc.ID, manifest.PageCount),
+		},
+		map[string]any{
+			"type": "input_text",
+			"text": fmt.Sprintf(`<pdf_page number="%d">`, manifest.Pages[0].PageNumber),
+		},
+		map[string]any{
+			"type":         "image_ref",
+			"image_ref":    manifest.Pages[0].ImageRef,
+			"content_type": manifest.Pages[0].ContentType,
+			"detail":       "high",
+		},
+		map[string]any{
+			"type": "input_text",
+			"text": "</pdf_page>",
+		},
+		map[string]any{
+			"type": "input_text",
+			"text": "</pdf>",
+		},
+	}
+
+	inputJSON, err := json.Marshal([]any{
+		map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": content,
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(input) error = %v", err)
+	}
+
+	store, err := preparedinput.NewStore(blob)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	ref, err := store.Write(ctx, "test-"+doc.ID, preparedinput.Artifact{
+		Version:    preparedinput.VersionV1,
+		Input:      inputJSON,
+		SourceKind: doccmd.PrepareKindWarmup,
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	return ref
 }
 
 type fakeDocConn struct {

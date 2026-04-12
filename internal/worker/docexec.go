@@ -2,19 +2,17 @@ package worker
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"explorer/internal/blobstore"
-	"explorer/internal/docsplitter"
+	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/threaddocstore"
@@ -33,12 +31,17 @@ type docExecThreadDocStore interface {
 	UpdateLineage(ctx context.Context, threadID, documentID, responseID, model string) error
 }
 
+type docExecPreparedInputClient interface {
+	PrepareInput(ctx context.Context, req doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error)
+}
+
 type documentExecConfig struct {
 	Logger         *slog.Logger
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	SessionFactory func() *openaiws.Session
 	Docs           docExecDocStore
+	PreparedInputs docExecPreparedInputClient
 	ThreadDocs     docExecThreadDocStore
 	SessionIdleTTL time.Duration
 	SessionMaxTTL  time.Duration
@@ -52,6 +55,7 @@ type documentExec struct {
 	cfg            openaiws.Config
 	sessionFactory func() *openaiws.Session
 	docs           docExecDocStore
+	preparedInputs docExecPreparedInputClient
 	threadDocs     docExecThreadDocStore
 	sessionIdleTTL time.Duration
 	sessionMaxTTL  time.Duration
@@ -91,6 +95,7 @@ func newDocumentExec(cfg documentExecConfig) *documentExec {
 		cfg:            cfg.OpenAIConfig,
 		sessionFactory: cfg.SessionFactory,
 		docs:           cfg.Docs,
+		preparedInputs: cfg.PreparedInputs,
 		threadDocs:     cfg.ThreadDocs,
 		sessionIdleTTL: cfg.SessionIdleTTL,
 		sessionMaxTTL:  cfg.SessionMaxTTL,
@@ -166,15 +171,9 @@ func (e *documentExec) executeOne(ctx context.Context, req docExecRequest, docum
 		return docExecResult{DocumentID: documentID, DocumentName: doc.Filename, Error: "document has no manifest (not yet split)"}
 	}
 
-	manifest, err := e.loadManifest(ctx, doc.ManifestRef)
-	if err != nil {
-		log.Warn("failed to load document manifest", "manifest_ref", doc.ManifestRef, "error", err)
-		return docExecResult{DocumentID: documentID, DocumentName: doc.Filename, Error: fmt.Sprintf("manifest load failed: %v", err)}
-	}
-
 	entry := e.getSession(req.ThreadID, documentID)
 
-	responseID, answer, model, err := e.executeOneWithSession(ctx, entry, req, doc, manifest, req.Model, log)
+	responseID, answer, model, err := e.executeOneWithSession(ctx, entry, req, doc, req.Model, log)
 	if err != nil {
 		return docExecResult{DocumentID: documentID, DocumentName: doc.Filename, Error: err.Error()}
 	}
@@ -192,25 +191,11 @@ func (e *documentExec) executeOne(ctx context.Context, req docExecRequest, docum
 	}
 }
 
-func (e *documentExec) loadManifest(ctx context.Context, manifestRef string) (docsplitter.Manifest, error) {
-	data, err := e.blob.ReadRef(ctx, manifestRef)
-	if err != nil {
-		return docsplitter.Manifest{}, fmt.Errorf("read manifest blob: %w", err)
-	}
-
-	var manifest docsplitter.Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return docsplitter.Manifest{}, fmt.Errorf("decode manifest json: %w", err)
-	}
-	return manifest, nil
-}
-
 func (e *documentExec) executeOneWithSession(
 	ctx context.Context,
 	entry *documentSession,
 	req docExecRequest,
 	doc docstore.Document,
-	manifest docsplitter.Manifest,
 	fallbackModel string,
 	log *slog.Logger,
 ) (string, string, string, error) {
@@ -224,8 +209,8 @@ func (e *documentExec) executeOneWithSession(
 	}
 
 	if previousResponseID == "" {
-		log.Info("warming document (no existing lineage)", "page_count", manifest.PageCount, "model", model)
-		warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, model)
+		log.Info("warming document (no existing lineage)", "page_count", doc.PageCount, "model", model)
+		warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, req.ThreadID, doc, model)
 		if warmErr != nil {
 			log.Warn("document warmup failed", "error", warmErr)
 			return "", "", "", fmt.Errorf("warmup failed: %w", warmErr)
@@ -255,7 +240,7 @@ func (e *documentExec) executeOneWithSession(
 	entry.latestResponseID = ""
 	entry.latestModel = ""
 
-	warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, doc, manifest, model)
+	warmupResponseID, warmErr := e.warmDocumentLocked(ctx, entry, req.ThreadID, doc, model)
 	if warmErr != nil {
 		return "", "", "", fmt.Errorf("query failed after rebuild warmup: %w", warmErr)
 	}
@@ -314,23 +299,40 @@ func (e *documentExec) resolveLineageLocked(
 	return "", defaultModel, nil
 }
 
-func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSession, doc docstore.Document, manifest docsplitter.Manifest, model string) (string, error) {
-	pageContent, err := e.buildDocumentPageContent(ctx, doc, manifest)
+func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSession, threadID string, doc docstore.Document, model string) (string, error) {
+	if e.preparedInputs == nil {
+		return "", fmt.Errorf("document prepared input client is not configured")
+	}
+
+	req := doccmd.PrepareInputRequest{
+		RequestID:  e.newPrepareInputRequestID(doc.ID),
+		Kind:       doccmd.PrepareKindWarmup,
+		ThreadID:   threadID,
+		DocumentID: doc.ID,
+	}
+
+	resp, err := e.preparedInputs.PrepareInput(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("build page content for warmup: %w", err)
+		return "", fmt.Errorf("request document warmup prepared input: %w", err)
+	}
+	if resp.RequestID != req.RequestID {
+		return "", fmt.Errorf("document warmup prepared input request id mismatch: got %q want %q", resp.RequestID, req.RequestID)
+	}
+	if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
+		if strings.TrimSpace(resp.Error) == "" {
+			resp.Error = fmt.Sprintf("prepare input returned status %q", resp.Status)
+		}
+		return "", fmt.Errorf("prepare document warmup input: %s", resp.Error)
+	}
+	if strings.TrimSpace(resp.PreparedInputRef) == "" {
+		return "", fmt.Errorf("prepare document warmup input returned empty prepared_input_ref")
 	}
 
 	payload, err := buildResponseCreatePayloadObject(threadstore.ThreadMeta{}, map[string]any{
-		"model": model,
-		"input": []any{
-			map[string]any{
-				"type":    "message",
-				"role":    "user",
-				"content": pageContent,
-			},
-		},
-		"store":    true,
-		"generate": false,
+		"model":              model,
+		"prepared_input_ref": resp.PreparedInputRef,
+		"store":              true,
+		"generate":           false,
 	})
 	if err != nil {
 		return "", fmt.Errorf("build document warmup response.create payload: %w", err)
@@ -343,11 +345,11 @@ func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSe
 	return responseID, nil
 }
 
-func (e *documentExec) warmDocument(ctx context.Context, doc docstore.Document, manifest docsplitter.Manifest, model string) (string, error) {
+func (e *documentExec) warmDocument(ctx context.Context, threadID string, doc docstore.Document, model string) (string, error) {
 	entry := &documentSession{}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	return e.warmDocumentLocked(ctx, entry, doc, manifest, model)
+	return e.warmDocumentLocked(ctx, entry, threadID, doc, model)
 }
 
 func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentSession, previousResponseID, task, model string) (string, string, error) {
@@ -388,7 +390,17 @@ func (e *documentExec) openSessionAndQuery(ctx context.Context, payload map[stri
 	}
 	defer session.Close()
 
-	payloadJSON, err := marshalResponseCreatePayload(payload)
+	sendPayload, err := materializePreparedInputPayloadWithBlob(ctx, e.blob, payload)
+	if err != nil {
+		return "", "", err
+	}
+
+	wirePayload, _, err := lowerResponseCreatePayloadWithBlob(ctx, e.blob, sendPayload)
+	if err != nil {
+		return "", "", err
+	}
+
+	payloadJSON, err := marshalResponseCreatePayload(wirePayload)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
 	}
@@ -410,7 +422,17 @@ func (e *documentExec) executePayloadLocked(ctx context.Context, entry *document
 		return "", "", err
 	}
 
-	payloadJSON, err := marshalResponseCreatePayload(payload)
+	sendPayload, err := materializePreparedInputPayloadWithBlob(ctx, e.blob, payload)
+	if err != nil {
+		return "", "", err
+	}
+
+	wirePayload, _, err := lowerResponseCreatePayloadWithBlob(ctx, e.blob, sendPayload)
+	if err != nil {
+		return "", "", err
+	}
+
+	payloadJSON, err := marshalResponseCreatePayload(wirePayload)
 	if err != nil {
 		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
 	}
@@ -575,6 +597,14 @@ func (e *documentExec) closeSessionLocked(entry *documentSession, clearLineage b
 	return err
 }
 
+func (e *documentExec) newPrepareInputRequestID(documentID string) string {
+	sanitized := strings.NewReplacer("/", "_", "\\", "_", " ", "_").Replace(strings.TrimSpace(documentID))
+	if sanitized == "" {
+		sanitized = "document"
+	}
+	return fmt.Sprintf("docprep_%s_%d", sanitized, e.currentTime().UnixNano())
+}
+
 func resolveDocumentModel(doc docstore.Document, fallback string) string {
 	if model := strings.TrimSpace(doc.QueryModel); model != "" {
 		return model
@@ -652,52 +682,4 @@ func extractResponseFailedError(raw json.RawMessage) string {
 		return payload.Response.StatusDetails.Error.Message
 	}
 	return ""
-}
-
-func (e *documentExec) buildDocumentPageContent(ctx context.Context, doc docstore.Document, manifest docsplitter.Manifest) ([]any, error) {
-	content := make([]any, 0, len(manifest.Pages)*3+2)
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(doc.ID),
-			manifest.PageCount),
-	})
-
-	for _, page := range manifest.Pages {
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
-		})
-
-		imageData, err := e.blob.ReadRef(ctx, page.ImageRef)
-		if err != nil {
-			return nil, fmt.Errorf("read page %d image: %w", page.PageNumber, err)
-		}
-
-		contentType := page.ContentType
-		if contentType == "" {
-			contentType = http.DetectContentType(imageData)
-		}
-
-		dataURL := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(imageData)
-		content = append(content, map[string]any{
-			"type":      "input_image",
-			"image_url": dataURL,
-			"detail":    "high",
-		})
-
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": "</pdf_page>",
-		})
-	}
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": "</pdf>",
-	})
-
-	return content, nil
 }
