@@ -296,6 +296,7 @@ That gives us a cleaner boundary without forcing a full rewrite of document line
 - take the current document warmup payload assembly out of `internal/worker`
 - produce a prepared input artifact from document state and manifest data
 - store that artifact in blob storage
+- use `documenthandler` as the non-OpenAI materializer boundary
 
 ### Phase 3: Teach the worker to consume prepared input by ref
 
@@ -339,6 +340,7 @@ The prepared-input boundary is specifically about moving source-specific `input`
 - 2026-04-12: Task 2 completed. Extended the internal command model with `prepared_input_ref` for `thread.start` and `thread.resume`, and made the worker reject that field explicitly until prepared-input consumption is implemented. This keeps the schema moving forward without silently ignoring new command bodies.
 - 2026-04-12: Task 3 completed. The worker now resolves `prepared_input_ref` at send time, strips it from the OpenAI wire payload, and keeps the persisted `client.response.create` checkpoint compact by storing the ref instead of the expanded prepared input. Recovery replay now re-materializes prepared input from the stored ref. Resume-command normalization also now accepts `prepared_input_ref` without inline `input_items`.
 - 2026-04-12: Task 4 completed. Tightened the public API boundary so `prepared_input_ref` remains internal-only. The public HTTP resume endpoint now rejects it explicitly, and this note now states that frontend clients should only send semantic thread input such as text and `attached_document_ids`.
+- 2026-04-12: Task 5 completed. Defined the first internal request/reply contract for document prepared-input building in `internal/doccmd`, and wired `documenthandler` to subscribe on `doc.prepare_input`. The handler currently returns a structured `noop/not implemented` response, which gives us a stable non-OpenAI seam before adding real document materialization.
 
 Files touched:
 
@@ -352,3 +354,7 @@ Files touched:
 - `internal/httpserver/command_api_test.go`
 - `internal/worker/actor_test.go`
 - `internal/worker/actor_recovery_harness_test.go`
+- `internal/doccmd/command.go`
+- `internal/doccmd/command_test.go`
+- `internal/documenthandler/service.go`
+- `cmd/documenthandler/main.go`

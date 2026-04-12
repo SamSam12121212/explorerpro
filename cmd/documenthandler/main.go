@@ -78,7 +78,7 @@ func run() error {
 	}
 
 	docs := docstore.New(pool)
-	svc := documenthandler.New(logger, js, docs, blob)
+	svc := documenthandler.New(logger, nc, js, docs, blob)
 
 	logger.Info("document handler service starting",
 		"nats", natsURL,
