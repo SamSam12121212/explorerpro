@@ -32,10 +32,10 @@ func TestNewHandlerRendersBareShortIDs(t *testing.T) {
 	if !strings.Contains(got, `"stream completed" thread_d746fa6e55`) {
 		t.Fatalf("log line missing bare message or shortened thread id: %q", got)
 	}
-	if !strings.Contains(got, " cmd_789ab ") {
+	if !strings.Contains(got, " cmd_123456789a ") {
 		t.Fatalf("log line missing bare shortened cmd id: %q", got)
 	}
-	if !strings.Contains(got, "last_response_id=resp_2bca1") {
-		t.Fatalf("response id shortening changed unexpectedly: %q", got)
+	if !strings.Contains(got, "last_response_id=resp_8db52bca1") {
+		t.Fatalf("response id should remain full: %q", got)
 	}
 }

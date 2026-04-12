@@ -1378,6 +1378,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 
 	a.logger.Info("sending response.create to openai",
 		"model", meta.Model,
+		"reasoning_effort", responseCreateReasoningEffort(wirePayload),
 		"socket_generation", meta.SocketGeneration,
 		"input_items_count", stats.InputItemsCount,
 		"lowered_image_inputs", stats.LoweredImageInputs,
@@ -1837,19 +1838,22 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				state = &deltaLogState{}
 				deltaLogs[event.Type] = state
 			}
-			raw := string(event.Raw)
 			if !state.firstLogged {
+				raw := string(event.Raw)
 				state.firstRaw = raw
 				state.lastRaw = raw
 				state.firstLogged = true
-				a.logger.Info("received openai event", "event_type", event.Type, "raw", raw)
+				a.logger.Info("received openai event", "event_type", event.Type)
 			} else {
-				state.lastRaw = raw
+				state.lastRaw = string(event.Raw)
 				state.suppressedAny = true
 			}
-		} else if event.Type == openaiws.EventTypeResponseOutputItemAdded || event.Type == openaiws.EventTypeResponseOutputItemDone {
+		} else if event.Type == openaiws.EventTypeResponseOutputItemAdded {
 			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
-			a.logger.Info("received openai event", "event_type", event.Type, "raw", string(event.Raw))
+			a.logOutputItemEvent(event)
+		} else if event.Type == openaiws.EventTypeResponseOutputItemDone {
+			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
+			a.logOutputItemEvent(event)
 		} else {
 			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
 			a.logger.Info("received openai event", "event_type", event.Type)
@@ -2044,7 +2048,7 @@ func (a *threadActor) flushDeltaLog(deltaLogs map[openaiws.EventType]*deltaLogSt
 		return
 	}
 
-	a.logger.Info("received openai event", "event_type", eventType, "raw", state.lastRaw)
+	a.logger.Info("received openai event", "event_type", eventType)
 }
 
 func (a *threadActor) startIdleLoop(meta threadstore.ThreadMeta) {
@@ -2439,6 +2443,77 @@ func itemTypeFromRaw(raw json.RawMessage) string {
 	}
 
 	return item.Type
+}
+
+func (a *threadActor) logOutputItemEvent(event openaiws.ServerEvent) {
+	attrs := []any{"event_type", outputItemLogEventType(event)}
+	if sequenceNumber, ok := outputItemEventSequenceNumber(event); ok {
+		attrs = append(attrs, "event_sequence_number", sequenceNumber)
+	}
+	a.logger.Info("received openai event", attrs...)
+}
+
+func outputItemLogEventType(event openaiws.ServerEvent) string {
+	if event.Type != openaiws.EventTypeResponseOutputItemAdded && event.Type != openaiws.EventTypeResponseOutputItemDone {
+		return string(event.Type)
+	}
+
+	itemRaw := event.Field("item")
+	if len(itemRaw) == 0 && len(event.Raw) > 0 {
+		var payload struct {
+			Item json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal(event.Raw, &payload); err == nil {
+			itemRaw = payload.Item
+		}
+	}
+
+	itemType := itemTypeFromRaw(itemRaw)
+	if itemType == "" || itemType == "unknown" {
+		return string(event.Type)
+	}
+
+	return string(event.Type) + "." + itemType
+}
+
+func outputItemEventSequenceNumber(event openaiws.ServerEvent) (int64, bool) {
+	var payload struct {
+		SequenceNumber int64 `json:"sequence_number"`
+	}
+	if len(event.Raw) > 0 {
+		if err := json.Unmarshal(event.Raw, &payload); err == nil && payload.SequenceNumber > 0 {
+			return payload.SequenceNumber, true
+		}
+	}
+
+	raw := event.Field("sequence_number")
+	if len(raw) == 0 {
+		return 0, false
+	}
+
+	var sequenceNumber int64
+	if err := json.Unmarshal(raw, &sequenceNumber); err != nil {
+		return 0, false
+	}
+
+	return sequenceNumber, true
+}
+
+func responseCreateReasoningEffort(payload map[string]any) string {
+	switch reasoning := payload["reasoning"].(type) {
+	case map[string]any:
+		effort, _ := reasoning["effort"].(string)
+		return effort
+	case shared.ReasoningParam:
+		return string(reasoning.Effort)
+	case *shared.ReasoningParam:
+		if reasoning == nil {
+			return ""
+		}
+		return string(reasoning.Effort)
+	default:
+		return ""
+	}
 }
 
 func statusSupportsIdleSocket(status threadstore.ThreadStatus) bool {

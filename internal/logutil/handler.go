@@ -8,9 +8,15 @@ import (
 	"sync"
 )
 
+const (
+	threadPrefix      = "thread_"
+	cmdPrefix         = "cmd_"
+	visibleSuffixSize = 10
+)
+
 // NewHandler returns a text-based slog handler that omits timestamps
 // (Docker/container runtimes add their own), renders msg/thread_id/cmd_id
-// without keys, and shortens thread IDs to thread_<first 10 chars of the suffix>.
+// without keys, and shortens long IDs for log readability.
 func NewHandler(w io.Writer, level slog.Leveler) slog.Handler {
 	return slog.NewTextHandler(&bareIDLogWriter{dst: w}, &slog.HandlerOptions{
 		Level:       level,
@@ -28,11 +34,7 @@ func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 	}
 
 	if a.Key == "cmd_id" {
-		a.Value = shortenValue(a.Value, "cmd_")
-	}
-
-	if strings.HasSuffix(a.Key, "response_id") {
-		a.Value = shortenValue(a.Value, "resp_")
+		a.Value = shortenPrefixedIDFromStart(a.Value, cmdPrefix, visibleSuffixSize)
 	}
 
 	return a
@@ -74,29 +76,30 @@ func rewriteBareIDTokens(line string) string {
 	return strings.TrimPrefix(line, "cmd_id=")
 }
 
-func shortenValue(v slog.Value, prefix string) slog.Value {
+func shortenPrefixedIDFromStart(v slog.Value, prefix string, visibleChars int) slog.Value {
 	s := v.String()
-	if len(s) > 5 {
-		return slog.StringValue(prefix + s[len(s)-5:])
+	if !strings.HasPrefix(s, prefix) {
+		return v
 	}
-	return v
+
+	suffix := strings.TrimPrefix(s, prefix)
+	if len(suffix) <= visibleChars {
+		return v
+	}
+
+	return slog.StringValue(prefix + suffix[:visibleChars])
 }
 
 // ShortThreadID returns thread_<first 10 chars of the suffix> for log output.
 func ShortThreadID(id string) string {
-	const (
-		threadPrefix            = "thread_"
-		threadVisibleSuffixSize = 10
-	)
-
 	if !strings.HasPrefix(id, threadPrefix) {
 		return id
 	}
 
 	suffix := strings.TrimPrefix(id, threadPrefix)
-	if len(suffix) <= threadVisibleSuffixSize {
+	if len(suffix) <= visibleSuffixSize {
 		return id
 	}
 
-	return threadPrefix + suffix[:threadVisibleSuffixSize]
+	return threadPrefix + suffix[:visibleSuffixSize]
 }

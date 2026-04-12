@@ -22,6 +22,7 @@ import (
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 func TestWrapRawItemAsArray(t *testing.T) {
@@ -1757,8 +1758,8 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	if !strings.Contains(logs, `event_type=response.function_call_arguments.delta`) {
 		t.Fatalf("logs = %q, want flushed delta event type", logs)
 	}
-	if !strings.Contains(logs, `raw="{\"type\":\"response.function_call_arguments.delta\",\"delta\":\"}\"}"`) {
-		t.Fatalf("logs = %q, want flushed last raw delta", logs)
+	if strings.Contains(logs, `raw=`) {
+		t.Fatalf("logs = %q, want no raw delta payload", logs)
 	}
 }
 
@@ -1785,5 +1786,103 @@ func TestFlushDeltaLogForDoneEventSkipsWhenOnlyFirstDeltaSeen(t *testing.T) {
 	}
 	if got := strings.TrimSpace(logBuf.String()); got != "" {
 		t.Fatalf("logs = %q, want empty", got)
+	}
+}
+
+func TestOutputItemLogEventTypeIncludesItemTypeForAdded(t *testing.T) {
+	t.Parallel()
+
+	event := openaiws.ServerEvent{
+		Type: openaiws.EventTypeResponseOutputItemAdded,
+		Raw: json.RawMessage(`{"type":"response.output_item.added","item":{"id":"msg_123","type":"message"}}`),
+	}
+
+	got := outputItemLogEventType(event)
+	if got != "response.output_item.added.message" {
+		t.Fatalf("outputItemLogEventType() = %q, want %q", got, "response.output_item.added.message")
+	}
+}
+
+func TestOutputItemLogEventTypeIncludesItemTypeForDone(t *testing.T) {
+	t.Parallel()
+
+	event := openaiws.ServerEvent{
+		Type: openaiws.EventTypeResponseOutputItemDone,
+		Raw: json.RawMessage(`{"type":"response.output_item.done","item":{"id":"rs_123","type":"reasoning"}}`),
+	}
+
+	got := outputItemLogEventType(event)
+	if got != "response.output_item.done.reasoning" {
+		t.Fatalf("outputItemLogEventType() = %q, want %q", got, "response.output_item.done.reasoning")
+	}
+}
+
+func TestOutputItemLogEventTypeFallsBackWithoutItemType(t *testing.T) {
+	t.Parallel()
+
+	event := openaiws.ServerEvent{
+		Type: openaiws.EventTypeResponseOutputItemAdded,
+		Raw:  json.RawMessage(`{"type":"response.output_item.added","item":{"id":"msg_123"}}`),
+	}
+
+	got := outputItemLogEventType(event)
+	if got != "response.output_item.added" {
+		t.Fatalf("outputItemLogEventType() = %q, want %q", got, "response.output_item.added")
+	}
+}
+
+func TestOutputItemEventSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	event := openaiws.ServerEvent{
+		Type: openaiws.EventTypeResponseOutputItemDone,
+		Raw:  json.RawMessage(`{"type":"response.output_item.done","sequence_number":3}`),
+	}
+
+	got, ok := outputItemEventSequenceNumber(event)
+	if !ok {
+		t.Fatalf("outputItemEventSequenceNumber() ok = false, want true")
+	}
+	if got != 3 {
+		t.Fatalf("outputItemEventSequenceNumber() = %d, want 3", got)
+	}
+}
+
+func TestResponseCreateReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"reasoning": map[string]any{
+			"effort": "medium",
+		},
+	}
+
+	got := responseCreateReasoningEffort(payload)
+	if got != "medium" {
+		t.Fatalf("responseCreateReasoningEffort() = %q, want %q", got, "medium")
+	}
+}
+
+func TestResponseCreateReasoningEffortMissing(t *testing.T) {
+	t.Parallel()
+
+	got := responseCreateReasoningEffort(map[string]any{})
+	if got != "" {
+		t.Fatalf("responseCreateReasoningEffort() = %q, want empty", got)
+	}
+}
+
+func TestResponseCreateReasoningEffortTypedParam(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"reasoning": shared.ReasoningParam{
+			Effort: shared.ReasoningEffortMedium,
+		},
+	}
+
+	got := responseCreateReasoningEffort(payload)
+	if got != "medium" {
+		t.Fatalf("responseCreateReasoningEffort() = %q, want %q", got, "medium")
 	}
 }
