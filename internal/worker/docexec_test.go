@@ -40,13 +40,16 @@ func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T)
 		now: func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) },
 	}
 
-	gotID, err := exec.warmDocument(ctx, "thread_123", doc, "gpt-5.4")
+	entry := lockedDocumentSession()
+	defer entry.mu.Unlock()
+
+	gotID, err := exec.warmDocumentLocked(ctx, entry, "thread_123", doc, "gpt-5.4")
 	if err != nil {
-		t.Fatalf("warmDocument() error = %v", err)
+		t.Fatalf("warmDocumentLocked() error = %v", err)
 	}
 
 	if gotID != "resp_warm" {
-		t.Fatalf("warmDocument() response ID = %q, want %q", gotID, "resp_warm")
+		t.Fatalf("warmDocumentLocked() response ID = %q, want %q", gotID, "resp_warm")
 	}
 	if preparer.RequestCount() != 1 {
 		t.Fatalf("prepare request count = %d, want 1", preparer.RequestCount())
@@ -65,30 +68,19 @@ func TestWarmDocumentSendsGenerateFalseWithoutInstructionsOrPrompt(t *testing.T)
 	}
 
 	content := decodeSingleMessageContent(t, payload)
-	if len(content) != 5 {
-		t.Fatalf("content length = %d, want 5", len(content))
+	if len(content) != 2 {
+		t.Fatalf("content length = %d, want 2", len(content))
 	}
 
-	imageItem, ok := content[2].(map[string]any)
+	imageItem, ok := content[1].(map[string]any)
 	if !ok {
-		t.Fatalf("content[2] type = %T, want map[string]any", content[2])
+		t.Fatalf("content[1] type = %T, want map[string]any", content[1])
 	}
 	if got := imageItem["type"]; got != "input_image" {
-		t.Fatalf("content[2].type = %v, want %q", got, "input_image")
+		t.Fatalf("content[1].type = %v, want %q", got, "input_image")
 	}
 	if imageURL, _ := imageItem["image_url"].(string); !strings.HasPrefix(imageURL, "data:image/png;base64,") {
-		t.Fatalf("content[2].image_url = %v, want data URL", imageItem["image_url"])
-	}
-
-	const removedPrompt = "The document above has been loaded. Confirm receipt and readiness."
-	for _, item := range content {
-		itemMap, ok := item.(map[string]any)
-		if !ok {
-			t.Fatalf("content item type = %T, want map[string]any", item)
-		}
-		if text, _ := itemMap["text"].(string); text == removedPrompt {
-			t.Fatalf("warmup content still includes removed prompt")
-		}
+		t.Fatalf("content[1].image_url = %v, want data URL", imageItem["image_url"])
 	}
 }
 
@@ -107,16 +99,19 @@ func TestQueryDocumentOmitsInstructions(t *testing.T) {
 		},
 	}
 
-	responseID, answer, err := exec.queryDocument(context.Background(), "resp_prev", "What is on page 1?", "gpt-5.4")
+	entry := lockedDocumentSession()
+	defer entry.mu.Unlock()
+
+	responseID, answer, err := exec.queryDocumentLocked(context.Background(), entry, "resp_prev", "What is on page 1?", "gpt-5.4")
 	if err != nil {
-		t.Fatalf("queryDocument() error = %v", err)
+		t.Fatalf("queryDocumentLocked() error = %v", err)
 	}
 
 	if responseID != "resp_query" {
-		t.Fatalf("queryDocument() response ID = %q, want %q", responseID, "resp_query")
+		t.Fatalf("queryDocumentLocked() response ID = %q, want %q", responseID, "resp_query")
 	}
 	if answer != "answer" {
-		t.Fatalf("queryDocument() answer = %q, want %q", answer, "answer")
+		t.Fatalf("queryDocumentLocked() answer = %q, want %q", answer, "answer")
 	}
 
 	payload := decodeSentResponseCreate(t, conn)
@@ -680,6 +675,12 @@ func threadDocKey(threadID, documentID string) string {
 	return threadID + "::" + documentID
 }
 
+func lockedDocumentSession() *documentSession {
+	entry := &documentSession{}
+	entry.mu.Lock()
+	return entry
+}
+
 func writeReadyTestDocument(t *testing.T, ctx context.Context, blob *blobstore.LocalStore, docID, filename string) docstore.Document {
 	t.Helper()
 
@@ -775,25 +776,13 @@ func writeWarmupPreparedInputRef(t *testing.T, ctx context.Context, blob *blobst
 	content := []any{
 		map[string]any{
 			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`, doc.Filename, doc.ID, manifest.PageCount),
-		},
-		map[string]any{
-			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, manifest.Pages[0].PageNumber),
+			"text": fmt.Sprintf("Warm the document context for %s.", doc.ID),
 		},
 		map[string]any{
 			"type":         "image_ref",
 			"image_ref":    manifest.Pages[0].ImageRef,
 			"content_type": manifest.Pages[0].ContentType,
 			"detail":       "high",
-		},
-		map[string]any{
-			"type": "input_text",
-			"text": "</pdf_page>",
-		},
-		map[string]any{
-			"type": "input_text",
-			"text": "</pdf>",
 		},
 	}
 

@@ -345,13 +345,6 @@ func (e *documentExec) warmDocumentLocked(ctx context.Context, entry *documentSe
 	return responseID, nil
 }
 
-func (e *documentExec) warmDocument(ctx context.Context, threadID string, doc docstore.Document, model string) (string, error) {
-	entry := &documentSession{}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	return e.warmDocumentLocked(ctx, entry, threadID, doc, model)
-}
-
 func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentSession, previousResponseID, task, model string) (string, string, error) {
 	payload, err := buildResponseCreatePayloadObject(threadstore.ThreadMeta{}, map[string]any{
 		"model": model,
@@ -374,47 +367,6 @@ func (e *documentExec) queryDocumentLocked(ctx context.Context, entry *documentS
 		return "", "", fmt.Errorf("build document query response.create payload: %w", err)
 	}
 	return e.executePayloadLocked(ctx, entry, payload, model)
-}
-
-func (e *documentExec) queryDocument(ctx context.Context, previousResponseID, task, model string) (string, string, error) {
-	entry := &documentSession{}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	return e.queryDocumentLocked(ctx, entry, previousResponseID, task, model)
-}
-
-func (e *documentExec) openSessionAndQuery(ctx context.Context, payload map[string]any) (string, string, error) {
-	session := e.sessionFactory()
-	if err := session.Connect(ctx); err != nil {
-		return "", "", fmt.Errorf("connect document session: %w", err)
-	}
-	defer session.Close()
-
-	sendPayload, err := materializePreparedInputPayloadWithBlob(ctx, e.blob, payload)
-	if err != nil {
-		return "", "", err
-	}
-
-	wirePayload, _, err := lowerResponseCreatePayloadWithBlob(ctx, e.blob, sendPayload)
-	if err != nil {
-		return "", "", err
-	}
-
-	payloadJSON, err := marshalResponseCreatePayload(wirePayload)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal document response.create payload: %w", err)
-	}
-
-	event, err := openaiws.NewResponseCreateEvent("doc-query", payloadJSON)
-	if err != nil {
-		return "", "", fmt.Errorf("build document response.create event: %w", err)
-	}
-
-	if err := session.Send(ctx, event); err != nil {
-		return "", "", fmt.Errorf("send document response.create: %w", err)
-	}
-
-	return streamDocumentResponse(ctx, session)
 }
 
 func (e *documentExec) executePayloadLocked(ctx context.Context, entry *documentSession, payload map[string]any, model string) (string, string, error) {
