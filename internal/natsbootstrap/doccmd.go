@@ -12,7 +12,7 @@ import (
 func EnsureDocCommandStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
 		Name:      doccmd.StreamName,
-		Subjects:  []string{"doc.>"},
+		Subjects:  []string{doccmd.SplitSubject},
 		Storage:   nats.FileStorage,
 		Retention: nats.LimitsPolicy,
 		Discard:   nats.DiscardOld,

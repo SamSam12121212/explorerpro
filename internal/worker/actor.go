@@ -1486,19 +1486,19 @@ func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmd
 }
 
 func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[string]any) error {
-	if a.docRuntime == nil {
-		return nil
-	}
 	if a.threadDocs == nil {
 		return nil
 	}
 
-	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 1)
+	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 200)
 	if err != nil {
 		return fmt.Errorf("list attached documents for runtime context: %w", err)
 	}
 	if len(documents) == 0 {
 		return nil
+	}
+	if a.docRuntime == nil {
+		return a.applyLocalDocumentRuntimeContext(payload, documents)
 	}
 
 	rawTools, err := marshalRuntimeContextTools(payload["tools"])
@@ -1514,16 +1514,16 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[s
 		Tools:        rawTools,
 	})
 	if err != nil {
-		return fmt.Errorf("load document runtime context: %w", err)
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("load document runtime context: %w", err))
 	}
 	if resp.RequestID != requestID {
-		return fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID)
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID))
 	}
 	if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
 		if strings.TrimSpace(resp.Error) == "" {
 			resp.Error = fmt.Sprintf("runtime context returned status %q", resp.Status)
 		}
-		return fmt.Errorf("document runtime context: %s", resp.Error)
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("document runtime context: %s", resp.Error))
 	}
 
 	if strings.TrimSpace(resp.Instructions) == "" {
@@ -1539,7 +1539,47 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[s
 
 	decoded, err := decodeToolsParam(resp.Tools)
 	if err != nil {
-		return fmt.Errorf("decode document runtime tools: %w", err)
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("decode document runtime tools: %w", err))
+	}
+	payload["tools"] = decoded
+	return nil
+}
+
+func (a *threadActor) fallbackDocumentRuntimeContext(threadID string, payload map[string]any, documents []docstore.Document, cause error) error {
+	if a.logger != nil {
+		a.logger.Warn("document runtime context unavailable, falling back to local augmentation",
+			"thread_id", threadID,
+			"document_count", len(documents),
+			"error", cause,
+		)
+	}
+	return a.applyLocalDocumentRuntimeContext(payload, documents)
+}
+
+func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, documents []docstore.Document) error {
+	instructions := appendAvailableDocumentsBlockLocal(stringValue(payload["instructions"]), documents)
+	if strings.TrimSpace(instructions) == "" {
+		delete(payload, "instructions")
+	} else {
+		payload["instructions"] = instructions
+	}
+
+	rawTools, err := marshalRuntimeContextTools(payload["tools"])
+	if err != nil {
+		return err
+	}
+	rawTools, err = appendQueryAttachedDocumentsToolLocal(rawTools)
+	if err != nil {
+		return err
+	}
+	if len(rawTools) == 0 {
+		delete(payload, "tools")
+		return nil
+	}
+
+	decoded, err := decodeToolsParam(rawTools)
+	if err != nil {
+		return fmt.Errorf("decode local document runtime tools: %w", err)
 	}
 	payload["tools"] = decoded
 	return nil
@@ -1555,6 +1595,91 @@ func marshalRuntimeContextTools(value any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshal runtime context tools: %w", err)
 	}
 	return raw, nil
+}
+
+func appendAvailableDocumentsBlockLocal(base string, documents []docstore.Document) string {
+	block := formatAvailableDocumentsBlockLocal(documents)
+	if block == "" {
+		return base
+	}
+
+	trimmedBase := strings.TrimRight(base, "\n")
+	if strings.TrimSpace(trimmedBase) == "" {
+		return block
+	}
+
+	return trimmedBase + "\n\n" + block
+}
+
+func formatAvailableDocumentsBlockLocal(documents []docstore.Document) string {
+	var builder strings.Builder
+	count := 0
+
+	for _, document := range documents {
+		id := strings.TrimSpace(document.ID)
+		if id == "" {
+			continue
+		}
+
+		name := strings.TrimSpace(document.Filename)
+		if name == "" {
+			name = id
+		}
+
+		if count == 0 {
+			builder.WriteString("<available_documents>\n")
+		}
+		builder.WriteString(`<document id="`)
+		builder.WriteString(escapePromptAttributeLocal(id))
+		builder.WriteString(`" name="`)
+		builder.WriteString(escapePromptAttributeLocal(name))
+		builder.WriteString(`" />`)
+		builder.WriteByte('\n')
+		count++
+	}
+
+	if count == 0 {
+		return ""
+	}
+
+	builder.WriteString("</available_documents>")
+	return builder.String()
+}
+
+func escapePromptAttributeLocal(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\n", "&#10;",
+		"\r", "&#13;",
+		"\t", "&#9;",
+	)
+	return replacer.Replace(value)
+}
+
+func appendQueryAttachedDocumentsToolLocal(raw json.RawMessage) (json.RawMessage, error) {
+	var tools []map[string]any
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &tools); err != nil {
+			return nil, fmt.Errorf("decode local document runtime tools: %w", err)
+		}
+	}
+
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == doccmd.ToolNameQueryAttachedDocuments {
+			return raw, nil
+		}
+	}
+
+	tools = append(tools, doccmd.QueryAttachedDocumentsToolDefinition())
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return nil, fmt.Errorf("marshal local document runtime tools: %w", err)
+	}
+	return encoded, nil
 }
 
 type docQueryRequest struct {

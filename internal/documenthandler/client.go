@@ -3,6 +3,7 @@ package documenthandler
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"explorer/internal/doccmd"
 
@@ -34,7 +35,7 @@ func (c *Client) PrepareInput(ctx context.Context, req doccmd.PrepareInputReques
 
 	resp, err := doccmd.DecodePrepareInputResponse(msg.Data)
 	if err != nil {
-		return doccmd.PrepareInputResponse{}, err
+		return doccmd.PrepareInputResponse{}, fmt.Errorf("%w (body=%s)", err, summarizeResponseData(msg.Data))
 	}
 
 	return resp, nil
@@ -57,8 +58,20 @@ func (c *Client) RuntimeContext(ctx context.Context, req doccmd.RuntimeContextRe
 
 	resp, err := doccmd.DecodeRuntimeContextResponse(msg.Data)
 	if err != nil {
-		return doccmd.RuntimeContextResponse{}, err
+		return doccmd.RuntimeContextResponse{}, fmt.Errorf("%w (body=%s)", err, summarizeResponseData(msg.Data))
 	}
 
 	return resp, nil
+}
+
+func summarizeResponseData(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return `""`
+	}
+	const maxLen = 256
+	if len(text) > maxLen {
+		text = text[:maxLen] + "..."
+	}
+	return fmt.Sprintf("%q", text)
 }

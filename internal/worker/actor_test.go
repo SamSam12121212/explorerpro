@@ -462,6 +462,46 @@ func TestApplyDocumentRuntimeContextSkipsWhenNoDocumentsAttached(t *testing.T) {
 	}
 }
 
+func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_123": {
+					{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
+				},
+			},
+		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, _ doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			return doccmd.RuntimeContextResponse{}, errors.New(`runtime context response missing request_id (body="{}")`)
+		}),
+	}
+
+	payload := map[string]any{
+		"instructions": "Be concise.",
+		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
+	}
+
+	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
+	}
+
+	instructions, _ := payload["instructions"].(string)
+	if !strings.Contains(instructions, `<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />`) {
+		t.Fatalf("instructions = %q, want local available_documents block", instructions)
+	}
+
+	tools, ok := payload["tools"].([]responses.ToolUnionParam)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools = %#v, want lookup plus document query tool", payload["tools"])
+	}
+	if toolParamName(tools[1]) != doccmd.ToolNameQueryAttachedDocuments {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryAttachedDocuments)
+	}
+}
+
 func TestEnsureRequiredResponseIncludeAddsEncryptedContent(t *testing.T) {
 	t.Parallel()
 
