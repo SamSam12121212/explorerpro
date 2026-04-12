@@ -323,3 +323,13 @@ This note is not proposing:
 The worker should still own thread/runtime fields and OpenAI execution.
 
 The prepared-input boundary is specifically about moving source-specific `input` materialization out of worker core.
+
+## Progress
+
+- 2026-04-12: Task 1 completed. Added the first `internal/preparedinput` foundation with artifact validation plus blob-backed read/write helpers. This creates the initial contract for storing prepared `input` outside worker core before we touch command or worker behavior.
+
+Files touched:
+
+- `docs/PREPARED_INPUT_BOUNDARY.md`
+- `internal/preparedinput/preparedinput.go`
+- `internal/preparedinput/preparedinput_test.go`
