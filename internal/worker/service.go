@@ -21,6 +21,7 @@ import (
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
+	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -46,7 +47,8 @@ type Service struct {
 	dialer       openaiws.Dialer
 	openAIConfig openaiws.Config
 	workerID     string
-	store        *threadstore.Store
+	store        *postgresstore.Store
+	history      threadHistoryStore
 	threadDocs   *threaddocstore.Store
 	docClient    *documenthandler.Client
 	docExec      *documentExec
@@ -73,7 +75,8 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		return nil, fmt.Errorf("openai websocket dialer is required")
 	}
 
-	store := threadstore.New(runtime.Redis().Raw(), postgresstore.New(runtime.Postgres().Pool()))
+	store := postgresstore.New(runtime.Postgres().Pool())
+	history := threadhistory.New(runtime.NATS().JetStream())
 	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
 	docStore := docstore.New(runtime.Postgres().Pool())
 	docClient := documenthandler.NewClient(runtime.NATS().Conn())
@@ -106,6 +109,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		openAIConfig: openAIConfig,
 		workerID:     workerID,
 		store:        store,
+		history:      history,
 		threadDocs:   threadDocs,
 		docClient:    docClient,
 		docExec:      docExec,
@@ -119,6 +123,9 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	if err := natsbootstrap.EnsureThreadEventsStream(s.runtime.NATS().JetStream()); err != nil {
+		return err
+	}
+	if err := natsbootstrap.EnsureThreadHistoryStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
 
@@ -259,6 +266,7 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		WorkerID:       s.workerID,
 		Logger:         s.logger.With("thread_id", threadID),
 		Store:          s.store,
+		History:        s.history,
 		ThreadDocs:     s.threadDocs,
 		DocRuntime:     s.docClient,
 		DocExec:        s.docExec,

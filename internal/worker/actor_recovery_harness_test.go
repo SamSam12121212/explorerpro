@@ -12,6 +12,7 @@ import (
 	"explorer/internal/blobstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 )
 
@@ -26,7 +27,7 @@ type fakeActorStore struct {
 	savedThreads     []threadstore.ThreadMeta
 	savedSpawnGroups []threadstore.SpawnGroupMeta
 	appendedItems    []threadstore.ItemLogEntry
-	appendedEvents   []threadstore.EventLogEntry
+	historyEvents    []threadstore.EventLogEntry
 	savedResponses   map[string]json.RawMessage
 	releasedThreads  []string
 }
@@ -101,22 +102,27 @@ func (s *fakeActorStore) AppendItem(_ context.Context, entry threadstore.ItemLog
 	}, nil
 }
 
-func (s *fakeActorStore) AppendEvent(_ context.Context, entry threadstore.EventLogEntry) error {
-	s.appendedEvents = append(s.appendedEvents, entry)
-	return nil
-}
-
 func (s *fakeActorStore) SaveResponseRaw(_ context.Context, _ string, responseID string, payload json.RawMessage) error {
 	s.savedResponses[responseID] = append(json.RawMessage(nil), payload...)
 	return nil
 }
 
-func (s *fakeActorStore) LoadLatestClientResponseCreatePayload(_ context.Context, threadID string) (json.RawMessage, error) {
+func (s *fakeActorStore) SaveResponseCreateCheckpoint(_ context.Context, threadID, _ string, payload json.RawMessage) error {
+	s.latestClientCreateByID[threadID] = append(json.RawMessage(nil), payload...)
+	return nil
+}
+
+func (s *fakeActorStore) LoadLatestResponseCreateCheckpoint(_ context.Context, threadID string) (json.RawMessage, error) {
 	raw, ok := s.latestClientCreateByID[threadID]
 	if !ok {
-		return nil, threadstore.ErrThreadNotFound
+		return nil, threadhistory.ErrCheckpointNotFound
 	}
 	return append(json.RawMessage(nil), raw...), nil
+}
+
+func (s *fakeActorStore) AppendEvent(_ context.Context, entry threadstore.EventLogEntry, _ string) error {
+	s.historyEvents = append(s.historyEvents, entry)
+	return nil
 }
 
 func (s *fakeActorStore) ListItems(_ context.Context, threadID string, _ threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
@@ -180,6 +186,7 @@ func newActorRecoveryHarness(t *testing.T, store *fakeActorStore, conn *actorTes
 		workerID: "worker-local-1",
 		logger:   logger,
 		store:    store,
+		history:  store,
 		cfg:      testOpenAIConfig(),
 		publish:  func(context.Context, string, agentcmd.Command) error { return nil },
 		ctx:      context.Background(),

@@ -31,27 +31,6 @@ services:
       - nats_data:/data
     restart: unless-stopped
 
-  redis:
-    image: redis:8.6.1-alpine
-    command:
-      - "redis-server"
-      - "--appendonly"
-      - "yes"
-      - "--save"
-      - "60"
-      - "1000"
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
-
   postgres:
     image: postgres:18.3
     environment:
@@ -82,7 +61,6 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       NATS_URL: nats://nats:4222
       NATS_CLIENT_NAME: explorer-api
-      REDIS_URL: redis://redis:6379/0
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
       BLOB_STORAGE_DIR: /data/blob-storage
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
@@ -93,8 +71,6 @@ services:
     volumes:
       - ./blob-storage:/data/blob-storage
     depends_on:
-      redis:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       nats:
@@ -108,10 +84,8 @@ services:
       APP_ENV: development
       SERVICE_NAME: explorer-worker
       LOG_LEVEL: "${LOG_LEVEL:-info}"
-      WORKER_ID: "${WORKER_ID:-worker-docker-1}"
       NATS_URL: nats://nats:4222
       NATS_CLIENT_NAME: explorer-worker
-      REDIS_URL: redis://redis:6379/0
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
       BLOB_STORAGE_DIR: /data/blob-storage
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
@@ -122,8 +96,6 @@ services:
     volumes:
       - ./blob-storage:/data/blob-storage
     depends_on:
-      redis:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       nats:
@@ -141,11 +113,8 @@ services:
       PORT: "8081"
       NATS_URL: nats://nats:4222
       NATS_CLIENT_NAME: explorer-wsserver
-      REDIS_URL: redis://redis:6379/0
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
     depends_on:
-      redis:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       nats:
@@ -213,6 +182,5 @@ services:
 volumes:
   frontend_node_modules:
   nats_data:
-  redis_data:
   postgres18_data:
   git_data:

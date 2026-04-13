@@ -394,8 +394,7 @@ export function useChat() {
         handleThreadSnapshot(payload);
         break;
       case "thread.items.delta": {
-        const cursor =
-          payload.page?.last_cursor ?? payload.page?.last_stream_id ?? null;
+        const cursor = payload.page?.last_cursor ?? null;
         if (cursor) {
           setLastItemCursor(cursor);
         }
@@ -518,7 +517,7 @@ export function useChat() {
           `/threads/${nextThreadId}/items?limit=200`,
         ),
       ]);
-      const cursor = payload.page?.last_cursor ?? payload.page?.last_stream_id ?? null;
+      const cursor = payload.page?.last_cursor ?? null;
       setThreadId(nextThreadId);
       setModel(threadInfo.thread?.model ?? DEFAULT_MODEL);
       setAttachedDocuments(normalizeAttachedDocuments(threadInfo.attached_documents));

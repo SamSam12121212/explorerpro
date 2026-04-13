@@ -20,6 +20,7 @@ import (
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
+	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -29,10 +30,14 @@ type commandAPI struct {
 	cfg     config.Config
 	logger  *slog.Logger
 	runtime *platform.Runtime
-	store   *threadstore.Store
-	pg      *postgresstore.Store
+	store   *postgresstore.Store
 	docs    *docstore.Store
 	links   *threaddocstore.Store
+	history eventHistoryStore
+}
+
+type eventHistoryStore interface {
+	ListEvents(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error)
 }
 
 type createThreadRequest struct {
@@ -76,15 +81,15 @@ type listQuery struct {
 }
 
 func newCommandAPI(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime) *commandAPI {
-	pg := postgresstore.New(runtime.Postgres().Pool())
+	store := postgresstore.New(runtime.Postgres().Pool())
 	return &commandAPI{
 		cfg:     cfg,
 		logger:  logger,
 		runtime: runtime,
-		store:   threadstore.New(runtime.Redis().Raw(), pg),
-		pg:      pg,
+		store:   store,
 		docs:    docstore.New(runtime.Postgres().Pool()),
 		links:   threaddocstore.New(runtime.Postgres().Pool()),
+		history: threadhistory.New(runtime.NATS().JetStream()),
 	}
 }
 
@@ -326,7 +331,7 @@ func (a *commandAPI) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 
-	threads, err := a.pg.ListRootThreads(r.Context(), limit)
+	threads, err := a.store.ListRootThreads(r.Context(), limit)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list threads: %v", err))
 		return
@@ -468,7 +473,7 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, threadID string) {
-	meta, _, err := a.loadThreadForRead(r.Context(), threadID)
+	meta, err := a.loadThreadForRead(r.Context(), threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
@@ -514,8 +519,7 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 }
 
 func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, threadID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -530,7 +534,7 @@ func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, thr
 		return
 	}
 
-	items, err := a.listItemsForRead(r.Context(), threadID, query, preferPostgres)
+	items, err := a.listItemsForRead(r.Context(), threadID, query)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list items for thread %s: %v", threadID, err))
 		return
@@ -550,8 +554,7 @@ func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, thr
 }
 
 func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, threadID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -566,7 +569,7 @@ func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, th
 		return
 	}
 
-	events, err := a.listEventsForRead(r.Context(), threadID, query, preferPostgres)
+	events, err := a.listEventsForRead(r.Context(), threadID, query)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list events for thread %s: %v", threadID, err))
 		return
@@ -586,8 +589,7 @@ func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, th
 }
 
 func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, threadID, responseID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -596,7 +598,7 @@ func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	linked, err := a.threadHasResponseForRead(r.Context(), threadID, responseID, preferPostgres)
+	linked, err := a.threadHasResponseForRead(r.Context(), threadID, responseID)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("check response index for thread %s: %v", threadID, err))
 		return
@@ -606,7 +608,7 @@ func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	raw, err := a.loadResponseRawForRead(r.Context(), responseID, preferPostgres)
+	raw, err := a.loadResponseRawForRead(r.Context(), responseID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("raw response %s not found", responseID))
@@ -630,8 +632,7 @@ func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, t
 }
 
 func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Request, threadID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -640,7 +641,7 @@ func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	groups, err := a.listSpawnGroupsByParentForRead(r.Context(), threadID, preferPostgres)
+	groups, err := a.listSpawnGroupsByParentForRead(r.Context(), threadID)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list spawn groups for thread %s: %v", threadID, err))
 		return
@@ -659,8 +660,7 @@ func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Reques
 }
 
 func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request, threadID, spawnGroupID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -683,7 +683,7 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	childThreadIDs, err := a.loadSpawnGroupChildThreadIDsForRead(r.Context(), spawnGroupID, preferPostgres)
+	childThreadIDs, err := a.loadSpawnGroupChildThreadIDsForRead(r.Context(), spawnGroupID)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load child thread ids for spawn group %s: %v", spawnGroupID, err))
 		return
@@ -697,8 +697,7 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.Request, threadID, spawnGroupID string) {
-	_, preferPostgres, err := a.loadThreadForRead(r.Context(), threadID)
-	if err != nil {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
 			return
@@ -721,7 +720,7 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 		return
 	}
 
-	results, err := a.listSpawnResultsForRead(r.Context(), spawnGroupID, preferPostgres)
+	results, err := a.listSpawnResultsForRead(r.Context(), spawnGroupID)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list results for spawn group %s: %v", spawnGroupID, err))
 		return
@@ -740,145 +739,50 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 	})
 }
 
-func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID string) (threadstore.ThreadMeta, bool, error) {
-	meta, err := a.pg.LoadThread(ctx, threadID)
-	if err == nil {
-		return meta, true, nil
-	}
-	if !errors.Is(err, threadstore.ErrThreadNotFound) {
-		return threadstore.ThreadMeta{}, false, err
-	}
-
-	meta, err = a.store.LoadThread(ctx, threadID)
-	if err != nil {
-		return threadstore.ThreadMeta{}, false, err
-	}
-
-	return meta, false, nil
+func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID string) (threadstore.ThreadMeta, error) {
+	return a.store.LoadThread(ctx, threadID)
 }
 
 func (a *commandAPI) loadSpawnGroupForRead(ctx context.Context, spawnGroupID string) (threadstore.SpawnGroupMeta, error) {
-	spawn, err := a.pg.LoadSpawnGroup(ctx, spawnGroupID)
-	if err == nil {
-		return spawn, nil
-	}
-	if !errors.Is(err, threadstore.ErrThreadNotFound) {
-		return threadstore.SpawnGroupMeta{}, err
-	}
-
 	return a.store.LoadSpawnGroup(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) listItemsForRead(ctx context.Context, threadID string, query listQuery, preferPostgres bool) ([]threadstore.ItemRecord, error) {
+func (a *commandAPI) listItemsForRead(ctx context.Context, threadID string, query listQuery) ([]threadstore.ItemRecord, error) {
 	options := threadstore.ListOptions{
 		Limit:  query.Limit,
 		After:  query.After,
 		Before: query.Before,
 	}
-
-	if preferPostgres && supportsPostgresCursor(query.After) && supportsPostgresCursor(query.Before) {
-		items, err := a.pg.ListItems(ctx, threadID, options)
-		if err == nil && len(items) > 0 {
-			return items, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	return a.store.ListItems(ctx, threadID, options)
 }
 
-func (a *commandAPI) listEventsForRead(ctx context.Context, threadID string, query listQuery, preferPostgres bool) ([]threadstore.EventRecord, error) {
+func (a *commandAPI) listEventsForRead(ctx context.Context, threadID string, query listQuery) ([]threadstore.EventRecord, error) {
 	options := threadstore.ListOptions{
 		Limit:  query.Limit,
 		After:  query.After,
 		Before: query.Before,
 	}
-
-	// Redis keeps the full raw event stream. Postgres only stores non-delta
-	// checkpoints, so serving event history from Postgres would now be partial.
-	_ = preferPostgres
-	return a.store.ListEvents(ctx, threadID, options)
+	return a.history.ListEvents(ctx, threadID, options)
 }
 
-func (a *commandAPI) threadHasResponseForRead(ctx context.Context, threadID, responseID string, preferPostgres bool) (bool, error) {
-	if preferPostgres {
-		linked, err := a.pg.ThreadHasResponse(ctx, threadID, responseID)
-		if err != nil {
-			return false, err
-		}
-		if linked {
-			return true, nil
-		}
-	}
-
+func (a *commandAPI) threadHasResponseForRead(ctx context.Context, threadID, responseID string) (bool, error) {
 	return a.store.ThreadHasResponse(ctx, threadID, responseID)
 }
 
-func (a *commandAPI) loadResponseRawForRead(ctx context.Context, responseID string, preferPostgres bool) (json.RawMessage, error) {
-	if preferPostgres {
-		raw, err := a.pg.LoadResponseRaw(ctx, responseID)
-		if err == nil {
-			return raw, nil
-		}
-		if !errors.Is(err, threadstore.ErrThreadNotFound) {
-			return nil, err
-		}
-	}
-
+func (a *commandAPI) loadResponseRawForRead(ctx context.Context, responseID string) (json.RawMessage, error) {
 	return a.store.LoadResponseRaw(ctx, responseID)
 }
 
-func (a *commandAPI) listSpawnGroupsByParentForRead(ctx context.Context, parentThreadID string, preferPostgres bool) ([]threadstore.SpawnGroupMeta, error) {
-	if preferPostgres {
-		groups, err := a.pg.ListSpawnGroupsByParent(ctx, parentThreadID)
-		if err == nil && len(groups) > 0 {
-			return groups, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func (a *commandAPI) listSpawnGroupsByParentForRead(ctx context.Context, parentThreadID string) ([]threadstore.SpawnGroupMeta, error) {
 	return a.store.ListSpawnGroupsByParent(ctx, parentThreadID)
 }
 
-func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID string, preferPostgres bool) ([]string, error) {
-	if preferPostgres {
-		ids, err := a.pg.LoadSpawnGroupChildThreadIDs(ctx, spawnGroupID)
-		if err == nil && len(ids) > 0 {
-			return ids, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID string) ([]string, error) {
 	return a.store.LoadSpawnGroupChildThreadIDs(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID string, preferPostgres bool) ([]threadstore.SpawnChildResult, error) {
-	if preferPostgres {
-		results, err := a.pg.ListSpawnResults(ctx, spawnGroupID)
-		if err == nil && len(results) > 0 {
-			return results, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
+func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
 	return a.store.ListSpawnResults(ctx, spawnGroupID)
-}
-
-func supportsPostgresCursor(raw string) bool {
-	if strings.TrimSpace(raw) == "" {
-		return true
-	}
-
-	_, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-	return err == nil
 }
 
 func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID string, kind agentcmd.Kind) (string, bool, threadstore.OwnerRecord, error) {
@@ -1275,35 +1179,13 @@ func validateListCursor(raw string) error {
 
 	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		if looksNumericCursor(raw) {
-			return fmt.Errorf("numeric cursors must be valid int64 values greater than zero")
-		}
-		return nil
+		return fmt.Errorf("cursor must be a numeric sequence")
 	}
 	if value <= 0 {
-		return fmt.Errorf("numeric cursors must be greater than zero")
+		return fmt.Errorf("cursor must be greater than zero")
 	}
 
 	return nil
-}
-
-func looksNumericCursor(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
-	}
-	if raw[0] == '-' {
-		raw = raw[1:]
-	}
-	if raw == "" {
-		return false
-	}
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func presentThreadMeta(meta threadstore.ThreadMeta) map[string]any {
@@ -1456,9 +1338,6 @@ func presentItem(item threadstore.ItemRecord) map[string]any {
 		"direction":   item.Direction,
 		"created_at":  item.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	if item.StreamID != "" {
-		response["stream_id"] = item.StreamID
-	}
 	if decoded, err := decodeRawJSON(item.Payload); err == nil && decoded != nil {
 		response["payload"] = decoded
 	}
@@ -1474,9 +1353,6 @@ func presentEvent(event threadstore.EventRecord) map[string]any {
 		"response_id":       event.ResponseID,
 		"created_at":        event.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	if event.StreamID != "" {
-		response["stream_id"] = event.StreamID
-	}
 	if decoded, err := decodeRawJSON(event.Payload); err == nil && decoded != nil {
 		response["payload"] = decoded
 	}
@@ -1484,10 +1360,8 @@ func presentEvent(event threadstore.EventRecord) map[string]any {
 }
 
 type pageBounds struct {
-	FirstCursor   string
-	LastCursor    string
-	FirstStreamID string
-	LastStreamID  string
+	FirstCursor string
+	LastCursor  string
 }
 
 func presentPage(query listQuery, bounds pageBounds, count int) map[string]any {
@@ -1502,12 +1376,6 @@ func presentPage(query listQuery, bounds pageBounds, count int) map[string]any {
 	}
 	if bounds.LastCursor != "" {
 		page["last_cursor"] = bounds.LastCursor
-	}
-	if bounds.FirstStreamID != "" {
-		page["first_stream_id"] = bounds.FirstStreamID
-	}
-	if bounds.LastStreamID != "" {
-		page["last_stream_id"] = bounds.LastStreamID
 	}
 	return page
 }
@@ -1539,10 +1407,8 @@ func itemPageBounds(items []threadstore.ItemRecord) pageBounds {
 		return pageBounds{}
 	}
 	return pageBounds{
-		FirstCursor:   strconv.FormatInt(items[0].Seq, 10),
-		LastCursor:    strconv.FormatInt(items[len(items)-1].Seq, 10),
-		FirstStreamID: items[0].StreamID,
-		LastStreamID:  items[len(items)-1].StreamID,
+		FirstCursor: strconv.FormatInt(items[0].Seq, 10),
+		LastCursor:  strconv.FormatInt(items[len(items)-1].Seq, 10),
 	}
 }
 
@@ -1551,10 +1417,8 @@ func eventPageBounds(events []threadstore.EventRecord) pageBounds {
 		return pageBounds{}
 	}
 	return pageBounds{
-		FirstCursor:   strconv.FormatInt(events[0].EventSeq, 10),
-		LastCursor:    strconv.FormatInt(events[len(events)-1].EventSeq, 10),
-		FirstStreamID: events[0].StreamID,
-		LastStreamID:  events[len(events)-1].StreamID,
+		FirstCursor: strconv.FormatInt(events[0].EventSeq, 10),
+		LastCursor:  strconv.FormatInt(events[len(events)-1].EventSeq, 10),
 	}
 }
 

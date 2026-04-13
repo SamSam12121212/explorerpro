@@ -1,8 +1,7 @@
 -- Explorer runtime persistence v1
 --
 -- Important boundary:
--- Redis remains the live execution truth.
--- Postgres stores durable snapshots and append-only history.
+-- Postgres stores runtime snapshots and append-only history.
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger

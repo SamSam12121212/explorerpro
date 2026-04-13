@@ -15,7 +15,6 @@ import (
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
-	"explorer/internal/threadstore"
 	"explorer/internal/wsserver"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,7 +35,6 @@ func run() error {
 	port := envOr("PORT", "8081")
 	natsURL := envOr("NATS_URL", "nats://localhost:4222")
 	natsName := envOr("NATS_CLIENT_NAME", "explorer-wsserver")
-	redisURL := envOr("REDIS_URL", "redis://localhost:6379/0")
 	postgresDSN := envOr("POSTGRES_DSN", "postgres://explorer:explorer@localhost:5432/explorer?sslmode=disable")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -78,22 +76,14 @@ func run() error {
 		return fmt.Errorf("ping postgres: %w", err)
 	}
 
-	rdb, err := wsserver.NewRedisClient(redisURL)
-	if err != nil {
-		return fmt.Errorf("parse redis url: %w", err)
-	}
-	defer rdb.Close()
-
-	pg := postgresstore.New(pool)
+	store := postgresstore.New(pool)
 	docs := threaddocstore.New(pool)
-	store := threadstore.New(rdb, pg)
 
 	srv := wsserver.New(wsserver.Config{
 		Port:   port,
 		Logger: logger,
 		JS:     js,
 		Store:  store,
-		PG:     pg,
 		Docs:   docs,
 	})
 

@@ -11,18 +11,15 @@ import (
 
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
-	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
-	"github.com/redis/go-redis/v9"
 )
 
 type Config struct {
 	Port   string
 	Logger *slog.Logger
 	JS     nats.JetStreamContext
-	Store  *threadstore.Store
-	PG     *postgresstore.Store
+	Store  *postgresstore.Store
 	Docs   *threaddocstore.Store
 }
 
@@ -87,19 +84,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		logger:    s.logger.With("thread_id", threadID),
 		js:        s.cfg.JS,
 		store:     s.cfg.Store,
-		pg:        s.cfg.PG,
 		docs:      s.cfg.Docs,
 		threadID:  threadID,
 		afterItem: afterItem,
 	})
 
 	client.serve(w, r)
-}
-
-func NewRedisClient(url string) (*redis.Client, error) {
-	opts, err := redis.ParseURL(url)
-	if err != nil {
-		return nil, fmt.Errorf("parse redis url: %w", err)
-	}
-	return redis.NewClient(opts), nil
 }

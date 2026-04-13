@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,6 +11,24 @@ import (
 
 	"explorer/internal/threadstore"
 )
+
+type fakeEventHistoryStore struct {
+	events []threadstore.EventRecord
+	err    error
+}
+
+func (s fakeEventHistoryStore) ListEvents(_ context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if threadID != "thread_123" {
+		return nil, errors.New("unexpected thread id")
+	}
+	if options.Limit != 2 || options.After != "41" || options.Before != "" {
+		return nil, errors.New("unexpected list options")
+	}
+	return s.events, nil
+}
 
 func TestNormalizeResponseInput(t *testing.T) {
 	t.Parallel()
@@ -107,20 +127,12 @@ func TestParseThreadRoute(t *testing.T) {
 func TestParseListQuery(t *testing.T) {
 	t.Parallel()
 
-	t.Run("legacy stream cursor stays accepted", func(t *testing.T) {
+	t.Run("non numeric cursor is rejected", func(t *testing.T) {
 		t.Parallel()
 
 		req := httptest.NewRequest("GET", "/threads/thread_123/items?limit=999&after=123-0", nil)
-		query, err := parseListQuery(req)
-		if err != nil {
-			t.Fatalf("parseListQuery() error = %v", err)
-		}
-
-		if query.Limit != 500 {
-			t.Fatalf("limit = %d, want 500", query.Limit)
-		}
-		if query.After != "123-0" {
-			t.Fatalf("after = %q, want 123-0", query.After)
+		if _, err := parseListQuery(req); err == nil {
+			t.Fatal("expected parseListQuery to reject non numeric cursor")
 		}
 	})
 
@@ -152,7 +164,6 @@ func TestPresentItemUsesNormalizedCursor(t *testing.T) {
 
 	item := threadstore.ItemRecord{
 		Seq:       7,
-		StreamID:  "1740000000000-0",
 		ItemType:  "message",
 		Direction: "output",
 		CreatedAt: time.Date(2026, 3, 14, 9, 0, 0, 0, time.UTC),
@@ -160,11 +171,8 @@ func TestPresentItemUsesNormalizedCursor(t *testing.T) {
 	}
 
 	presented := presentItem(item)
-	if presented["cursor"] != "7" {
-		t.Fatalf("cursor = %v, want 7", presented["cursor"])
-	}
-	if presented["stream_id"] != "1740000000000-0" {
-		t.Fatalf("stream_id = %v, want Redis stream id", presented["stream_id"])
+	if got := stringJSON(presented); got != `{"created_at":"2026-03-14T09:00:00Z","cursor":"7","direction":"output","item_type":"message","payload":{"ok":true},"response_id":"","seq":7}` {
+		t.Fatalf("presentItem() = %s", got)
 	}
 }
 
@@ -172,19 +180,13 @@ func TestPresentPageUsesCursorBounds(t *testing.T) {
 	t.Parallel()
 
 	bounds := itemPageBounds([]threadstore.ItemRecord{
-		{Seq: 3, StreamID: "1740000000000-0"},
-		{Seq: 4, StreamID: "1740000000100-0"},
+		{Seq: 3},
+		{Seq: 4},
 	})
 	page := presentPage(listQuery{Limit: 10, After: "2"}, bounds, 2)
 
-	if page["first_cursor"] != "3" {
-		t.Fatalf("first_cursor = %v, want 3", page["first_cursor"])
-	}
-	if page["last_cursor"] != "4" {
-		t.Fatalf("last_cursor = %v, want 4", page["last_cursor"])
-	}
-	if page["first_stream_id"] != "1740000000000-0" {
-		t.Fatalf("first_stream_id = %v, want first Redis stream id", page["first_stream_id"])
+	if got := stringJSON(page); got != `{"after":"2","before":"","count":2,"first_cursor":"3","last_cursor":"4","limit":10}` {
+		t.Fatalf("presentPage() = %s", got)
 	}
 }
 
@@ -275,6 +277,33 @@ func TestNormalizeResumeBodyRejectsPreparedInputRef(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "internal-only") {
 		t.Fatalf("error = %v, want internal-only message", err)
+	}
+}
+
+func TestListEventsForReadUsesHistoryStore(t *testing.T) {
+	t.Parallel()
+
+	api := &commandAPI{
+		history: fakeEventHistoryStore{
+			events: []threadstore.EventRecord{
+				{EventSeq: 42, EventType: "client.response.create", CreatedAt: time.Unix(42, 0).UTC()},
+				{EventSeq: 43, EventType: "response.completed", CreatedAt: time.Unix(43, 0).UTC()},
+			},
+		},
+	}
+
+	events, err := api.listEventsForRead(context.Background(), "thread_123", listQuery{
+		Limit: 2,
+		After: "41",
+	})
+	if err != nil {
+		t.Fatalf("listEventsForRead() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	if events[0].EventSeq != 42 || events[1].EventSeq != 43 {
+		t.Fatalf("events = %#v, want sequences 42 and 43", events)
 	}
 }
 

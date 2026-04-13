@@ -20,8 +20,6 @@ const (
 	defaultShutdownTimeout             = 10 * time.Second
 	defaultNATSURL                     = "nats://localhost:4222"
 	defaultNATSConnectTimeout          = 5 * time.Second
-	defaultRedisURL                    = "redis://localhost:6379/0"
-	defaultRedisDialTimeout            = 5 * time.Second
 	defaultPostgresDSN                 = "postgres://explorer:explorer@localhost:5432/explorer?sslmode=disable"
 	defaultPostgresConnTimeout         = 5 * time.Second
 	defaultBlobStorageDir              = "./blob-storage"
@@ -41,7 +39,6 @@ type Config struct {
 	HTTP            HTTPConfig
 	ShutdownTimeout time.Duration
 	NATS            NATSConfig
-	Redis           RedisConfig
 	Postgres        PostgresConfig
 	Blob            BlobConfig
 	OpenAI          OpenAIConfig
@@ -59,11 +56,6 @@ type NATSConfig struct {
 	URL            string
 	ClientName     string
 	ConnectTimeout time.Duration
-}
-
-type RedisConfig struct {
-	URL         string
-	DialTimeout time.Duration
 }
 
 type PostgresConfig struct {
@@ -104,10 +96,6 @@ func Load() (Config, error) {
 		NATS: NATSConfig{
 			URL:            getEnv("NATS_URL", defaultNATSURL),
 			ConnectTimeout: defaultNATSConnectTimeout,
-		},
-		Redis: RedisConfig{
-			URL:         getEnv("REDIS_URL", defaultRedisURL),
-			DialTimeout: defaultRedisDialTimeout,
 		},
 		Postgres: PostgresConfig{
 			DSN:            getEnv("POSTGRES_DSN", defaultPostgresDSN),
@@ -162,11 +150,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	cfg.Redis.DialTimeout, err = durationFromEnv("REDIS_DIAL_TIMEOUT", cfg.Redis.DialTimeout)
-	if err != nil {
-		return Config{}, err
-	}
-
 	cfg.Postgres.ConnectTimeout, err = durationFromEnv("POSTGRES_CONNECT_TIMEOUT", cfg.Postgres.ConnectTimeout)
 	if err != nil {
 		return Config{}, err
@@ -203,10 +186,6 @@ func Load() (Config, error) {
 
 	if strings.TrimSpace(cfg.NATS.URL) == "" {
 		return Config{}, fmt.Errorf("NATS_URL must not be empty")
-	}
-
-	if strings.TrimSpace(cfg.Redis.URL) == "" {
-		return Config{}, fmt.Errorf("REDIS_URL must not be empty")
 	}
 
 	if strings.TrimSpace(cfg.Postgres.DSN) == "" {

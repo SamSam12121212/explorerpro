@@ -38,8 +38,7 @@ var wsOriginPatterns = []string{
 type clientConfig struct {
 	logger    *slog.Logger
 	js        nats.JetStreamContext
-	store     *threadstore.Store
-	pg        *postgresstore.Store
+	store     *postgresstore.Store
 	docs      *threaddocstore.Store
 	threadID  string
 	afterItem string
@@ -66,7 +65,7 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	meta, preferPostgres, err := c.loadThread(ctx)
+	meta, err := c.loadThread(ctx)
 	if err != nil {
 		c.cfg.logger.Warn("failed to load thread", "error", err)
 		return
@@ -89,11 +88,11 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	c.runEventLoop(ctx, conn, sub, preferPostgres)
+	c.runEventLoop(ctx, conn, sub)
 }
 
 // runEventLoop is the primary NATS-driven loop.
-func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *nats.Subscription, preferPostgres bool) {
+func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *nats.Subscription) {
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 
@@ -105,7 +104,7 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 	var batch []json.RawMessage
 	batchActive := false
 
-	if err := c.writeItemsDelta(ctx, conn, &afterItem, preferPostgres); err != nil {
+	if err := c.writeItemsDelta(ctx, conn, &afterItem); err != nil {
 		c.logStreamError(err)
 		return
 	}
@@ -205,19 +204,8 @@ func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *na
 	}
 }
 
-func (c *client) loadThread(ctx context.Context) (threadstore.ThreadMeta, bool, error) {
-	meta, err := c.cfg.pg.LoadThread(ctx, c.cfg.threadID)
-	if err == nil {
-		return meta, true, nil
-	}
-	if !errors.Is(err, threadstore.ErrThreadNotFound) {
-		return threadstore.ThreadMeta{}, false, err
-	}
-	meta, err = c.cfg.store.LoadThread(ctx, c.cfg.threadID)
-	if err != nil {
-		return threadstore.ThreadMeta{}, false, err
-	}
-	return meta, false, nil
+func (c *client) loadThread(ctx context.Context) (threadstore.ThreadMeta, error) {
+	return c.cfg.store.LoadThread(ctx, c.cfg.threadID)
 }
 
 func (c *client) writeSnapshot(ctx context.Context, conn *websocket.Conn, meta threadstore.ThreadMeta) error {
@@ -247,37 +235,17 @@ func (c *client) writeSnapshot(ctx context.Context, conn *websocket.Conn, meta t
 }
 
 func (c *client) loadSpawnGroup(ctx context.Context, id string) (threadstore.SpawnGroupMeta, error) {
-	spawn, err := c.cfg.pg.LoadSpawnGroup(ctx, id)
-	if err == nil {
-		return spawn, nil
-	}
-	if !errors.Is(err, threadstore.ErrThreadNotFound) {
-		return threadstore.SpawnGroupMeta{}, err
-	}
 	return c.cfg.store.LoadSpawnGroup(ctx, id)
 }
 
-func (c *client) writeItemsDelta(ctx context.Context, conn *websocket.Conn, afterItem *string, preferPostgres bool) error {
+func (c *client) writeItemsDelta(ctx context.Context, conn *websocket.Conn, afterItem *string) error {
 	options := threadstore.ListOptions{
 		Limit: itemsBatchLimit,
 		After: *afterItem,
 	}
-
-	var items []threadstore.ItemRecord
-	var err error
-
-	if preferPostgres && supportsPostgresCursor(*afterItem) {
-		items, err = c.cfg.pg.ListItems(ctx, c.cfg.threadID, options)
-		if err != nil {
-			return err
-		}
-	}
-
-	if len(items) == 0 {
-		items, err = c.cfg.store.ListItems(ctx, c.cfg.threadID, options)
-		if err != nil {
-			return err
-		}
+	items, err := c.cfg.store.ListItems(ctx, c.cfg.threadID, options)
+	if err != nil {
+		return err
 	}
 
 	if len(items) == 0 {
@@ -314,7 +282,6 @@ type streamItemPayload struct {
 	ItemType   string          `json:"item_type"`
 	Direction  string          `json:"direction"`
 	CreatedAt  string          `json:"created_at"`
-	StreamID   string          `json:"stream_id,omitempty"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -475,14 +442,6 @@ func (c *client) writeStreamEvent(ctx context.Context, conn *websocket.Conn, raw
 	})
 }
 
-func supportsPostgresCursor(raw string) bool {
-	if strings.TrimSpace(raw) == "" {
-		return true
-	}
-	_, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
-	return err == nil
-}
-
 func parseCursor(raw string) int64 {
 	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
@@ -588,9 +547,6 @@ func presentItem(item threadstore.ItemRecord) map[string]any {
 		"item_type":   item.ItemType,
 		"direction":   item.Direction,
 		"created_at":  item.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if item.StreamID != "" {
-		response["stream_id"] = item.StreamID
 	}
 	if decoded, err := decodeRawJSON(item.Payload); err == nil && decoded != nil {
 		response["payload"] = decoded

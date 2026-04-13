@@ -20,6 +20,7 @@ import (
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadevents"
+	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
 	"github.com/nats-io/nats.go"
@@ -45,6 +46,7 @@ type threadActorConfig struct {
 	WorkerID       string
 	Logger         *slog.Logger
 	Store          actorStore
+	History        threadHistoryStore
 	ThreadDocs     threadDocumentStore
 	DocRuntime     docRuntimeContextClient
 	DocExec        *documentExec
@@ -66,15 +68,19 @@ type actorStore interface {
 	RotateOwnership(ctx context.Context, threadID, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
 	ReleaseOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64) error
 	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error)
-	AppendEvent(ctx context.Context, entry threadstore.EventLogEntry) error
 	SaveResponseRaw(ctx context.Context, threadID, responseID string, payload json.RawMessage) error
-	LoadLatestClientResponseCreatePayload(ctx context.Context, threadID string) (json.RawMessage, error)
 	ListItems(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.ItemRecord, error)
 	CreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta, childThreadIDs []string) error
 	LoadSpawnGroup(ctx context.Context, spawnGroupID string) (threadstore.SpawnGroupMeta, error)
 	SaveSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) error
 	ListSpawnResults(ctx context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error)
 	UpsertSpawnResult(ctx context.Context, spawnGroupID string, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error)
+}
+
+type threadHistoryStore interface {
+	SaveResponseCreateCheckpoint(ctx context.Context, threadID, checkpointID string, payload json.RawMessage) error
+	LoadLatestResponseCreateCheckpoint(ctx context.Context, threadID string) (json.RawMessage, error)
+	AppendEvent(ctx context.Context, entry threadstore.EventLogEntry, eventID string) error
 }
 
 type threadDocumentStore interface {
@@ -87,6 +93,7 @@ type threadActor struct {
 	workerID     string
 	logger       *slog.Logger
 	store        actorStore
+	history      threadHistoryStore
 	threadDocs   threadDocumentStore
 	docRuntime   docRuntimeContextClient
 	docExec      *documentExec
@@ -136,6 +143,7 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		workerID:       cfg.WorkerID,
 		logger:         cfg.Logger,
 		store:          cfg.Store,
+		history:        cfg.History,
 		threadDocs:     cfg.ThreadDocs,
 		docRuntime:     cfg.DocRuntime,
 		docExec:        cfg.DocExec,
@@ -759,16 +767,11 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 		status = fallbackStatus
 	}
 
-	assistantText, err := a.loadLatestAssistantText(body.ChildThreadID)
-	if err != nil {
-		return err
-	}
-
 	stored, results, err := a.store.UpsertSpawnResult(a.ctx, spawnGroupID, threadstore.SpawnChildResult{
 		ChildThreadID:   body.ChildThreadID,
 		Status:          status,
 		ChildResponseID: body.ChildResponseID,
-		AssistantText:   assistantText,
+		AssistantText:   body.AssistantText,
 		ResultRef:       body.ResultRef,
 		SummaryRef:      body.SummaryRef,
 		ErrorRef:        body.ErrorRef,
@@ -927,13 +930,17 @@ func (a *threadActor) handleRotateSocket(cmd agentcmd.Command) error {
 		return fmt.Errorf("marshal socket rotation event: %w", err)
 	}
 
-	return a.store.AppendEvent(a.ctx, threadstore.EventLogEntry{
+	if a.history == nil {
+		return fmt.Errorf("thread history store is not configured")
+	}
+
+	return a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
 		ThreadID:         meta.ID,
 		SocketGeneration: meta.SocketGeneration,
 		EventType:        "client.socket.rotate",
 		PayloadJSON:      string(payload),
 		CreatedAt:        now,
-	})
+	}, fmt.Sprintf("socket-rotate-%d", newGeneration))
 }
 
 func (a *threadActor) handleReconcile(cmd agentcmd.Command) error {
@@ -1146,9 +1153,13 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 }
 
 func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID string) error {
-	rawEvent, err := a.store.LoadLatestClientResponseCreatePayload(a.ctx, meta.ID)
+	if a.history == nil {
+		return fmt.Errorf("thread history store is not configured")
+	}
+
+	rawEvent, err := a.history.LoadLatestResponseCreateCheckpoint(a.ctx, meta.ID)
 	if err != nil {
-		if errors.Is(err, threadstore.ErrThreadNotFound) {
+		if errors.Is(err, threadhistory.ErrCheckpointNotFound) {
 			return a.handleMissingRecoveryCheckpoint(meta)
 		}
 		return err
@@ -1404,13 +1415,20 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 		return err
 	}
 
-	if err := a.store.AppendEvent(a.ctx, threadstore.EventLogEntry{
+	if a.history == nil {
+		return fmt.Errorf("thread history store is not configured")
+	}
+	if err := a.history.SaveResponseCreateCheckpoint(a.ctx, meta.ID, eventID, rawEvent); err != nil {
+		return err
+	}
+
+	if err := a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
 		ThreadID:         meta.ID,
 		SocketGeneration: meta.SocketGeneration,
 		EventType:        "client.response.create",
 		PayloadJSON:      string(rawEvent),
 		CreatedAt:        time.Now().UTC(),
-	}); err != nil {
+	}, "client-response-create-"+eventID); err != nil {
 		return err
 	}
 
@@ -1861,14 +1879,17 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		responseID := event.ResolvedResponseID()
-		if err := a.store.AppendEvent(a.ctx, threadstore.EventLogEntry{
+		if a.history == nil {
+			return fmt.Errorf("thread history store is not configured")
+		}
+		if err := a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
 			ThreadID:         meta.ID,
 			SocketGeneration: meta.SocketGeneration,
 			EventType:        string(event.Type),
 			ResponseID:       responseID,
 			PayloadJSON:      string(event.Raw),
 			CreatedAt:        time.Now().UTC(),
-		}); err != nil {
+		}, ""); err != nil {
 			return err
 		}
 
@@ -2288,9 +2309,6 @@ func presentThreadItem(item threadstore.ItemRecord) map[string]any {
 		"item_type":   item.ItemType,
 		"direction":   item.Direction,
 		"created_at":  item.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if item.StreamID != "" {
-		response["stream_id"] = item.StreamID
 	}
 	if decoded, err := decodeStreamRawJSON(item.Payload); err == nil && decoded != nil {
 		response["payload"] = decoded
@@ -2836,11 +2854,22 @@ func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
 	}
 
 	status := string(meta.Status)
-	body, err := json.Marshal(map[string]any{
-		"spawn_group_id":    meta.ActiveSpawnGroupID,
-		"child_thread_id":   meta.ID,
-		"child_response_id": meta.LastResponseID,
-		"status":            status,
+	assistantText, err := a.loadLatestAssistantText(meta.ID)
+	if err != nil {
+		a.logger.Warn("failed to load child assistant summary",
+			"thread_id", meta.ID,
+			"spawn_group_id", meta.ActiveSpawnGroupID,
+			"error", err,
+		)
+		assistantText = ""
+	}
+
+	body, err := json.Marshal(agentcmd.ChildResultBody{
+		SpawnGroupID:    meta.ActiveSpawnGroupID,
+		ChildThreadID:   meta.ID,
+		ChildResponseID: meta.LastResponseID,
+		Status:          status,
+		AssistantText:   assistantText,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal child terminal body: %w", err)

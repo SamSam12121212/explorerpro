@@ -1257,7 +1257,7 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 	}
 
 	foundCheckpoint := false
-	for _, entry := range store.appendedEvents {
+	for _, entry := range store.historyEvents {
 		if entry.EventType != "client.response.create" {
 			continue
 		}
@@ -1271,6 +1271,9 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 	}
 	if !foundCheckpoint {
 		t.Fatal("expected client.response.create checkpoint to be appended")
+	}
+	if raw := string(store.latestClientCreateByID["thread_parent"]); !strings.Contains(raw, ref) {
+		t.Fatalf("saved checkpoint = %s, want prepared_input_ref %q", raw, ref)
 	}
 }
 
@@ -1364,6 +1367,9 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 	part, ok := content[0].(map[string]any)
 	if !ok || part["text"] != "prepared continue" {
 		t.Fatalf("content[0] = %#v, want prepared continue", content[0])
+	}
+	if raw := string(store.latestClientCreateByID["thread_parent"]); !strings.Contains(raw, ref) {
+		t.Fatalf("saved checkpoint = %s, want prepared_input_ref %q", raw, ref)
 	}
 }
 
@@ -1614,6 +1620,112 @@ func TestExtractAssistantTextFromItemPayload(t *testing.T) {
 
 	if text != "First paragraph.\n\nSecond paragraph." {
 		t.Fatalf("text = %q, want joined output text", text)
+	}
+}
+
+func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:            "thread_parent",
+		RootThreadID:  "thread_root",
+		OwnerWorkerID: "worker-parent",
+	}
+	store.appendedItems = append(store.appendedItems, threadstore.ItemLogEntry{
+		ThreadID:   "thread_child",
+		ResponseID: "resp_child_1",
+		ItemType:   "message",
+		Direction:  "output",
+		PayloadJSON: `{
+			"type":"message",
+			"content":[
+				{"type":"output_text","text":"Child summary line one."},
+				{"type":"output_text","text":"Child summary line two."}
+			]
+		}`,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	var (
+		publishedSubject string
+		publishedCmd     agentcmd.Command
+	)
+
+	actor := newActorRecoveryHarness(t, store, nil)
+	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+		publishedSubject = subject
+		publishedCmd = cmd
+		return nil
+	}
+
+	err := actor.publishChildTerminal(threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		ParentThreadID:     "thread_parent",
+		ActiveSpawnGroupID: "sg_123",
+		LastResponseID:     "resp_child_1",
+		Status:             threadstore.ThreadStatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("publishChildTerminal() error = %v", err)
+	}
+
+	if publishedSubject != agentcmd.WorkerCommandSubject("worker-parent", agentcmd.KindThreadChildCompleted) {
+		t.Fatalf("subject = %q, want worker child_completed subject", publishedSubject)
+	}
+
+	body, err := publishedCmd.ChildResultBody()
+	if err != nil {
+		t.Fatalf("ChildResultBody() error = %v", err)
+	}
+
+	if body.AssistantText != "Child summary line one.\n\nChild summary line two." {
+		t.Fatalf("AssistantText = %q, want joined summary", body.AssistantText)
+	}
+}
+
+func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:                 "thread_parent",
+		Status:             threadstore.ThreadStatusWaitingChildren,
+		ActiveSpawnGroupID: "sg_waiting",
+	}
+	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
+		ID:             "sg_waiting",
+		ParentThreadID: "thread_parent",
+		ParentCallID:   "call_parent",
+		Expected:       2,
+		Status:         threadstore.SpawnGroupStatusWaiting,
+	}
+
+	actor := newActorRecoveryHarness(t, store, nil)
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_child_completed",
+		Kind:     agentcmd.KindThreadChildCompleted,
+		ThreadID: "thread_parent",
+		Body: json.RawMessage(`{
+			"spawn_group_id":"sg_waiting",
+			"child_thread_id":"thread_child_1",
+			"child_response_id":"resp_child_1",
+			"assistant_text":"Direct child summary",
+			"status":"completed"
+		}`),
+	}
+
+	if err := actor.handleChildResult(cmd, "completed"); err != nil {
+		t.Fatalf("handleChildResult() error = %v", err)
+	}
+
+	results := store.spawnResults["sg_waiting"]
+	if len(results) != 1 {
+		t.Fatalf("spawnResults = %d, want 1", len(results))
+	}
+	if results[0].AssistantText != "Direct child summary" {
+		t.Fatalf("AssistantText = %q, want %q", results[0].AssistantText, "Direct child summary")
 	}
 }
 

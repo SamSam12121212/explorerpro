@@ -97,6 +97,7 @@ type ChildResultBody struct {
 	ChildThreadID   string `json:"child_thread_id"`
 	ChildResponseID string `json:"child_response_id,omitempty"`
 	Status          string `json:"status,omitempty"`
+	AssistantText   string `json:"assistant_text,omitempty"`
 	ResultRef       string `json:"result_ref,omitempty"`
 	SummaryRef      string `json:"summary_ref,omitempty"`
 	ErrorRef        string `json:"error_ref,omitempty"`

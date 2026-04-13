@@ -30,8 +30,6 @@ type ThreadListEntry struct {
 	LatestMessageIsOut bool
 }
 
-var _ threadstore.DurableSink = (*Store)(nil)
-
 func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
@@ -220,14 +218,325 @@ ON CONFLICT (id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) AppendItem(ctx context.Context, entry threadstore.ItemLogEntry, seq int64) error {
+func (s *Store) CommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM thread_processed_commands
+    WHERE thread_id = $1 AND cmd_id = $2
+)
+`, threadID, cmdID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check processed command %s/%s: %w", threadID, cmdID, err)
+	}
+	return exists, nil
+}
+
+func (s *Store) MarkCommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+INSERT INTO thread_processed_commands (
+    thread_id,
+    cmd_id,
+    processed_at
+) VALUES (
+    $1,
+    $2,
+    now()
+)
+ON CONFLICT (thread_id, cmd_id) DO NOTHING
+`, threadID, cmdID)
+	if err != nil {
+		return false, fmt.Errorf("mark processed command %s/%s: %w", threadID, cmdID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) ClaimOwnership(ctx context.Context, threadID, workerID string, leaseUntil time.Time) (threadstore.ClaimResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin thread item tx: %w", err)
+		return threadstore.ClaimResult{}, fmt.Errorf("begin claim ownership tx: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
+
+	meta, err := s.loadThreadForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return threadstore.ClaimResult{}, err
+	}
+
+	owner, found, err := s.loadOwnerForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return threadstore.ClaimResult{}, err
+	}
+
+	now := time.Now().UTC()
+	currentWorkerID := strings.TrimSpace(meta.OwnerWorkerID)
+	currentGeneration := meta.SocketGeneration
+	if found {
+		if strings.TrimSpace(owner.WorkerID) != "" {
+			currentWorkerID = owner.WorkerID
+		}
+		if owner.SocketGeneration > 0 {
+			currentGeneration = owner.SocketGeneration
+		}
+	}
+
+	if currentWorkerID != "" && currentWorkerID != workerID && found && owner.LeaseUntil.After(now) {
+		return threadstore.ClaimResult{
+			Claimed:          false,
+			SocketGeneration: currentGeneration,
+			PreviousWorkerID: currentWorkerID,
+		}, nil
+	}
+
+	newGeneration := currentGeneration
+	if currentWorkerID != workerID || newGeneration == 0 {
+		newGeneration++
+		if newGeneration == 0 {
+			newGeneration = 1
+		}
+	}
+
+	claimedAt := now
+	if found && owner.WorkerID == workerID && !owner.ClaimedAt.IsZero() {
+		claimedAt = owner.ClaimedAt
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO thread_owners (
+    thread_id,
+    worker_id,
+    lease_until,
+    socket_generation,
+    claimed_at,
+    updated_at
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6
+)
+ON CONFLICT (thread_id) DO UPDATE SET
+    worker_id = EXCLUDED.worker_id,
+    lease_until = EXCLUDED.lease_until,
+    socket_generation = EXCLUDED.socket_generation,
+    claimed_at = EXCLUDED.claimed_at,
+    updated_at = EXCLUDED.updated_at
+`, threadID, workerID, nonZeroTime(leaseUntil), int64(newGeneration), claimedAt, now); err != nil {
+		return threadstore.ClaimResult{}, fmt.Errorf("upsert thread owner %s: %w", threadID, err)
+	}
+
+	meta.OwnerWorkerID = workerID
+	meta.SocketGeneration = newGeneration
+	meta.UpdatedAt = now
+	if err := s.saveThreadTx(ctx, tx, meta); err != nil {
+		return threadstore.ClaimResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return threadstore.ClaimResult{}, fmt.Errorf("commit claim ownership tx: %w", err)
+	}
+
+	return threadstore.ClaimResult{
+		Claimed:          true,
+		SocketGeneration: newGeneration,
+		PreviousWorkerID: currentWorkerID,
+	}, nil
+}
+
+func (s *Store) RenewOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+UPDATE thread_owners
+SET lease_until = $4,
+    updated_at = now()
+WHERE thread_id = $1
+  AND worker_id = $2
+  AND socket_generation = $3
+`, threadID, workerID, int64(socketGeneration), nonZeroTime(leaseUntil))
+	if err != nil {
+		return false, fmt.Errorf("renew thread owner %s: %w", threadID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *Store) LoadOwner(ctx context.Context, threadID string) (threadstore.OwnerRecord, error) {
+	row := s.pool.QueryRow(ctx, `
+SELECT
+    worker_id,
+    socket_generation,
+    lease_until,
+    claimed_at,
+    updated_at
+FROM thread_owners
+WHERE thread_id = $1
+`, threadID)
+
+	var owner threadstore.OwnerRecord
+	var socketGeneration int64
+	if err := row.Scan(
+		&owner.WorkerID,
+		&socketGeneration,
+		&owner.LeaseUntil,
+		&owner.ClaimedAt,
+		&owner.UpdatedAt,
+	); err != nil {
+		if isNoRows(err) {
+			return threadstore.OwnerRecord{}, threadstore.ErrThreadNotFound
+		}
+		return threadstore.OwnerRecord{}, fmt.Errorf("load thread owner %s: %w", threadID, err)
+	}
+
+	owner.SocketGeneration = uint64(maxInt64(socketGeneration))
+	owner.LeaseUntil = owner.LeaseUntil.UTC()
+	owner.ClaimedAt = owner.ClaimedAt.UTC()
+	owner.UpdatedAt = owner.UpdatedAt.UTC()
+	return owner, nil
+}
+
+func (s *Store) ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT id
+FROM threads
+WHERE status = $1
+ORDER BY id ASC
+`, string(status))
+	if err != nil {
+		return nil, fmt.Errorf("list thread ids by status %s: %w", status, err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan thread id by status: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate thread ids by status: %w", err)
+	}
+	return ids, nil
+}
+
+func (s *Store) RotateOwnership(ctx context.Context, threadID, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin rotate ownership tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	meta, err := s.loadThreadForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return 0, false, err
+	}
+	owner, found, err := s.loadOwnerForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return 0, false, err
+	}
+	if !found || owner.WorkerID != workerID || owner.SocketGeneration != currentGeneration || meta.SocketGeneration != currentGeneration {
+		return 0, false, nil
+	}
+
+	newGeneration := currentGeneration + 1
+	if newGeneration == 0 {
+		newGeneration = 1
+	}
+	now := time.Now().UTC()
+
+	if _, err := tx.Exec(ctx, `
+UPDATE thread_owners
+SET worker_id = $2,
+    lease_until = $3,
+    socket_generation = $4,
+    updated_at = $5
+WHERE thread_id = $1
+`, threadID, workerID, nonZeroTime(leaseUntil), int64(newGeneration), now); err != nil {
+		return 0, false, fmt.Errorf("update rotated owner %s: %w", threadID, err)
+	}
+
+	meta.OwnerWorkerID = workerID
+	meta.SocketGeneration = newGeneration
+	meta.SocketExpiresAt = socketExpiresAt.UTC()
+	meta.UpdatedAt = now
+	if err := s.saveThreadTx(ctx, tx, meta); err != nil {
+		return 0, false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("commit rotate ownership tx: %w", err)
+	}
+
+	return newGeneration, true, nil
+}
+
+func (s *Store) ReleaseOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin release ownership tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	meta, err := s.loadThreadForUpdate(ctx, tx, threadID)
+	if err != nil {
+		if errors.Is(err, threadstore.ErrThreadNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	owner, found, err := s.loadOwnerForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return err
+	}
+	if !found || owner.WorkerID != workerID || owner.SocketGeneration != socketGeneration {
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM thread_owners
+WHERE thread_id = $1
+`, threadID); err != nil {
+		return fmt.Errorf("delete thread owner %s: %w", threadID, err)
+	}
+
+	meta.OwnerWorkerID = ""
+	meta.ActiveResponseID = ""
+	meta.SocketExpiresAt = time.Time{}
+	meta.UpdatedAt = time.Now().UTC()
+	if err := s.saveThreadTx(ctx, tx, meta); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit release ownership tx: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return threadstore.ItemRecord{}, fmt.Errorf("begin thread item tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	seq, err := s.nextThreadItemSeq(ctx, tx, entry.ThreadID)
+	if err != nil {
+		return threadstore.ItemRecord{}, err
+	}
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Now().UTC()
+	}
 
 	_, err = tx.Exec(ctx, `
 INSERT INTO thread_items (
@@ -258,26 +567,33 @@ ON CONFLICT (thread_id, seq) DO NOTHING
 		nonZeroTime(entry.CreatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("insert thread item: %w", err)
+		return threadstore.ItemRecord{}, fmt.Errorf("insert thread item: %w", err)
 	}
 
 	if strings.TrimSpace(entry.ResponseID) != "" && entry.Direction == "output" {
 		if err := upsertThreadResponseLink(ctx, tx, entry.ThreadID, entry.ResponseID, linkKindOwned); err != nil {
-			return err
+			return threadstore.ItemRecord{}, err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit thread item tx: %w", err)
+		return threadstore.ItemRecord{}, fmt.Errorf("commit thread item tx: %w", err)
 	}
 
-	return nil
+	return threadstore.ItemRecord{
+		Seq:        seq,
+		ResponseID: entry.ResponseID,
+		ItemType:   entry.ItemType,
+		Direction:  entry.Direction,
+		Payload:    json.RawMessage(entry.PayloadJSON),
+		CreatedAt:  entry.CreatedAt,
+	}, nil
 }
 
 func (s *Store) AppendEvent(ctx context.Context, entry threadstore.EventLogEntry, eventSeq int64) error {
-	// Delta events are live-only UI telemetry for now. Keep them in Redis and
-	// NATS, but avoid persisting them into Postgres until we need historical
-	// replay outside the runtime store.
+	// Delta events are live-only UI telemetry for now. Keep them in NATS and
+	// avoid persisting them into Postgres until we need historical replay
+	// outside the runtime store.
 	if !shouldPersistThreadEvent(entry.EventType) {
 		return nil
 	}
@@ -526,8 +842,41 @@ ON CONFLICT (id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) UpsertSpawnResult(ctx context.Context, spawnGroupID string, result threadstore.SpawnChildResult) error {
-	_, err := s.pool.Exec(ctx, `
+func (s *Store) UpsertSpawnResult(ctx context.Context, spawnGroupID string, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("begin spawn result tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var existingStatus string
+	err = tx.QueryRow(ctx, `
+SELECT COALESCE(status, '')
+FROM spawn_group_children
+WHERE spawn_group_id = $1 AND child_thread_id = $2
+FOR UPDATE
+`, spawnGroupID, result.ChildThreadID).Scan(&existingStatus)
+	if err != nil && !isNoRows(err) {
+		return false, nil, fmt.Errorf("load spawn result %s/%s: %w", spawnGroupID, result.ChildThreadID, err)
+	}
+	if existingStatus != "" && existingStatus != "pending" {
+		results, listErr := listSpawnResultsTx(ctx, tx, spawnGroupID)
+		if listErr != nil {
+			return false, nil, listErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, nil, fmt.Errorf("commit existing spawn result tx: %w", err)
+		}
+		return false, results, nil
+	}
+
+	if result.UpdatedAt.IsZero() {
+		result.UpdatedAt = time.Now().UTC()
+	}
+
+	_, err = tx.Exec(ctx, `
 INSERT INTO spawn_group_children (
     spawn_group_id,
     child_thread_id,
@@ -572,10 +921,19 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 		nonZeroTime(result.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("upsert spawn result %s/%s: %w", spawnGroupID, result.ChildThreadID, err)
+		return false, nil, fmt.Errorf("upsert spawn result %s/%s: %w", spawnGroupID, result.ChildThreadID, err)
 	}
 
-	return nil
+	results, err := listSpawnResultsTx(ctx, tx, spawnGroupID)
+	if err != nil {
+		return false, nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, nil, fmt.Errorf("commit spawn result tx: %w", err)
+	}
+
+	return true, results, nil
 }
 
 func (s *Store) LoadThread(ctx context.Context, threadID string) (threadstore.ThreadMeta, error) {
@@ -1142,6 +1500,11 @@ type pgxExec interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
+type pgxQueryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 func upsertThreadResponseLink(ctx context.Context, db pgxExec, threadID, responseID, linkKind string) error {
 	_, err := db.Exec(ctx, `
 INSERT INTO thread_response_links (
@@ -1272,6 +1635,268 @@ func scanEventRows(rows pgxRows) ([]threadstore.EventRecord, error) {
 		return nil, fmt.Errorf("iterate thread event rows: %w", err)
 	}
 	return events, nil
+}
+
+func (s *Store) saveThreadTx(ctx context.Context, db pgxExec, meta threadstore.ThreadMeta) error {
+	_, err := db.Exec(ctx, `
+INSERT INTO threads (
+    id,
+    root_thread_id,
+    parent_thread_id,
+    parent_call_id,
+    depth,
+    status,
+    model,
+    instructions,
+    metadata_json,
+    include_json,
+    tools_json,
+    tool_choice_json,
+    reasoning_json,
+    owner_worker_id,
+    socket_generation,
+    socket_expires_at,
+    last_response_id,
+    active_response_id,
+    active_spawn_group_id,
+    created_at,
+    updated_at
+) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9::jsonb,
+    $10::jsonb,
+    $11::jsonb,
+    $12::jsonb,
+    $13::jsonb,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21
+)
+ON CONFLICT (id) DO UPDATE SET
+    root_thread_id = EXCLUDED.root_thread_id,
+    parent_thread_id = EXCLUDED.parent_thread_id,
+    parent_call_id = EXCLUDED.parent_call_id,
+    depth = EXCLUDED.depth,
+    status = EXCLUDED.status,
+    model = EXCLUDED.model,
+    instructions = EXCLUDED.instructions,
+    metadata_json = EXCLUDED.metadata_json,
+    include_json = EXCLUDED.include_json,
+    tools_json = EXCLUDED.tools_json,
+    tool_choice_json = EXCLUDED.tool_choice_json,
+    reasoning_json = EXCLUDED.reasoning_json,
+    owner_worker_id = EXCLUDED.owner_worker_id,
+    socket_generation = EXCLUDED.socket_generation,
+    socket_expires_at = EXCLUDED.socket_expires_at,
+    last_response_id = EXCLUDED.last_response_id,
+    active_response_id = EXCLUDED.active_response_id,
+    active_spawn_group_id = EXCLUDED.active_spawn_group_id,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at
+`,
+		meta.ID,
+		meta.RootThreadID,
+		nullIfBlank(meta.ParentThreadID),
+		nullIfBlank(meta.ParentCallID),
+		meta.Depth,
+		string(meta.Status),
+		meta.Model,
+		meta.Instructions,
+		requiredJSON(meta.MetadataJSON, "{}"),
+		optionalJSON(meta.IncludeJSON),
+		optionalJSON(meta.ToolsJSON),
+		optionalJSON(meta.ToolChoiceJSON),
+		optionalJSON(meta.ReasoningJSON),
+		nullIfBlank(meta.OwnerWorkerID),
+		int64(meta.SocketGeneration),
+		nullIfZeroTime(meta.SocketExpiresAt),
+		nullIfBlank(meta.LastResponseID),
+		nullIfBlank(meta.ActiveResponseID),
+		nullIfBlank(meta.ActiveSpawnGroupID),
+		nonZeroTime(meta.CreatedAt),
+		nonZeroTime(meta.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("persist thread snapshot %s: %w", meta.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) loadThreadForUpdate(ctx context.Context, tx pgx.Tx, threadID string) (threadstore.ThreadMeta, error) {
+	row := tx.QueryRow(ctx, `
+SELECT
+    id,
+    root_thread_id,
+    COALESCE(parent_thread_id, ''),
+    COALESCE(parent_call_id, ''),
+    depth,
+    status,
+    model,
+    instructions,
+    COALESCE(metadata_json::text, ''),
+    COALESCE(include_json::text, ''),
+    COALESCE(tools_json::text, ''),
+    COALESCE(tool_choice_json::text, ''),
+    COALESCE(reasoning_json::text, ''),
+    COALESCE(owner_worker_id, ''),
+    socket_generation,
+    socket_expires_at,
+    COALESCE(last_response_id, ''),
+    COALESCE(active_response_id, ''),
+    COALESCE(active_spawn_group_id, ''),
+    created_at,
+    updated_at
+FROM threads
+WHERE id = $1
+FOR UPDATE
+`, threadID)
+
+	var meta threadstore.ThreadMeta
+	var status string
+	var socketGeneration int64
+	var socketExpiresAt *time.Time
+	if err := row.Scan(
+		&meta.ID,
+		&meta.RootThreadID,
+		&meta.ParentThreadID,
+		&meta.ParentCallID,
+		&meta.Depth,
+		&status,
+		&meta.Model,
+		&meta.Instructions,
+		&meta.MetadataJSON,
+		&meta.IncludeJSON,
+		&meta.ToolsJSON,
+		&meta.ToolChoiceJSON,
+		&meta.ReasoningJSON,
+		&meta.OwnerWorkerID,
+		&socketGeneration,
+		&socketExpiresAt,
+		&meta.LastResponseID,
+		&meta.ActiveResponseID,
+		&meta.ActiveSpawnGroupID,
+		&meta.CreatedAt,
+		&meta.UpdatedAt,
+	); err != nil {
+		if isNoRows(err) {
+			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
+		}
+		return threadstore.ThreadMeta{}, fmt.Errorf("load thread %s for update: %w", threadID, err)
+	}
+
+	meta.Status = threadstore.ThreadStatus(status)
+	meta.SocketGeneration = uint64(maxInt64(socketGeneration))
+	if socketExpiresAt != nil {
+		meta.SocketExpiresAt = socketExpiresAt.UTC()
+	}
+	return meta, nil
+}
+
+func (s *Store) loadOwnerForUpdate(ctx context.Context, tx pgx.Tx, threadID string) (threadstore.OwnerRecord, bool, error) {
+	row := tx.QueryRow(ctx, `
+SELECT
+    worker_id,
+    socket_generation,
+    lease_until,
+    claimed_at,
+    updated_at
+FROM thread_owners
+WHERE thread_id = $1
+FOR UPDATE
+`, threadID)
+
+	var owner threadstore.OwnerRecord
+	var socketGeneration int64
+	if err := row.Scan(
+		&owner.WorkerID,
+		&socketGeneration,
+		&owner.LeaseUntil,
+		&owner.ClaimedAt,
+		&owner.UpdatedAt,
+	); err != nil {
+		if isNoRows(err) {
+			return threadstore.OwnerRecord{}, false, nil
+		}
+		return threadstore.OwnerRecord{}, false, fmt.Errorf("load thread owner %s for update: %w", threadID, err)
+	}
+
+	owner.SocketGeneration = uint64(maxInt64(socketGeneration))
+	owner.LeaseUntil = owner.LeaseUntil.UTC()
+	owner.ClaimedAt = owner.ClaimedAt.UTC()
+	owner.UpdatedAt = owner.UpdatedAt.UTC()
+	return owner, true, nil
+}
+
+func (s *Store) nextThreadItemSeq(ctx context.Context, tx pgx.Tx, threadID string) (int64, error) {
+	if _, err := s.loadThreadForUpdate(ctx, tx, threadID); err != nil {
+		return 0, err
+	}
+
+	var current int64
+	if err := tx.QueryRow(ctx, `
+SELECT COALESCE(MAX(seq), 0)
+FROM thread_items
+WHERE thread_id = $1
+`, threadID).Scan(&current); err != nil {
+		return 0, fmt.Errorf("load next item seq for thread %s: %w", threadID, err)
+	}
+
+	return current + 1, nil
+}
+
+func listSpawnResultsTx(ctx context.Context, db pgxQueryer, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
+	rows, err := db.Query(ctx, `
+SELECT
+    child_thread_id,
+    status,
+    COALESCE(child_response_id, ''),
+    COALESCE(assistant_text, ''),
+    COALESCE(result_ref, ''),
+    COALESCE(summary_ref, ''),
+    COALESCE(error_ref, ''),
+    updated_at
+FROM spawn_group_children
+WHERE spawn_group_id = $1 AND status <> 'pending'
+ORDER BY updated_at ASC, child_thread_id ASC
+`, spawnGroupID)
+	if err != nil {
+		return nil, fmt.Errorf("list spawn results %s: %w", spawnGroupID, err)
+	}
+	defer rows.Close()
+
+	var results []threadstore.SpawnChildResult
+	for rows.Next() {
+		var result threadstore.SpawnChildResult
+		if err := rows.Scan(
+			&result.ChildThreadID,
+			&result.Status,
+			&result.ChildResponseID,
+			&result.AssistantText,
+			&result.ResultRef,
+			&result.SummaryRef,
+			&result.ErrorRef,
+			&result.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan spawn result row: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate spawn results: %w", err)
+	}
+	return results, nil
 }
 
 type pgxRows interface {

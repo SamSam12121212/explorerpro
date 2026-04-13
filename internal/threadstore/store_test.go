@@ -1,59 +1,72 @@
 package threadstore
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
 
-func TestThreadMetaRoundTrip(t *testing.T) {
-	now := time.Date(2026, 3, 13, 18, 30, 0, 0, time.UTC)
+func TestSpawnChildResultJSONIncludesAssistantText(t *testing.T) {
+	t.Parallel()
 
-	meta := ThreadMeta{
-		ID:               "thread_123",
-		RootThreadID:     "thread_123",
-		Status:           ThreadStatusRunning,
-		Model:            "gpt-5.4",
-		Instructions:     "be sharp",
-		MetadataJSON:     `{"tenant":"acme"}`,
-		ToolsJSON:        `[{"type":"function","name":"spawn_subagents"}]`,
-		ToolChoiceJSON:   `{"type":"function","name":"spawn_subagents"}`,
-		OwnerWorkerID:    "worker_a",
-		SocketGeneration: 2,
-		SocketExpiresAt:  now.Add(time.Hour),
-		LastResponseID:   "resp_prev",
-		ActiveResponseID: "resp_live",
-		CreatedAt:        now,
-		UpdatedAt:        now.Add(time.Minute),
+	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+	result := SpawnChildResult{
+		ChildThreadID:   "thread_child_1",
+		Status:          "completed",
+		ChildResponseID: "resp_child_1",
+		AssistantText:   "Child summary",
+		ResultRef:       "blob://child-results/1.json",
+		SummaryRef:      "blob://child-results/1-summary.json",
+		ErrorRef:        "blob://child-results/1-error.json",
+		UpdatedAt:       now,
 	}
 
-	fields := metaToHash(meta)
-	hash := map[string]string{}
-	for key, value := range fields {
-		hash[key] = value.(string)
-	}
-
-	decoded, err := threadMetaFromHash(hash)
+	raw, err := json.Marshal(result)
 	if err != nil {
-		t.Fatalf("threadMetaFromHash() error = %v", err)
+		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	if decoded.ID != meta.ID {
-		t.Fatalf("ID = %q, want %q", decoded.ID, meta.ID)
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if decoded.SocketGeneration != meta.SocketGeneration {
-		t.Fatalf("SocketGeneration = %d, want %d", decoded.SocketGeneration, meta.SocketGeneration)
+	if decoded["child_thread_id"] != "thread_child_1" {
+		t.Fatalf("child_thread_id = %v, want thread_child_1", decoded["child_thread_id"])
+	}
+	if decoded["assistant_text"] != "Child summary" {
+		t.Fatalf("assistant_text = %v, want Child summary", decoded["assistant_text"])
+	}
+	if decoded["summary_ref"] != "blob://child-results/1-summary.json" {
+		t.Fatalf("summary_ref = %v, want blob://child-results/1-summary.json", decoded["summary_ref"])
+	}
+}
+
+func TestSpawnChildResultJSONOmitsEmptyOptionalFields(t *testing.T) {
+	t.Parallel()
+
+	result := SpawnChildResult{
+		ChildThreadID: "thread_child_2",
+		Status:        "failed",
 	}
 
-	if decoded.ToolsJSON != meta.ToolsJSON {
-		t.Fatalf("ToolsJSON = %q, want %q", decoded.ToolsJSON, meta.ToolsJSON)
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	if decoded.ToolChoiceJSON != meta.ToolChoiceJSON {
-		t.Fatalf("ToolChoiceJSON = %q, want %q", decoded.ToolChoiceJSON, meta.ToolChoiceJSON)
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if !decoded.SocketExpiresAt.Equal(meta.SocketExpiresAt) {
-		t.Fatalf("SocketExpiresAt = %s, want %s", decoded.SocketExpiresAt, meta.SocketExpiresAt)
+	if _, exists := decoded["assistant_text"]; exists {
+		t.Fatalf("assistant_text should be omitted, got %v", decoded["assistant_text"])
+	}
+	if _, exists := decoded["result_ref"]; exists {
+		t.Fatalf("result_ref should be omitted, got %v", decoded["result_ref"])
+	}
+	if _, exists := decoded["error_ref"]; exists {
+		t.Fatalf("error_ref should be omitted, got %v", decoded["error_ref"])
 	}
 }

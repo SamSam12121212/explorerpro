@@ -160,7 +160,6 @@ export interface ThreadItemsResponse {
   page?: {
     first_cursor?: string;
     last_cursor?: string;
-    last_stream_id?: string;
   };
 }
 

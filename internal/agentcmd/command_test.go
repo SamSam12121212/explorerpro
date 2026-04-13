@@ -193,6 +193,7 @@ func TestChildResultBody(t *testing.T) {
 			"spawn_group_id":"sg_123",
 			"child_thread_id":"thread_child_1",
 			"child_response_id":"resp_child_1",
+			"assistant_text":"Direct child summary",
 			"result_ref":"blob://child-results/1.json"
 		}
 	}`))
@@ -207,6 +208,9 @@ func TestChildResultBody(t *testing.T) {
 
 	if body.SpawnGroupID != "sg_123" {
 		t.Fatalf("SpawnGroupID = %q, want %q", body.SpawnGroupID, "sg_123")
+	}
+	if body.AssistantText != "Direct child summary" {
+		t.Fatalf("AssistantText = %q, want %q", body.AssistantText, "Direct child summary")
 	}
 }
 

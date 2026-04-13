@@ -13,15 +13,15 @@ In the current setup, your data is not processed under ZDR settings, so potentia
 - Thread execution with persistent worker-owned WebSockets and response continuity via `previous_response_id`
 - Parallel subagent fan-out — parent spawns N children on separate sockets, results regroup through a barrier
 - Warm branching — children fork from a parent's accumulated context instead of starting cold
-- Sticky worker ownership tracked in Redis, commands route directly
+- Sticky worker ownership tracked in Postgres, commands route directly
 - Durable command transport via NATS + JetStream with idempotent delivery and replay safety
 - Recovery through socket rotation, orphan adoption, and checkpoint-based reconciliation
 - Blob-backed image inputs with base64 only at the OpenAI boundary
-- Postgres read model for durable history, Redis as the hot coordination plane
+- Postgres-backed runtime state and durable history
 
 ## Stack
 
-Go, NATS + JetStream, Redis, Postgres, OpenAI Responses API ([WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode))
+Go, NATS + JetStream, Postgres, OpenAI Responses API ([WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode))
 
 ## Running
 
@@ -37,8 +37,7 @@ API on `localhost:8080`, frontend on `localhost:5173`.
 Or run Go services on the host:
 
 ```bash
-docker compose up -d nats redis postgres
+docker compose up -d nats postgres
 make run-api
 OPENAI_API_KEY=... make run-worker
 ```
-
