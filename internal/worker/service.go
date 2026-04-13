@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
+	"explorer/internal/idgen"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
@@ -29,6 +29,7 @@ import (
 const (
 	commandAckWait         = 30 * time.Minute
 	workerLeaseTTL         = 2 * time.Minute
+	workerConsumerTTL      = 10 * time.Minute
 	socketExpiryTTL        = 55 * time.Minute
 	socketRotateLead       = 5 * time.Minute
 	commandQueueSize       = 128
@@ -92,13 +93,18 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		MaxParallel:    documentQueryParallel,
 	})
 
+	workerID, err := newWorkerID()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Service{
 		cfg:          cfg,
 		logger:       logger,
 		runtime:      runtime,
 		dialer:       dialer,
 		openAIConfig: openAIConfig,
-		workerID:     resolveWorkerID(cfg.ServiceName),
+		workerID:     workerID,
 		store:        store,
 		threadDocs:   threadDocs,
 		docClient:    docClient,
@@ -139,6 +145,7 @@ func (s *Service) Run(ctx context.Context) error {
 		workerCh,
 		nats.BindStream(agentcmd.StreamName),
 		nats.Durable(agentcmd.DurableWorkerName(s.workerID)),
+		nats.InactiveThreshold(workerConsumerTTL),
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(commandAckWait),
@@ -281,17 +288,13 @@ func (s *Service) closeActors() {
 	}
 }
 
-func resolveWorkerID(serviceName string) string {
-	if workerID := strings.TrimSpace(os.Getenv("WORKER_ID")); workerID != "" {
-		return workerID
+func newWorkerID() (string, error) {
+	workerID, err := idgen.New("worker")
+	if err != nil {
+		return "", fmt.Errorf("generate worker id: %w", err)
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil || strings.TrimSpace(hostname) == "" {
-		return serviceName + "-worker"
-	}
-
-	return serviceName + "-" + hostname
+	return workerID, nil
 }
 
 type queuedCommand struct {
