@@ -21,6 +21,7 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -1792,6 +1793,57 @@ func (f fakeDocRuntimeContextClient) RuntimeContext(ctx context.Context, req doc
 	return f(ctx, req)
 }
 
+type fakeDocActorDocStore struct {
+	docs map[string]docstore.Document
+}
+
+func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Document, error) {
+	doc, ok := s.docs[id]
+	if !ok {
+		return docstore.Document{}, docstore.ErrDocumentNotFound
+	}
+	return doc, nil
+}
+
+type fakeDocActorLineageStore struct {
+	lineage map[string]map[string]threaddocstore.DocumentLineage
+	updated []docLineageUpdate
+}
+
+type docLineageUpdate struct {
+	ThreadID, DocumentID, ResponseID, Model string
+}
+
+func (s *fakeDocActorLineageStore) GetLineage(_ context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error) {
+	if s.lineage != nil {
+		if byDoc, ok := s.lineage[threadID]; ok {
+			return byDoc[documentID], nil
+		}
+	}
+	return threaddocstore.DocumentLineage{}, nil
+}
+
+func (s *fakeDocActorLineageStore) UpdateLineage(_ context.Context, threadID, documentID, responseID, model string) error {
+	s.updated = append(s.updated, docLineageUpdate{threadID, documentID, responseID, model})
+	return nil
+}
+
+type fakeDocActorPreparedInputClient struct {
+	ref string
+	err error
+}
+
+func (c *fakeDocActorPreparedInputClient) PrepareInput(_ context.Context, _ doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error) {
+	if c.err != nil {
+		return doccmd.PrepareInputResponse{}, c.err
+	}
+	return doccmd.PrepareInputResponse{
+		RequestID:        "test-req",
+		Status:           doccmd.PrepareStatusOK,
+		PreparedInputRef: c.ref,
+	}, nil
+}
+
 func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {
 	return d.conn, nil
 }
@@ -1932,9 +1984,10 @@ func TestDecodeDocQueryRequestRejectsEmptyTask(t *testing.T) {
 	}
 }
 
-func TestExecuteDocumentQueryReportsUnattachedDocs(t *testing.T) {
+func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	t.Parallel()
 
+	store := newFakeActorStore(t)
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
@@ -1942,52 +1995,19 @@ func TestExecuteDocumentQueryReportsUnattachedDocs(t *testing.T) {
 				"thread_123": {{ID: "doc_1"}},
 			},
 		},
+		store: store,
 	}
 
-	meta := threadstore.ThreadMeta{ID: "thread_123"}
-	output := actor.executeDocumentQuery(meta, docQueryRequest{
+	meta := threadstore.ThreadMeta{ID: "thread_123", RootThreadID: "thread_123"}
+	_, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
 		DocumentIDs: []string{"doc_1", "doc_missing"},
 		Task:        "summarize",
 	})
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
+	if err == nil {
+		t.Fatal("expected error for unattached document")
 	}
-	if parsed["error"] == nil {
-		t.Fatal("expected error field for unattached document")
-	}
-
-	missingIDs, ok := parsed["missing_ids"].([]any)
-	if !ok || len(missingIDs) != 1 || missingIDs[0] != "doc_missing" {
-		t.Fatalf("missing_ids = %#v, want [doc_missing]", parsed["missing_ids"])
-	}
-}
-
-func TestExecuteDocumentQueryReturnsStubWhenNoExecutor(t *testing.T) {
-	t.Parallel()
-
-	actor := &threadActor{
-		ctx: context.Background(),
-		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: "doc_1"}, {ID: "doc_2"}},
-			},
-		},
-	}
-
-	meta := threadstore.ThreadMeta{ID: "thread_123"}
-	output := actor.executeDocumentQuery(meta, docQueryRequest{
-		DocumentIDs: []string{"doc_1", "doc_2"},
-		Task:        "summarize findings",
-	})
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if parsed["status"] != "not_yet_implemented" {
-		t.Fatalf("status = %v, want not_yet_implemented", parsed["status"])
+	if !strings.Contains(err.Error(), "doc_missing") {
+		t.Fatalf("error = %v, want mention of doc_missing", err)
 	}
 }
 
@@ -2009,7 +2029,7 @@ func TestFilterSubagentToolsRemovesDocumentQueryTool(t *testing.T) {
 	}
 }
 
-func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
+func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
@@ -2042,6 +2062,13 @@ func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
 			"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
 		},
 	}
+	actor.docStore = &fakeDocActorDocStore{
+		docs: map[string]docstore.Document{
+			"doc_1": {ID: "doc_1", Filename: "report.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest"},
+		},
+	}
+	actor.docLineage = &fakeDocActorLineageStore{}
+	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
 	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
 		publishedCommands = append(publishedCommands, cmd)
 		return nil
@@ -2053,32 +2080,19 @@ func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
 	}
 
 	final := store.threads["thread_parent"]
-	if final.Status != threadstore.ThreadStatusWaitingTool {
-		t.Fatalf("final status = %q, want waiting_tool", final.Status)
+	if final.Status != threadstore.ThreadStatusWaitingChildren {
+		t.Fatalf("final status = %q, want waiting_children", final.Status)
+	}
+	if final.ActiveSpawnGroupID == "" {
+		t.Fatal("expected active spawn group ID to be set")
 	}
 
 	if len(publishedCommands) != 1 {
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
 	cmd := publishedCommands[0]
-	if cmd.Kind != agentcmd.KindThreadSubmitToolOutput {
-		t.Fatalf("command kind = %q, want %q", cmd.Kind, agentcmd.KindThreadSubmitToolOutput)
-	}
-
-	var body agentcmd.SubmitToolOutputBody
-	if err := json.Unmarshal(cmd.Body, &body); err != nil {
-		t.Fatalf("json.Unmarshal(body) error = %v", err)
-	}
-
-	var outputItem map[string]any
-	if err := json.Unmarshal(body.OutputItem, &outputItem); err != nil {
-		t.Fatalf("json.Unmarshal(output_item) error = %v", err)
-	}
-	if outputItem["type"] != "function_call_output" {
-		t.Fatalf("output item type = %v, want function_call_output", outputItem["type"])
-	}
-	if outputItem["call_id"] != "call_doc_1" {
-		t.Fatalf("output item call_id = %v, want call_doc_1", outputItem["call_id"])
+	if cmd.Kind != agentcmd.KindThreadStart {
+		t.Fatalf("command kind = %q, want %q", cmd.Kind, agentcmd.KindThreadStart)
 	}
 }
 

@@ -13,6 +13,7 @@ That includes:
 - normalized item persistence
 - raw response persistence
 - spawn-group coordination
+- document runtime-context augmentation and document-query child dispatch
 - durable checkpoint and raw event history writes
 - live event handoff to wsserver
 
@@ -34,6 +35,14 @@ Typical flow:
 - one in-flight response per thread
 - socket generation increments on rotation or adoption
 - the owner worker is the only process allowed to write to the socket
+
+## Document Queries
+
+- attached documents are discovered from `thread_documents` before `response.create`
+- runtime context appends `<available_documents>` and injects `query_attached_documents`
+- when the model calls that tool, the actor spawns one child thread per requested document
+- follow-up queries can branch from stored response lineage; first-touch queries can start from `prepared_input_ref`
+- document queries do not use a separate executor runtime
 
 ## Data Boundaries
 

@@ -44,6 +44,7 @@ flowchart LR
 - A thread never runs two responses at once.
 - Recovery rebuilds actor state from Postgres plus the latest `client.response.create` checkpoint in `THREAD_HISTORY`.
 - Parent and child threads use the same persistence and command model.
+- Document queries also use that same parent/child thread model; they are not a separate executor runtime.
 
 ## Main Flow
 
@@ -53,6 +54,13 @@ flowchart LR
 4. The worker sends `response.create` and persists thread snapshots, items, responses, and spawn state to Postgres.
 5. The worker publishes live deltas to `THREAD_EVENTS` and durable raw history to `THREAD_HISTORY`.
 6. Recovery or adoption reloads the thread from Postgres and resumes from the latest durable checkpoint.
+
+## Document Query Model
+
+- Thread attachments live in `thread_documents`.
+- Send-time runtime context advertises attached documents and injects `query_attached_documents`.
+- When the model chooses that tool, the worker spawns one child thread per requested document.
+- Those child threads persist, publish events, and recover exactly like any other thread.
 
 ## Storage Rules
 

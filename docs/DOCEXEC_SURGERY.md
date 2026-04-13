@@ -69,15 +69,18 @@ After surgery, the document query flow will be:
 1. Model calls `query_attached_documents` during `streamUntilTerminal`
 2. Actor detects the tool call — same as today
 3. On `response.completed`, actor treats it **exactly like `spawn_subagents`**:
-  - resolves the `previous_response_id` for each document (from the latest completed child thread for that document, or from the shared base anchor, or triggers a warmup)
+  - validates the requested document IDs are attached
+  - resolves the model for each document
+  - resolves `previous_response_id` from thread-local lineage, then from a compatible shared base anchor if present
+  - if no usable lineage exists, requests a `document_query` prepared input from `documenthandler`
   - creates one child thread per document
-  - each child thread starts with `previous_response_id`, the task as input, `store: true`
+  - each child thread starts either from `previous_response_id` + task input, or from `prepared_input_ref`, with `store: true`
   - publishes `thread.start` commands for each child
   - creates a spawn group, sets parent status to `waiting_children`
 4. Each child thread is a **normal thread** — it gets claimed by a worker, opens a normal socket, runs `sendAndStream` → `streamUntilTerminal`, persists items and events, publishes `thread.child_completed`
 5. Parent thread regroups through the **normal spawn barrier** in `handleChildResult`
 
-The worker does not know it is running a "document query." It just sees a thread that was started in warm branch mode from a `previous_response_id`, with some input text, a model, and instructions.
+The worker does not know it is running a "document query." It just sees a thread that was started with a model plus either a branch point (`previous_response_id`) or a prepared input artifact, then executed through the normal thread runtime.
 
 ## What This Gives Us
 
@@ -139,13 +142,13 @@ Removed:
 - the `newDocumentExec()` call in `service.go`
 - `CloseIdleSessions` sweep in `recoverThreads`
 
-### Incision 6: Update the docs — PENDING
+### Incision 6: Update the docs — DONE ✓
 
-Rewrite:
+Aligned:
 
-- `docs/DOCUMENT_CHAT_INTEGRATION.md` — the document query flow section
-- `docs/WORKER_RUNTIME.md` — remove document executor references
-- `docs/ARCHITECTURE.md` — if needed
+- `docs/DOCUMENT_CHAT_INTEGRATION.md` — rewritten around the child-thread flow
+- `docs/WORKER_RUNTIME.md` — aligned with the post-executor worker shape
+- `docs/ARCHITECTURE.md` — already compatible with the shared thread runtime model
 
 ## What We Explicitly Will Not Do
 
@@ -164,14 +167,16 @@ The thread hierarchy naturally handles document queries:
 - **Parent thread**: the chat thread (or a subagent, if subagents gain document access later)
 - **Child thread**: the document query thread (structurally identical to a subagent child)
 
-The child thread does not know it is a "document query." It is just a thread that started from a `previous_response_id` with some input.
+The child thread does not know it is a "document query." It is just a thread that started as a normal thread, either from a branch point or from a prepared input artifact.
 
 ## Lineage After Surgery
 
-- A document's **shared base anchor** (`documents.base_response_id`) is the `last_response_id` of the most recent warmup child thread for that document
-- A document's **thread-local lineage** is the `last_response_id` of the most recent completed document-query child thread for that `(parent_thread_id, document_id)` pair
-- Follow-up queries to the same document in the same parent thread spawn a new child thread from the previous child's `last_response_id`
-- New parent threads reuse the shared base anchor if the model matches
+- A document's **thread-local lineage** is still stored in `thread_documents.latest_response_id` for now
+- `updateDocumentLineageFromChild` copies the completed child thread response ID into that thread-local lineage record
+- Follow-up queries to the same document in the same parent thread branch from that stored response ID
+- If `documents.base_response_id` already exists and `documents.base_model` matches, a new parent thread can branch from that anchor
+- If no usable lineage exists, the first query sends pages + task together via `PrepareKindDocumentQuery`
+- The current child-thread flow does **not** rebuild shared base anchors automatically; reintroducing that optimization is future work
 
 ## Files Changed
 
@@ -184,6 +189,5 @@ The child thread does not know it is a "document query." It is just a thread tha
 
 ## What Remains
 
-1. **Doc updates** (Incision 6): rewrite `DOCUMENT_CHAT_INTEGRATION.md`, `WORKER_RUNTIME.md`
-2. **Lineage simplification** (Incision 4): drop `thread_documents` lineage columns once child thread query proves stable
-3. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)
+1. **Lineage simplification** (Incision 4): drop `thread_documents` lineage columns once child thread query proves stable
+2. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)
