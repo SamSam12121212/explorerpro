@@ -94,87 +94,58 @@ Everything the thread model already provides, which the document executor curren
 
 ## Incision Plan
 
-### Incision 1: Make `query_attached_documents` spawn child threads
+### Incision 1: Make `query_attached_documents` spawn child threads — DONE ✓
 
-Change `handlePendingDocumentQuery` in `actor.go` to:
+Replaced `handlePendingDocumentQuery` (inline `docExec.Execute()`) with `startDocumentQueryGroup`:
 
-- resolve the `previous_response_id` for each requested document
-- build a child thread spec per document (warm branch mode)
-- delegate to `startSpawnGroup` — the same path used by `spawn_subagents`
-- set parent status to `waiting_children`
+- resolves `previous_response_id` for each document via `docActorLineageStore` (thread-local lineage from `thread_documents`, then shared base anchor from `documents`)
+- if no lineage exists, requests a `document_query` prepared input from `documenthandler` that bundles page images + task into one blob
+- builds one child thread per document with `store: true`, the resolved model, and `document_id` in metadata
+- delegates to the same spawn group + dispatch barrier used by `spawn_subagents`
+- parent status → `waiting_children`
 
-The child thread `thread.start` body should carry:
+New interfaces on the actor: `docActorDocStore`, `docActorLineageStore`, `docActorPreparedInputClient`.
 
-- `previous_response_id` from the document lineage
-- the task text as `initial_input`
-- `store: true`
-- the resolved document model
-- `prepared_input_ref` if warmup is needed
+### Incision 2: Warmup strategy — SIMPLIFIED
 
-This incision replaces the inline `a.docExec.Execute()` call with a normal spawn.
+Instead of a separate warmup-then-query two-phase flow, the first query for a document that has no lineage sends pages + task together in one shot via `PrepareKindDocumentQuery`. The response ID from that query becomes the thread-local lineage for follow-up queries. The shared base anchor optimization (cross-thread warmup reuse) can be re-added later.
 
-### Incision 2: Move document warmup to `documenthandler` prepared input
+### Incision 3: Kill `docexec.go` — DONE ✓
 
-The warmup step (sending all page images with `generate: false`) should happen **before** the child thread is spawned, not inside the child thread.
+Deleted:
 
-Flow:
-
-1. Actor resolves lineage for a document
-2. If no usable lineage exists, actor requests a warmup prepared input from `documenthandler`
-3. `documenthandler` returns a `prepared_input_ref` that contains the page images
-4. Actor creates the child thread with that `prepared_input_ref` and `generate: false`
-5. The child thread runs the warmup as a normal `thread.start` with `generate: false`
-6. After the warmup child completes, its `last_response_id` becomes the shared base anchor
-
-Alternatively, the warmup can be a separate child thread that completes before the query child is spawned. The simpler option is to let the query child thread carry the `prepared_input_ref` and `generate: false` and then re-query from its own `last_response_id`. But this means the child thread does two sends. The cleanest design is probably: warmup child (if needed) → query child (from warmup child's `last_response_id` or existing lineage).
-
-The exact warmup strategy can be decided during implementation. The important rule is: **the worker actor does not open document sockets itself.**
-
-### Incision 3: Kill `docexec.go`
-
-Delete:
-
-- `internal/worker/docexec.go`
-- `internal/worker/docexec_test.go`
+- `internal/worker/docexec.go` (18KB)
+- `internal/worker/docexec_test.go` (24KB)
 - all `documentExec` references in `service.go` and `actor.go`
 - the hot session cache, the `documentSession` type, the idle sweep logic
 - `streamDocumentResponse`, `extractTextDelta`, `extractResponseFailedError`
 - all `docExec` fields on `threadActorConfig`, `threadActor`, `Service`
+- the `documentSessionIdleTTL`, `documentSessionMaxTTL`, `documentQueryParallel` constants
 
-### Incision 4: Simplify the lineage model
+### Incision 4: Lineage — DEFERRED
 
-The `thread_documents` lineage columns (`latest_response_id`, `latest_model`, `initialized_at`, `last_used_at`) were built for the document executor's private lineage tracking.
+For now, `thread_documents` lineage columns are still used to track `latest_response_id` per `(parent_thread_id, document_id)`. The `handleChildResult` path now calls `updateDocumentLineageFromChild` which reads the child thread's metadata for `document_id` and updates `thread_documents.latest_response_id`. This gives us the same follow-up query behavior without any schema changes.
 
-After this surgery, document lineage is just thread lineage:
+The lineage simplification (dropping the columns, querying child threads directly) is a future incision.
 
-- the `last_response_id` of the most recent completed document-query child thread for a given `(parent_thread_id, document_id)` is the lineage
-- the shared base anchor on `documents` (`base_response_id`, `base_model`) stays — it is still useful for cross-thread warmup reuse
-- `thread_documents` shrinks back to being a join table (thread ↔ document attachment links)
+### Incision 5: Clean up actor.go — DONE ✓
 
-The lineage query becomes: "find the latest completed child thread for this parent thread and this document, and use its `last_response_id`."
+Removed:
 
-This may mean adding a `document_id` column to `threads` (or to `thread_documents` alongside a `child_thread_id`), so we can look up "the latest child thread that was a document query for document X in parent thread Y." The exact schema can be decided during implementation.
-
-### Incision 5: Clean up actor.go
-
-After the executor is gone, remove from `actor.go`:
-
+- `handlePendingDocumentQuery`
 - `executeDocumentQuery`
-- `handlePendingDocumentQuery` (replaced by spawn logic)
-- `closeDocumentSessions` calls throughout the actor lifecycle
-- the `docExec` nil-check stub fallback
+- `closeDocumentSessions` and all 6 call sites
+- `docExec` field from `threadActorConfig` and `threadActor`
+- the `newDocumentExec()` call in `service.go`
+- `CloseIdleSessions` sweep in `recoverThreads`
 
-The document tool detection in `streamUntilTerminal` stays, but the handling changes from "execute inline and self-publish tool output" to "spawn child threads and set status to waiting_children."
-
-### Incision 6: Update the docs
+### Incision 6: Update the docs — PENDING
 
 Rewrite:
 
 - `docs/DOCUMENT_CHAT_INTEGRATION.md` — the document query flow section
 - `docs/WORKER_RUNTIME.md` — remove document executor references
 - `docs/ARCHITECTURE.md` — if needed
-
-Delete any dead exploration docs that describe the old executor model.
 
 ## What We Explicitly Will Not Do
 
@@ -202,17 +173,17 @@ The child thread does not know it is a "document query." It is just a thread tha
 - Follow-up queries to the same document in the same parent thread spawn a new child thread from the previous child's `last_response_id`
 - New parent threads reuse the shared base anchor if the model matches
 
-## Relevant Files (Pre-Op)
+## Files Changed
 
-- `[internal/worker/docexec.go](/Users/detachedhead/explorer/internal/worker/docexec.go)` — the entire document executor (dies)
-- `[internal/worker/docexec_test.go](/Users/detachedhead/explorer/internal/worker/docexec_test.go)` — executor tests (dies)
-- `[internal/worker/actor.go](/Users/detachedhead/explorer/internal/worker/actor.go)` — `handlePendingDocumentQuery`, `executeDocumentQuery`, `closeDocumentSessions`
-- `[internal/worker/service.go](/Users/detachedhead/explorer/internal/worker/service.go)` — `docExec` creation and wiring
-- `[internal/threaddocstore/store.go](/Users/detachedhead/explorer/internal/threaddocstore/store.go)` — lineage columns
-- `[db/migrations/000009_document_lineage.sql](/Users/detachedhead/explorer/db/migrations/000009_document_lineage.sql)` — lineage migration
+- `internal/worker/docexec.go` — **DELETED** (the entire document executor)
+- `internal/worker/docexec_test.go` — **DELETED** (executor tests)
+- `internal/worker/actor.go` — new `startDocumentQueryGroup`, `updateDocumentLineageFromChild`; removed `handlePendingDocumentQuery`, `executeDocumentQuery`, `closeDocumentSessions`, `docExec` field
+- `internal/worker/service.go` — removed `docExec` creation/wiring, added `docStore`/`DocLineage`/`PreparedInputs` to actor config
+- `internal/doccmd/command.go` — added `PrepareKindDocumentQuery` constant
+- `internal/documenthandler/service.go` — new `prepareDocumentQueryInput` + `buildDocumentQueryInput` for pages+task prepared input
 
-## Minimal First Task
+## What Remains
 
-The smallest useful first cut is Incision 1: change `handlePendingDocumentQuery` to spawn child threads through `startSpawnGroup` instead of calling `a.docExec.Execute()` inline.
-
-That single change moves document execution from the private executor into the normal thread model. Everything else follows.
+1. **Doc updates** (Incision 6): rewrite `DOCUMENT_CHAT_INTEGRATION.md`, `WORKER_RUNTIME.md`
+2. **Lineage simplification** (Incision 4): drop `thread_documents` lineage columns once child thread query proves stable
+3. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)

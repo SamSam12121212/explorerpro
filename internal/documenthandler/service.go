@@ -193,7 +193,15 @@ func (s *Service) respondRuntimeContext(msg *nats.Msg, resp doccmd.RuntimeContex
 }
 
 func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputRequest) doccmd.PrepareInputResponse {
-	if strings.TrimSpace(req.Kind) != doccmd.PrepareKindWarmup {
+	var ref string
+	var err error
+
+	switch strings.TrimSpace(req.Kind) {
+	case doccmd.PrepareKindWarmup:
+		ref, err = s.prepareWarmupInput(ctx, req)
+	case doccmd.PrepareKindDocumentQuery:
+		ref, err = s.prepareDocumentQueryInput(ctx, req)
+	default:
 		return doccmd.PrepareInputResponse{
 			RequestID: req.RequestID,
 			Status:    doccmd.PrepareStatusError,
@@ -201,7 +209,6 @@ func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputReque
 		}
 	}
 
-	ref, err := s.prepareWarmupInput(ctx, req)
 	if err != nil {
 		return doccmd.PrepareInputResponse{
 			RequestID: req.RequestID,
@@ -245,6 +252,43 @@ func (s *Service) prepareWarmupInput(ctx context.Context, req doccmd.PrepareInpu
 		Version:    preparedinput.VersionV1,
 		Input:      inputJSON,
 		SourceKind: doccmd.PrepareKindWarmup,
+		CreatedAt:  s.now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return ref, nil
+}
+
+func (s *Service) prepareDocumentQueryInput(ctx context.Context, req doccmd.PrepareInputRequest) (string, error) {
+	doc, err := s.docs.Get(ctx, req.DocumentID)
+	if err != nil {
+		return "", fmt.Errorf("load document: %w", err)
+	}
+	if strings.TrimSpace(doc.ManifestRef) == "" {
+		return "", fmt.Errorf("document has no manifest (not yet split)")
+	}
+
+	manifest, err := s.loadManifest(ctx, doc.ManifestRef)
+	if err != nil {
+		return "", err
+	}
+
+	inputJSON, err := buildDocumentQueryInput(doc, manifest, req.Task)
+	if err != nil {
+		return "", err
+	}
+
+	store, err := preparedinput.NewStore(s.blob)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := store.Write(ctx, req.RequestID, preparedinput.Artifact{
+		Version:    preparedinput.VersionV1,
+		Input:      inputJSON,
+		SourceKind: doccmd.PrepareKindDocumentQuery,
 		CreatedAt:  s.now().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -364,6 +408,65 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal document warmup input: %w", err)
+	}
+
+	return inputJSON, nil
+}
+
+func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifest, task string) (json.RawMessage, error) {
+	content := make([]any, 0, len(manifest.Pages)*3+3)
+
+	content = append(content, map[string]any{
+		"type": "input_text",
+		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
+			escapePromptAttribute(doc.Filename),
+			escapePromptAttribute(doc.ID),
+			manifest.PageCount),
+	})
+
+	for _, page := range manifest.Pages {
+		content = append(content, map[string]any{
+			"type": "input_text",
+			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
+		})
+
+		image := map[string]any{
+			"type":      "image_ref",
+			"image_ref": page.ImageRef,
+			"detail":    "high",
+		}
+		if strings.TrimSpace(page.ContentType) != "" {
+			image["content_type"] = page.ContentType
+		}
+		content = append(content, image)
+
+		content = append(content, map[string]any{
+			"type": "input_text",
+			"text": "</pdf_page>",
+		})
+	}
+
+	content = append(content, map[string]any{
+		"type": "input_text",
+		"text": "</pdf>",
+	})
+
+	if strings.TrimSpace(task) != "" {
+		content = append(content, map[string]any{
+			"type": "input_text",
+			"text": task,
+		})
+	}
+
+	inputJSON, err := json.Marshal([]any{
+		map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": content,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal document query input: %w", err)
 	}
 
 	return inputJSON, nil

@@ -19,6 +19,7 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
+	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
@@ -49,7 +50,9 @@ type threadActorConfig struct {
 	History        threadHistoryStore
 	ThreadDocs     threadDocumentStore
 	DocRuntime     docRuntimeContextClient
-	DocExec        *documentExec
+	DocStore       docActorDocStore
+	DocLineage     docActorLineageStore
+	PreparedInputs docActorPreparedInputClient
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
@@ -88,19 +91,34 @@ type threadDocumentStore interface {
 	FilterAttached(ctx context.Context, threadID string, documentIDs []string) ([]string, error)
 }
 
+type docActorDocStore interface {
+	Get(ctx context.Context, id string) (docstore.Document, error)
+}
+
+type docActorLineageStore interface {
+	GetLineage(ctx context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error)
+	UpdateLineage(ctx context.Context, threadID, documentID, responseID, model string) error
+}
+
+type docActorPreparedInputClient interface {
+	PrepareInput(ctx context.Context, req doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error)
+}
+
 type threadActor struct {
-	threadID     string
-	workerID     string
-	logger       *slog.Logger
-	store        actorStore
-	history      threadHistoryStore
-	threadDocs   threadDocumentStore
-	docRuntime   docRuntimeContextClient
-	docExec      *documentExec
-	blob         *blobstore.LocalStore
-	cfg          openaiws.Config
-	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
-	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
+	threadID       string
+	workerID       string
+	logger         *slog.Logger
+	store          actorStore
+	history        threadHistoryStore
+	threadDocs     threadDocumentStore
+	docRuntime     docRuntimeContextClient
+	docStore       docActorDocStore
+	docLineage     docActorLineageStore
+	preparedInputs docActorPreparedInputClient
+	blob           *blobstore.LocalStore
+	cfg            openaiws.Config
+	publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	publishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 
 	sessionFactory func() *openaiws.Session
 
@@ -146,7 +164,9 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		history:        cfg.History,
 		threadDocs:     cfg.ThreadDocs,
 		docRuntime:     cfg.DocRuntime,
-		docExec:        cfg.DocExec,
+		docStore:       cfg.DocStore,
+		docLineage:     cfg.DocLineage,
+		preparedInputs: cfg.PreparedInputs,
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
 		publish:        cfg.Publish,
@@ -208,7 +228,6 @@ func (a *threadActor) Close() error {
 	if session != nil {
 		errs = append(errs, session.Close())
 	}
-	a.closeDocumentSessions(meta.ID)
 
 	if meta.ID != "" && meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		errs = append(errs, a.store.ReleaseOwnership(context.Background(), meta.ID, a.workerID, meta.SocketGeneration))
@@ -780,6 +799,9 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 	if err != nil {
 		return err
 	}
+	if stored {
+		a.updateDocumentLineageFromChild(body)
+	}
 	if !stored && !spawn.AggregateSubmittedAt.IsZero() {
 		return nil
 	}
@@ -1048,8 +1070,6 @@ func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
 			return err
 		}
 	}
-	a.closeDocumentSessions(meta.ID)
-
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
 
@@ -1073,7 +1093,6 @@ func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
 	a.stopIdleLoop()
 	a.stopLeaseLoop()
 	a.resetSession()
-	a.closeDocumentSessions(meta.ID)
 
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
@@ -1190,7 +1209,6 @@ func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMet
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
 	a.resetSession()
-	a.closeDocumentSessions(meta.ID)
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -1361,7 +1379,6 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	if session != nil {
 		_ = session.Close()
 	}
-	a.closeDocumentSessions(a.threadID)
 
 	a.cancel()
 }
@@ -1721,106 +1738,6 @@ func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 	return req, nil
 }
 
-func (a *threadActor) handlePendingDocumentQuery(meta threadstore.ThreadMeta, callID string, req docQueryRequest) error {
-	output := a.executeDocumentQuery(meta, req)
-
-	outputItem, err := json.Marshal(map[string]any{
-		"type":    "function_call_output",
-		"call_id": callID,
-		"output":  output,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal document query output: %w", err)
-	}
-
-	cmdID, err := idgen.New("cmd")
-	if err != nil {
-		return err
-	}
-
-	body, err := json.Marshal(agentcmd.SubmitToolOutputBody{
-		CallID:     callID,
-		OutputItem: outputItem,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal document query submit body: %w", err)
-	}
-
-	subject := agentcmd.WorkerCommandSubject(a.workerID, agentcmd.KindThreadSubmitToolOutput)
-	return a.publish(a.ctx, subject, agentcmd.Command{
-		CmdID:        cmdID,
-		Kind:         agentcmd.KindThreadSubmitToolOutput,
-		ThreadID:     meta.ID,
-		RootThreadID: meta.RootThreadID,
-		CausationID:  meta.LastResponseID,
-		Body:         body,
-	})
-}
-
-func (a *threadActor) executeDocumentQuery(meta threadstore.ThreadMeta, req docQueryRequest) string {
-	if a.threadDocs == nil {
-		return `{"error":"document store not available"}`
-	}
-
-	attached, err := a.threadDocs.FilterAttached(a.ctx, meta.ID, req.DocumentIDs)
-	if err != nil {
-		a.logger.Warn("failed to validate attached documents for tool call",
-			"thread_id", meta.ID,
-			"error", err,
-		)
-		return `{"error":"failed to validate attached documents"}`
-	}
-
-	attachedSet := make(map[string]bool, len(attached))
-	for _, id := range attached {
-		attachedSet[id] = true
-	}
-
-	var missing []string
-	for _, id := range req.DocumentIDs {
-		if !attachedSet[id] {
-			missing = append(missing, id)
-		}
-	}
-
-	if len(missing) > 0 {
-		result, _ := json.Marshal(map[string]any{
-			"error":        "some requested documents are not attached to this thread",
-			"missing_ids":  missing,
-			"attached_ids": attached,
-		})
-		return string(result)
-	}
-
-	if a.docExec == nil {
-		result, _ := json.Marshal(map[string]any{
-			"status":       "not_yet_implemented",
-			"document_ids": req.DocumentIDs,
-			"task":         req.Task,
-			"message":      "Document executor is not configured.",
-		})
-		return string(result)
-	}
-
-	a.logger.Info("executing document query",
-		"document_ids", req.DocumentIDs,
-		"task_length", len(req.Task),
-		"model", meta.Model,
-	)
-
-	results := a.docExec.Execute(a.ctx, docExecRequest{
-		ThreadID:    meta.ID,
-		DocumentIDs: req.DocumentIDs,
-		Task:        req.Task,
-		Model:       meta.Model,
-	})
-
-	resultJSON, _ := json.Marshal(map[string]any{
-		"results": results,
-	})
-	return string(resultJSON)
-}
-
 func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	a.mu.Lock()
 	session := a.session
@@ -1971,13 +1888,15 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
-			} else if pendingDocQuery != nil && !waitingTool {
-				if err := a.handlePendingDocumentQuery(meta, pendingDocQueryCallID, *pendingDocQuery); err != nil {
-					return err
-				}
-				meta.Status = threadstore.ThreadStatusWaitingTool
-			} else if waitingTool || pendingDocQuery != nil {
-				meta.Status = threadstore.ThreadStatusWaitingTool
+		} else if pendingDocQuery != nil && !waitingTool {
+			spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueryCallID, *pendingDocQuery)
+			if err != nil {
+				return err
+			}
+			meta.ActiveSpawnGroupID = spawnGroupID
+			meta.Status = threadstore.ThreadStatusWaitingChildren
+		} else if waitingTool {
+			meta.Status = threadstore.ThreadStatusWaitingTool
 			} else {
 				if meta.ParentThreadID != "" {
 					meta.Status = threadstore.ThreadStatusCompleted
@@ -2398,20 +2317,10 @@ func (a *threadActor) currentMeta() threadstore.ThreadMeta {
 	return a.meta
 }
 
-func (a *threadActor) closeDocumentSessions(threadID string) {
-	if a.docExec == nil || strings.TrimSpace(threadID) == "" {
-		return
-	}
-	if err := a.docExec.CloseThread(threadID); err != nil {
-		a.logger.Warn("failed to close document sessions", "thread_id", threadID, "error", err)
-	}
-}
-
 func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta) error {
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
 	a.resetSession()
-	a.closeDocumentSessions(meta.ID)
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -2681,6 +2590,226 @@ func decodeSpawnRequest(arguments string, parentMeta threadstore.ThreadMeta) (sp
 	}
 
 	return request, nil
+}
+
+func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta, parentCallID string, req docQueryRequest) (string, error) {
+	if a.threadDocs == nil {
+		return "", fmt.Errorf("document store not available")
+	}
+
+	attached, err := a.threadDocs.FilterAttached(a.ctx, parentMeta.ID, req.DocumentIDs)
+	if err != nil {
+		return "", fmt.Errorf("validate attached documents: %w", err)
+	}
+
+	attachedSet := make(map[string]bool, len(attached))
+	for _, id := range attached {
+		attachedSet[id] = true
+	}
+	var missing []string
+	for _, id := range req.DocumentIDs {
+		if !attachedSet[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("documents not attached to thread: %v", missing)
+	}
+
+	spawnGroupID, err := idgen.New("sg")
+	if err != nil {
+		return "", err
+	}
+
+	childThreadIDs := make([]string, 0, len(req.DocumentIDs))
+	childCommands := make([]agentcmd.Command, 0, len(req.DocumentIDs))
+
+	for _, docID := range req.DocumentIDs {
+		doc, err := a.docStore.Get(a.ctx, docID)
+		if err != nil {
+			return "", fmt.Errorf("load document %s: %w", docID, err)
+		}
+
+		model := doc.QueryModel
+		if model == "" {
+			model = parentMeta.Model
+		}
+
+		previousResponseID := ""
+		if a.docLineage != nil {
+			lineage, err := a.docLineage.GetLineage(a.ctx, parentMeta.ID, docID)
+			if err != nil {
+				return "", fmt.Errorf("get lineage for document %s: %w", docID, err)
+			}
+			previousResponseID = lineage.ResponseID
+		}
+		if previousResponseID == "" && doc.BaseResponseID != "" && doc.BaseModel == model {
+			previousResponseID = doc.BaseResponseID
+		}
+
+		var preparedInputRef string
+		if previousResponseID == "" {
+			reqID, err := idgen.New("prep")
+			if err != nil {
+				return "", err
+			}
+			resp, err := a.preparedInputs.PrepareInput(a.ctx, doccmd.PrepareInputRequest{
+				RequestID:  reqID,
+				Kind:       doccmd.PrepareKindDocumentQuery,
+				ThreadID:   parentMeta.ID,
+				DocumentID: docID,
+				Task:       req.Task,
+			})
+			if err != nil {
+				return "", fmt.Errorf("prepare input for document %s: %w", docID, err)
+			}
+			if resp.Status != doccmd.PrepareStatusOK {
+				return "", fmt.Errorf("prepare input for document %s failed: %s", docID, resp.Error)
+			}
+			preparedInputRef = resp.PreparedInputRef
+		}
+
+		threadID, err := idgen.New("thread")
+		if err != nil {
+			return "", err
+		}
+
+		cmdID, err := idgen.New("cmd")
+		if err != nil {
+			return "", err
+		}
+
+		startBody := map[string]any{
+			"model": model,
+			"store": true,
+		}
+
+		if preparedInputRef != "" {
+			startBody["prepared_input_ref"] = preparedInputRef
+		} else {
+			startBody["initial_input"] = []any{
+				map[string]any{
+					"type": "message",
+					"role": "user",
+					"content": []any{
+						map[string]any{
+							"type": "input_text",
+							"text": req.Task,
+						},
+					},
+				},
+			}
+			startBody["previous_response_id"] = previousResponseID
+		}
+
+		childMetadataJSON, err := json.Marshal(map[string]string{
+			"document_id":   docID,
+			"document_name": doc.Filename,
+			"spawn_mode":    "document_query",
+		})
+		if err != nil {
+			return "", fmt.Errorf("marshal child metadata: %w", err)
+		}
+
+		metadata, err := rawJSONToAny(childMetadataJSON)
+		if err != nil {
+			return "", fmt.Errorf("decode child metadata: %w", err)
+		}
+		startBody["metadata"] = metadata
+
+		body, err := json.Marshal(startBody)
+		if err != nil {
+			return "", fmt.Errorf("marshal child start body: %w", err)
+		}
+
+		childCommands = append(childCommands, agentcmd.Command{
+			CmdID:        cmdID,
+			Kind:         agentcmd.KindThreadStart,
+			ThreadID:     threadID,
+			RootThreadID: parentMeta.RootThreadID,
+			CausationID:  parentMeta.LastResponseID,
+			Body:         body,
+		})
+		childThreadIDs = append(childThreadIDs, threadID)
+
+		if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
+			ID:                 threadID,
+			RootThreadID:       parentMeta.RootThreadID,
+			ParentThreadID:     parentMeta.ID,
+			ParentCallID:       parentCallID,
+			Depth:              parentMeta.Depth + 1,
+			Status:             threadstore.ThreadStatusNew,
+			Model:              model,
+			MetadataJSON:       string(childMetadataJSON),
+			ActiveSpawnGroupID: spawnGroupID,
+			CreatedAt:          time.Now().UTC(),
+			UpdatedAt:          time.Now().UTC(),
+		}); err != nil {
+			return "", err
+		}
+
+		a.logger.Info("spawning document query child",
+			"child_thread_id", threadID,
+			"document_id", docID,
+			"model", model,
+			"has_lineage", previousResponseID != "",
+		)
+	}
+
+	if err := a.store.CreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
+		ID:             spawnGroupID,
+		ParentThreadID: parentMeta.ID,
+		ParentCallID:   parentCallID,
+		Expected:       len(childCommands),
+		Status:         threadstore.SpawnGroupStatusWaiting,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
+	}, childThreadIDs); err != nil {
+		return "", err
+	}
+
+	for _, cmd := range childCommands {
+		if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, cmd); err != nil {
+			return "", err
+		}
+	}
+
+	return spawnGroupID, nil
+}
+
+func (a *threadActor) updateDocumentLineageFromChild(body agentcmd.ChildResultBody) {
+	if a.docLineage == nil || body.ChildResponseID == "" {
+		return
+	}
+
+	childMeta, err := a.store.LoadThread(a.ctx, body.ChildThreadID)
+	if err != nil {
+		a.logger.Warn("failed to load child thread for lineage update",
+			"child_thread_id", body.ChildThreadID,
+			"error", err,
+		)
+		return
+	}
+
+	var metadata map[string]string
+	if childMeta.MetadataJSON != "" {
+		if err := json.Unmarshal([]byte(childMeta.MetadataJSON), &metadata); err != nil {
+			return
+		}
+	}
+
+	docID := metadata["document_id"]
+	if docID == "" {
+		return
+	}
+
+	if err := a.docLineage.UpdateLineage(a.ctx, a.threadID, docID, body.ChildResponseID, childMeta.Model); err != nil {
+		a.logger.Warn("failed to update document lineage from child",
+			"document_id", docID,
+			"child_thread_id", body.ChildThreadID,
+			"error", err,
+		)
+	}
 }
 
 func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentCallID string, request spawnRequest) (string, error) {

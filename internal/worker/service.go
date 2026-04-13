@@ -35,9 +35,6 @@ const (
 	socketRotateLead       = 5 * time.Minute
 	commandQueueSize       = 128
 	recoverySweepTTL       = 15 * time.Second
-	documentSessionIdleTTL = 10 * time.Minute
-	documentSessionMaxTTL  = 50 * time.Minute
-	documentQueryParallel  = 4
 )
 
 type Service struct {
@@ -51,7 +48,7 @@ type Service struct {
 	history      threadHistoryStore
 	threadDocs   *threaddocstore.Store
 	docClient    *documenthandler.Client
-	docExec      *documentExec
+	docStore     docActorDocStore
 	sweepStore   serviceSweepStore
 	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
 
@@ -78,23 +75,8 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	store := postgresstore.New(runtime.Postgres().Pool())
 	history := threadhistory.New(runtime.NATS().JetStream())
 	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
-	docStore := docstore.New(runtime.Postgres().Pool())
+	docs := docstore.New(runtime.Postgres().Pool())
 	docClient := documenthandler.NewClient(runtime.NATS().Conn())
-
-	sessionFactory := func() *openaiws.Session { return openaiws.NewSession(openAIConfig, dialer) }
-
-	docExec := newDocumentExec(documentExecConfig{
-		Logger:         logger.With("component", "docexec"),
-		Blob:           runtime.Blob(),
-		OpenAIConfig:   openAIConfig,
-		SessionFactory: sessionFactory,
-		Docs:           docStore,
-		PreparedInputs: docClient,
-		ThreadDocs:     threadDocs,
-		SessionIdleTTL: documentSessionIdleTTL,
-		SessionMaxTTL:  documentSessionMaxTTL,
-		MaxParallel:    documentQueryParallel,
-	})
 
 	workerID, err := newWorkerID()
 	if err != nil {
@@ -112,7 +94,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		history:      history,
 		threadDocs:   threadDocs,
 		docClient:    docClient,
-		docExec:      docExec,
+		docStore:     docs,
 		sweepStore:   store,
 		actors:       map[string]*threadActor{},
 	}, nil
@@ -269,7 +251,9 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		History:        s.history,
 		ThreadDocs:     s.threadDocs,
 		DocRuntime:     s.docClient,
-		DocExec:        s.docExec,
+		DocStore:       s.docStore,
+		DocLineage:     s.threadDocs,
+		PreparedInputs: s.docClient,
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,
 		Publish:        s.publishCommand,
@@ -400,12 +384,6 @@ func (s *Service) runRecoveryLoop(ctx context.Context) {
 }
 
 func (s *Service) recoverThreads(ctx context.Context) {
-	if s.docExec != nil {
-		if err := s.docExec.CloseIdleSessions(time.Now().UTC()); err != nil {
-			s.logger.Warn("failed to close idle document sessions", "error", err)
-		}
-	}
-
 	for _, status := range recoverySweepStatuses() {
 		threadIDs, err := s.sweepStore.ListThreadIDsByStatus(ctx, status)
 		if err != nil {

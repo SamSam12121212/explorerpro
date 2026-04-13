@@ -16,6 +16,7 @@ const (
 	RuntimeContextQueue            = "documenthandlers"
 	DefaultDPI                     = 150
 	PrepareKindWarmup              = "document_warmup"
+	PrepareKindDocumentQuery       = "document_query"
 	PrepareStatusOK                = "ok"
 	PrepareStatusError             = "error"
 	PrepareStatusNoop              = "noop"
