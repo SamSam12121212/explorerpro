@@ -137,3 +137,9 @@ type OwnerRecord struct {
 	ClaimedAt        time.Time
 	UpdatedAt        time.Time
 }
+
+type DocumentQueryLineage struct {
+	ChildThreadID string
+	ResponseID    string
+	Model         string
+}

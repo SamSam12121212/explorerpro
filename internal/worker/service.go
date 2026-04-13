@@ -28,13 +28,13 @@ import (
 )
 
 const (
-	commandAckWait         = 30 * time.Minute
-	workerLeaseTTL         = 2 * time.Minute
-	workerConsumerTTL      = 10 * time.Minute
-	socketExpiryTTL        = 55 * time.Minute
-	socketRotateLead       = 5 * time.Minute
-	commandQueueSize       = 128
-	recoverySweepTTL       = 15 * time.Second
+	commandAckWait    = 30 * time.Minute
+	workerLeaseTTL    = 2 * time.Minute
+	workerConsumerTTL = 10 * time.Minute
+	socketExpiryTTL   = 55 * time.Minute
+	socketRotateLead  = 5 * time.Minute
+	commandQueueSize  = 128
+	recoverySweepTTL  = 15 * time.Second
 )
 
 type Service struct {
@@ -252,7 +252,6 @@ func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
 		ThreadDocs:     s.threadDocs,
 		DocRuntime:     s.docClient,
 		DocStore:       s.docStore,
-		DocLineage:     s.threadDocs,
 		PreparedInputs: s.docClient,
 		Blob:           s.runtime.Blob(),
 		OpenAIConfig:   s.openAIConfig,

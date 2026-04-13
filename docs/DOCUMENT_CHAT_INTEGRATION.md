@@ -155,18 +155,18 @@ That path:
 - stores the child result in the spawn group
 - aggregates the final tool output when all children are done
 - resumes the parent thread normally
-- copies the completed child response ID back into thread-local document lineage
 
 ## Current Lineage Semantics
 
-### Thread-local lineage is active
+### Thread-local lineage is now derived from completed child threads
 
 Today, follow-up document queries inside one parent thread use:
 
-- `thread_documents.latest_response_id`
-- `thread_documents.latest_model`
+- the latest completed document-query child thread for that `(parent_thread_id, document_id)` pair
+- that child thread's `last_response_id`
+- that child thread's `model`
 
-That lineage is updated from the completed child thread result.
+`thread_documents` is back to attachment membership only.
 
 ### Shared base anchor is only an optional read path right now
 
@@ -201,7 +201,7 @@ The child thread then starts directly from that prepared input.
 ## Current Model Semantics
 
 - `documents.query_model` is the default model for a new document-query branch
-- if a thread already has document lineage, that thread keeps using `thread_documents.latest_model`
+- if a thread already has document lineage, that thread keeps using the latest completed document child's model
 - changing a document default model does not migrate existing thread-local chains
 - clearing a document base anchor does not clear thread-local lineage that already exists
 
@@ -251,17 +251,7 @@ Still true:
 
 ## Next Stages
 
-### Stage 1: Lineage simplification
-
-Stop using `thread_documents.latest_response_id/latest_model` as the follow-up query source of truth.
-
-Instead:
-
-- query completed document child threads directly
-- derive the next branch point from child-thread state
-- reduce `thread_documents` back toward attachment membership only
-
-### Stage 2: Shared base-anchor optimization
+### Stage 1: Shared base-anchor optimization
 
 If cross-thread first-query latency matters, reintroduce a real shared base-anchor write path.
 
@@ -271,7 +261,7 @@ That would mean:
 - versioning / invalidation rules for model and prompt changes
 - explicit document-change invalidation rules
 
-### Stage 3: Product/runtime hardening
+### Stage 2: Product/runtime hardening
 
 After the model is stable:
 
@@ -287,6 +277,6 @@ The important current mental model is:
 - runtime context advertises them to the model
 - document queries run as child threads
 - child threads are normal threads, not a special executor path
-- thread-local lineage still lives in `thread_documents` for now
+- thread-local lineage is derived from the latest completed document child thread
 - shared base-anchor reuse is only partial today
-- the next real implementation stage is lineage simplification
+- the next real implementation stage is shared base-anchor optimization

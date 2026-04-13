@@ -21,7 +21,6 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
-	"explorer/internal/threaddocstore"
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -1805,29 +1804,6 @@ func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Docum
 	return doc, nil
 }
 
-type fakeDocActorLineageStore struct {
-	lineage map[string]map[string]threaddocstore.DocumentLineage
-	updated []docLineageUpdate
-}
-
-type docLineageUpdate struct {
-	ThreadID, DocumentID, ResponseID, Model string
-}
-
-func (s *fakeDocActorLineageStore) GetLineage(_ context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error) {
-	if s.lineage != nil {
-		if byDoc, ok := s.lineage[threadID]; ok {
-			return byDoc[documentID], nil
-		}
-	}
-	return threaddocstore.DocumentLineage{}, nil
-}
-
-func (s *fakeDocActorLineageStore) UpdateLineage(_ context.Context, threadID, documentID, responseID, model string) error {
-	s.updated = append(s.updated, docLineageUpdate{threadID, documentID, responseID, model})
-	return nil
-}
-
 type fakeDocActorPreparedInputClient struct {
 	ref string
 	err error
@@ -2029,6 +2005,80 @@ func TestFilterSubagentToolsRemovesDocumentQueryTool(t *testing.T) {
 	}
 }
 
+func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:           "thread_parent",
+		RootThreadID: "thread_parent",
+	}
+	store.threads["thread_doc_old"] = threadstore.ThreadMeta{
+		ID:             "thread_doc_old",
+		RootThreadID:   "thread_parent",
+		ParentThreadID: "thread_parent",
+		Status:         threadstore.ThreadStatusCompleted,
+		Model:          "gpt-5.4-mini",
+		LastResponseID: "resp_doc_old",
+		MetadataJSON:   `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+		CreatedAt:      time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:      time.Date(2026, 4, 13, 10, 1, 0, 0, time.UTC),
+	}
+
+	var publishedCommands []agentcmd.Command
+	actor := &threadActor{
+		ctx:    context.Background(),
+		logger: testActorLogger(),
+		store:  store,
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+		docStore: &fakeDocActorDocStore{
+			docs: map[string]docstore.Document{
+				"doc_1": {
+					ID:         "doc_1",
+					Filename:   "report.pdf",
+					QueryModel: "gpt-5.4-nano",
+				},
+			},
+		},
+		preparedInputs: &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"},
+		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+			publishedCommands = append(publishedCommands, cmd)
+			return nil
+		},
+	}
+
+	meta := store.threads["thread_parent"]
+	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
+		DocumentIDs: []string{"doc_1"},
+		Task:        "summarize",
+	}); err != nil {
+		t.Fatalf("startDocumentQueryGroup() error = %v", err)
+	}
+
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(publishedCommands[0].Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	if body["model"] != "gpt-5.4-mini" {
+		t.Fatalf("model = %v, want gpt-5.4-mini", body["model"])
+	}
+	if body["previous_response_id"] != "resp_doc_old" {
+		t.Fatalf("previous_response_id = %v, want resp_doc_old", body["previous_response_id"])
+	}
+	if _, exists := body["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
+	}
+}
+
 func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	t.Parallel()
 
@@ -2067,7 +2117,6 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 			"doc_1": {ID: "doc_1", Filename: "report.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest"},
 		},
 	}
-	actor.docLineage = &fakeDocActorLineageStore{}
 	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
 	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
 		publishedCommands = append(publishedCommands, cmd)

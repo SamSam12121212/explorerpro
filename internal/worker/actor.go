@@ -19,7 +19,6 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
-	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
@@ -51,7 +50,6 @@ type threadActorConfig struct {
 	ThreadDocs     threadDocumentStore
 	DocRuntime     docRuntimeContextClient
 	DocStore       docActorDocStore
-	DocLineage     docActorLineageStore
 	PreparedInputs docActorPreparedInputClient
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
@@ -63,6 +61,7 @@ type threadActorConfig struct {
 type actorStore interface {
 	CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error
 	LoadThread(ctx context.Context, threadID string) (threadstore.ThreadMeta, error)
+	LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID, documentID string) (threadstore.DocumentQueryLineage, error)
 	SaveThread(ctx context.Context, meta threadstore.ThreadMeta) error
 	CommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error)
 	MarkCommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error)
@@ -95,11 +94,6 @@ type docActorDocStore interface {
 	Get(ctx context.Context, id string) (docstore.Document, error)
 }
 
-type docActorLineageStore interface {
-	GetLineage(ctx context.Context, threadID, documentID string) (threaddocstore.DocumentLineage, error)
-	UpdateLineage(ctx context.Context, threadID, documentID, responseID, model string) error
-}
-
 type docActorPreparedInputClient interface {
 	PrepareInput(ctx context.Context, req doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error)
 }
@@ -113,7 +107,6 @@ type threadActor struct {
 	threadDocs     threadDocumentStore
 	docRuntime     docRuntimeContextClient
 	docStore       docActorDocStore
-	docLineage     docActorLineageStore
 	preparedInputs docActorPreparedInputClient
 	blob           *blobstore.LocalStore
 	cfg            openaiws.Config
@@ -165,7 +158,6 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		threadDocs:     cfg.ThreadDocs,
 		docRuntime:     cfg.DocRuntime,
 		docStore:       cfg.DocStore,
-		docLineage:     cfg.DocLineage,
 		preparedInputs: cfg.PreparedInputs,
 		blob:           cfg.Blob,
 		cfg:            cfg.OpenAIConfig,
@@ -798,9 +790,6 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 	})
 	if err != nil {
 		return err
-	}
-	if stored {
-		a.updateDocumentLineageFromChild(body)
 	}
 	if !stored && !spawn.AggregateSubmittedAt.IsZero() {
 		return nil
@@ -1888,15 +1877,15 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
-		} else if pendingDocQuery != nil && !waitingTool {
-			spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueryCallID, *pendingDocQuery)
-			if err != nil {
-				return err
-			}
-			meta.ActiveSpawnGroupID = spawnGroupID
-			meta.Status = threadstore.ThreadStatusWaitingChildren
-		} else if waitingTool {
-			meta.Status = threadstore.ThreadStatusWaitingTool
+			} else if pendingDocQuery != nil && !waitingTool {
+				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueryCallID, *pendingDocQuery)
+				if err != nil {
+					return err
+				}
+				meta.ActiveSpawnGroupID = spawnGroupID
+				meta.Status = threadstore.ThreadStatusWaitingChildren
+			} else if waitingTool {
+				meta.Status = threadstore.ThreadStatusWaitingTool
 			} else {
 				if meta.ParentThreadID != "" {
 					meta.Status = threadstore.ThreadStatusCompleted
@@ -2636,12 +2625,15 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		}
 
 		previousResponseID := ""
-		if a.docLineage != nil {
-			lineage, err := a.docLineage.GetLineage(a.ctx, parentMeta.ID, docID)
-			if err != nil {
-				return "", fmt.Errorf("get lineage for document %s: %w", docID, err)
-			}
+		lineage, err := a.store.LoadLatestCompletedDocumentQueryLineage(a.ctx, parentMeta.ID, docID)
+		if err != nil && !errors.Is(err, threadstore.ErrThreadNotFound) {
+			return "", fmt.Errorf("get latest completed document child lineage for %s: %w", docID, err)
+		}
+		if err == nil {
 			previousResponseID = lineage.ResponseID
+			if strings.TrimSpace(lineage.Model) != "" {
+				model = lineage.Model
+			}
 		}
 		if previousResponseID == "" && doc.BaseResponseID != "" && doc.BaseModel == model {
 			previousResponseID = doc.BaseResponseID
@@ -2775,41 +2767,6 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	}
 
 	return spawnGroupID, nil
-}
-
-func (a *threadActor) updateDocumentLineageFromChild(body agentcmd.ChildResultBody) {
-	if a.docLineage == nil || body.ChildResponseID == "" {
-		return
-	}
-
-	childMeta, err := a.store.LoadThread(a.ctx, body.ChildThreadID)
-	if err != nil {
-		a.logger.Warn("failed to load child thread for lineage update",
-			"child_thread_id", body.ChildThreadID,
-			"error", err,
-		)
-		return
-	}
-
-	var metadata map[string]string
-	if childMeta.MetadataJSON != "" {
-		if err := json.Unmarshal([]byte(childMeta.MetadataJSON), &metadata); err != nil {
-			return
-		}
-	}
-
-	docID := metadata["document_id"]
-	if docID == "" {
-		return
-	}
-
-	if err := a.docLineage.UpdateLineage(a.ctx, a.threadID, docID, body.ChildResponseID, childMeta.Model); err != nil {
-		a.logger.Warn("failed to update document lineage from child",
-			"document_id", docID,
-			"child_thread_id", body.ChildThreadID,
-			"error", err,
-		)
-	}
 }
 
 func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentCallID string, request spawnRequest) (string, error) {

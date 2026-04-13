@@ -101,13 +101,13 @@ Everything the thread model already provides, which the document executor curren
 
 Replaced `handlePendingDocumentQuery` (inline `docExec.Execute()`) with `startDocumentQueryGroup`:
 
-- resolves `previous_response_id` for each document via `docActorLineageStore` (thread-local lineage from `thread_documents`, then shared base anchor from `documents`)
+- resolves `previous_response_id` for each document from the latest completed document-query child thread, then from the shared base anchor on `documents`
 - if no lineage exists, requests a `document_query` prepared input from `documenthandler` that bundles page images + task into one blob
 - builds one child thread per document with `store: true`, the resolved model, and `document_id` in metadata
 - delegates to the same spawn group + dispatch barrier used by `spawn_subagents`
 - parent status → `waiting_children`
 
-New interfaces on the actor: `docActorDocStore`, `docActorLineageStore`, `docActorPreparedInputClient`.
+New interfaces on the actor: `docActorDocStore`, `docActorPreparedInputClient`, plus a runtime-store lookup for latest completed document child lineage.
 
 ### Incision 2: Warmup strategy — SIMPLIFIED
 
@@ -125,11 +125,14 @@ Deleted:
 - all `docExec` fields on `threadActorConfig`, `threadActor`, `Service`
 - the `documentSessionIdleTTL`, `documentSessionMaxTTL`, `documentQueryParallel` constants
 
-### Incision 4: Lineage — DEFERRED
+### Incision 4: Lineage — DONE
 
-For now, `thread_documents` lineage columns are still used to track `latest_response_id` per `(parent_thread_id, document_id)`. The `handleChildResult` path now calls `updateDocumentLineageFromChild` which reads the child thread's metadata for `document_id` and updates `thread_documents.latest_response_id`. This gives us the same follow-up query behavior without any schema changes.
+Thread-local document follow-up state now comes directly from normal thread state:
 
-The lineage simplification (dropping the columns, querying child threads directly) is a future incision.
+- the worker queries the latest completed document-query child thread for `(parent_thread_id, document_id)`
+- follow-up queries branch from that child thread's `last_response_id`
+- sticky model reuse comes from that child thread's `model`
+- `thread_documents` lineage columns are gone
 
 ### Incision 5: Clean up actor.go — DONE
 
@@ -137,6 +140,7 @@ Removed:
 
 - `handlePendingDocumentQuery`
 - `executeDocumentQuery`
+- `updateDocumentLineageFromChild`
 - `closeDocumentSessions` and all 6 call sites
 - `docExec` field from `threadActorConfig` and `threadActor`
 - the `newDocumentExec()` call in `service.go`
@@ -171,9 +175,9 @@ The child thread does not know it is a "document query." It is just a thread tha
 
 ## Lineage After Surgery
 
-- A document's **thread-local lineage** is still stored in `thread_documents.latest_response_id` for now
-- `updateDocumentLineageFromChild` copies the completed child thread response ID into that thread-local lineage record
-- Follow-up queries to the same document in the same parent thread branch from that stored response ID
+- A document's **thread-local lineage** is the `last_response_id` of the latest completed document-query child thread for that `(parent_thread_id, document_id)` pair
+- Follow-up queries to the same document in the same parent thread branch from that child thread's `last_response_id`
+- Sticky model reuse comes from that child thread's stored `model`
 - If `documents.base_response_id` already exists and `documents.base_model` matches, a new parent thread can branch from that anchor
 - If no usable lineage exists, the first query sends pages + task together via `PrepareKindDocumentQuery`
 - The current child-thread flow does **not** rebuild shared base anchors automatically; reintroducing that optimization is future work
@@ -182,12 +186,12 @@ The child thread does not know it is a "document query." It is just a thread tha
 
 - `internal/worker/docexec.go` — **DELETED** (the entire document executor)
 - `internal/worker/docexec_test.go` — **DELETED** (executor tests)
-- `internal/worker/actor.go` — new `startDocumentQueryGroup`, `updateDocumentLineageFromChild`; removed `handlePendingDocumentQuery`, `executeDocumentQuery`, `closeDocumentSessions`, `docExec` field
-- `internal/worker/service.go` — removed `docExec` creation/wiring, added `docStore`/`DocLineage`/`PreparedInputs` to actor config
+- `internal/worker/actor.go` — new `startDocumentQueryGroup`; removed `handlePendingDocumentQuery`, `executeDocumentQuery`, `updateDocumentLineageFromChild`, `closeDocumentSessions`, `docExec` field
+- `internal/worker/service.go` — removed `docExec` creation/wiring and old doc-lineage wiring; kept `docStore` + `PreparedInputs` for the child-thread flow
 - `internal/doccmd/command.go` — added `PrepareKindDocumentQuery` constant
 - `internal/documenthandler/service.go` — new `prepareDocumentQueryInput` + `buildDocumentQueryInput` for pages+task prepared input
+- `db/migrations/000012_document_child_lineage.sql` — dropped `thread_documents` lineage columns and added an index for latest completed document-query child lookup
 
 ## What Remains
 
-1. **Lineage simplification** (Incision 4): drop `thread_documents` lineage columns once child thread query proves stable
-2. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)
+1. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)

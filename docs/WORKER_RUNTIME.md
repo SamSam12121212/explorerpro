@@ -41,7 +41,7 @@ Typical flow:
 - attached documents are discovered from `thread_documents` before `response.create`
 - runtime context appends `<available_documents>` and injects `query_attached_documents`
 - when the model calls that tool, the actor spawns one child thread per requested document
-- follow-up queries can branch from stored response lineage; first-touch queries can start from `prepared_input_ref`
+- follow-up queries branch from the latest completed document-query child lineage; first-touch queries can start from `prepared_input_ref`
 - document queries do not use a separate executor runtime
 
 ## Data Boundaries

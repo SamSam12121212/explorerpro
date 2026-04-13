@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,43 @@ func (s *fakeActorStore) LoadThread(_ context.Context, threadID string) (threads
 		return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
 	}
 	return meta, nil
+}
+
+func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Context, parentThreadID, documentID string) (threadstore.DocumentQueryLineage, error) {
+	var latest threadstore.ThreadMeta
+	found := false
+
+	for _, meta := range s.threads {
+		if meta.ParentThreadID != parentThreadID || meta.Status != threadstore.ThreadStatusCompleted || strings.TrimSpace(meta.LastResponseID) == "" {
+			continue
+		}
+
+		var metadata map[string]string
+		if strings.TrimSpace(meta.MetadataJSON) == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(meta.MetadataJSON), &metadata); err != nil {
+			s.t.Fatalf("json.Unmarshal(meta.MetadataJSON) error = %v", err)
+		}
+		if metadata["spawn_mode"] != "document_query" || metadata["document_id"] != documentID {
+			continue
+		}
+
+		if !found || meta.UpdatedAt.After(latest.UpdatedAt) || (meta.UpdatedAt.Equal(latest.UpdatedAt) && meta.CreatedAt.After(latest.CreatedAt)) || (meta.UpdatedAt.Equal(latest.UpdatedAt) && meta.CreatedAt.Equal(latest.CreatedAt) && meta.ID > latest.ID) {
+			latest = meta
+			found = true
+		}
+	}
+
+	if !found {
+		return threadstore.DocumentQueryLineage{}, threadstore.ErrThreadNotFound
+	}
+
+	return threadstore.DocumentQueryLineage{
+		ChildThreadID: latest.ID,
+		ResponseID:    latest.LastResponseID,
+		Model:         latest.Model,
+	}, nil
 }
 
 func (s *fakeActorStore) SaveThread(_ context.Context, meta threadstore.ThreadMeta) error {
