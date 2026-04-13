@@ -9,6 +9,8 @@ import (
 const (
 	StreamName              = "THREAD_EVENTS"
 	SubjectPrefix           = "thread.events."
+	SubjectWildcard         = SubjectPrefix + ">"
+	ConsumerName            = "thread-events-wsserver"
 	EventTypeClientResponse = "client.response.create"
 	EventTypeThreadSnapshot = "thread.snapshot"
 	EventTypeThreadItem     = "thread.item.appended"

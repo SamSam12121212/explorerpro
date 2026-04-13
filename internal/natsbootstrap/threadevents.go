@@ -11,13 +11,14 @@ import (
 
 func EnsureThreadEventsStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
-		Name:      threadevents.StreamName,
-		Subjects:  []string{threadevents.SubjectPrefix + ">"},
-		Storage:   nats.MemoryStorage,
-		Retention: nats.InterestPolicy,
-		MaxAge:    5 * time.Minute,
-		MaxMsgs:   -1,
-		MaxBytes:  -1,
+		Name:         threadevents.StreamName,
+		Subjects:     []string{threadevents.SubjectWildcard},
+		Storage:      nats.MemoryStorage,
+		Retention:    nats.WorkQueuePolicy,
+		MaxConsumers: 1,
+		MaxAge:       5 * time.Minute,
+		MaxMsgs:      -1,
+		MaxBytes:     -1,
 	}
 
 	info, err := js.StreamInfo(threadevents.StreamName)

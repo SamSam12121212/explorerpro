@@ -53,7 +53,7 @@ type threadActorConfig struct {
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
 	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
-	PublishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage)
+	PublishEvent   func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 	SessionFactory func() *openaiws.Session
 }
 
@@ -100,7 +100,7 @@ type threadActor struct {
 	blob         *blobstore.LocalStore
 	cfg          openaiws.Config
 	publish      func(ctx context.Context, subject string, cmd agentcmd.Command) error
-	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage)
+	publishEvent func(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 
 	sessionFactory func() *openaiws.Session
 
@@ -1433,7 +1433,9 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 	}
 
 	if a.publishEvent != nil {
-		a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", threadevents.EventTypeClientResponse, rawEvent)
+		if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", threadevents.EventTypeClientResponse, rawEvent); err != nil {
+			return err
+		}
 	}
 
 	return a.streamUntilTerminal(meta)
@@ -1879,22 +1881,26 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		responseID := event.ResolvedResponseID()
-		if a.history == nil {
-			return fmt.Errorf("thread history store is not configured")
-		}
-		if err := a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
-			ThreadID:         meta.ID,
-			SocketGeneration: meta.SocketGeneration,
-			EventType:        string(event.Type),
-			ResponseID:       responseID,
-			PayloadJSON:      string(event.Raw),
-			CreatedAt:        time.Now().UTC(),
-		}, ""); err != nil {
-			return err
+		if !strings.HasSuffix(string(event.Type), ".delta") {
+			if a.history == nil {
+				return fmt.Errorf("thread history store is not configured")
+			}
+			if err := a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
+				ThreadID:         meta.ID,
+				SocketGeneration: meta.SocketGeneration,
+				EventType:        string(event.Type),
+				ResponseID:       responseID,
+				PayloadJSON:      string(event.Raw),
+				CreatedAt:        time.Now().UTC(),
+			}, ""); err != nil {
+				return err
+			}
 		}
 
 		if a.publishEvent != nil {
-			a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), event.Raw)
+			if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), event.Raw); err != nil {
+				return err
+			}
 		}
 
 		if responsePayload := event.ResponsePayload(); len(responsePayload) > 0 {
@@ -2270,14 +2276,16 @@ func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
 		return
 	}
 
-	a.publishEvent(
+	if err := a.publishEvent(
 		a.ctx,
 		meta.ID,
 		meta.SocketGeneration,
 		fmt.Sprintf("snapshot-%d", meta.UpdatedAt.UnixNano()),
 		threadevents.EventTypeThreadSnapshot,
 		payload,
-	)
+	); err != nil {
+		a.logger.Warn("failed to publish thread snapshot event", "thread_id", meta.ID, "error", err)
+	}
 }
 
 func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
@@ -2291,14 +2299,16 @@ func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
 		return
 	}
 
-	a.publishEvent(
+	if err := a.publishEvent(
 		a.ctx,
 		a.threadID,
 		a.currentSocketGeneration(),
 		fmt.Sprintf("item-%d", item.Seq),
 		threadevents.EventTypeThreadItem,
 		payload,
-	)
+	); err != nil {
+		a.logger.Warn("failed to publish thread item event", "thread_id", a.threadID, "seq", item.Seq, "error", err)
+	}
 }
 
 func presentThreadItem(item threadstore.ItemRecord) map[string]any {

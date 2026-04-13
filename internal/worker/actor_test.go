@@ -2082,6 +2082,68 @@ func TestStreamUntilTerminalDispatchesDocumentQuery(t *testing.T) {
 	}
 }
 
+func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:               "thread_parent",
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.output_text.delta","response":{"id":"resp_1"},"delta":"hello"}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		},
+	}
+
+	var publishedEventTypes []string
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.publishEvent = func(_ context.Context, _ string, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+		publishedEventTypes = append(publishedEventTypes, eventType)
+		return nil
+	}
+
+	if err := actor.streamUntilTerminal(store.threads["thread_parent"]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	hasDelta := false
+	hasCompleted := false
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.output_text.delta" {
+			hasDelta = true
+		}
+		if eventType == "response.completed" {
+			hasCompleted = true
+		}
+	}
+	if !hasDelta || !hasCompleted {
+		t.Fatalf("publishedEventTypes = %#v, want response.output_text.delta and response.completed", publishedEventTypes)
+	}
+
+	for _, entry := range store.historyEvents {
+		if entry.EventType == "response.output_text.delta" {
+			t.Fatalf("delta event leaked into history: %#v", entry)
+		}
+	}
+
+	foundCompleted := false
+	for _, entry := range store.historyEvents {
+		if entry.EventType == "response.completed" {
+			foundCompleted = true
+			break
+		}
+	}
+	if !foundCompleted {
+		t.Fatalf("historyEvents = %#v, want response.completed entry", store.historyEvents)
+	}
+}
+
 func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	t.Parallel()
 

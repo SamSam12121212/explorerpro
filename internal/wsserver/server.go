@@ -25,6 +25,7 @@ type Config struct {
 
 type Server struct {
 	cfg    Config
+	hub    *eventHub
 	logger *slog.Logger
 	mux    *http.ServeMux
 }
@@ -32,6 +33,7 @@ type Server struct {
 func New(cfg Config) *Server {
 	s := &Server{
 		cfg:    cfg,
+		hub:    newEventHub(cfg.Logger, cfg.JS),
 		logger: cfg.Logger,
 		mux:    http.NewServeMux(),
 	}
@@ -43,6 +45,10 @@ func New(cfg Config) *Server {
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	if err := s.hub.Start(ctx); err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + s.cfg.Port,
 		Handler:           s.mux,
@@ -82,12 +88,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	client := newClient(clientConfig{
 		logger:    s.logger.With("thread_id", threadID),
-		js:        s.cfg.JS,
 		store:     s.cfg.Store,
 		docs:      s.cfg.Docs,
 		threadID:  threadID,
 		afterItem: afterItem,
 	})
 
-	client.serve(w, r)
+	client.serve(w, r, s.hub)
 }

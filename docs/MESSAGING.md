@@ -29,19 +29,26 @@ Each command carries:
 
 ### `THREAD_EVENTS`
 
-Live browser fanout for:
+Transient ws handoff queue for:
 
 - `thread.snapshot`
 - `thread.item.appended`
 - `client.response.create`
-- raw event deltas useful for the UI
+- raw OpenAI events needed by the live UI, including deltas
+
+Rules:
+
+- worker publishes once
+- wsserver is the only consumer
+- wsserver fans out to connected sockets
+- after wsserver ack, the message is gone
 
 ### `THREAD_HISTORY`
 
 Durable append-only history for:
 
 - the latest recoverable `client.response.create` checkpoint
-- raw socket events in sequence order
+- non-delta raw socket events in sequence order
 - recovery inspection and event-history APIs
 
 ## Worker Model

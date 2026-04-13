@@ -14,7 +14,7 @@ That includes:
 - raw response persistence
 - spawn-group coordination
 - durable checkpoint and raw event history writes
-- live event fanout
+- live event handoff to wsserver
 
 ## Command Handling
 
@@ -41,3 +41,6 @@ Typical flow:
 - prepared input artifacts are loaded by reference
 - large binary payloads stay in blob storage
 - recovery checkpoints stay in `THREAD_HISTORY`
+- response deltas do not stay in `THREAD_HISTORY`
+- response deltas do not go to Postgres
+- live UI events go through `THREAD_EVENTS` and disappear after wsserver ack

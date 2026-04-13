@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"explorer/internal/docstore"
@@ -19,14 +20,12 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/nats-io/nats.go"
 )
 
 const (
-	batchMaxEvents     = 10
-	batchFlushInterval = 50 * time.Millisecond
-	heartbeatInterval  = 20 * time.Second
-	itemsBatchLimit    = int64(200)
+	heartbeatInterval = 20 * time.Second
+	itemsBatchLimit   = int64(200)
+	writeTimeout      = 10 * time.Second
 )
 
 var wsOriginPatterns = []string{
@@ -37,7 +36,6 @@ var wsOriginPatterns = []string{
 
 type clientConfig struct {
 	logger    *slog.Logger
-	js        nats.JetStreamContext
 	store     *postgresstore.Store
 	docs      *threaddocstore.Store
 	threadID  string
@@ -46,14 +44,35 @@ type clientConfig struct {
 
 type client struct {
 	cfg clientConfig
+
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	conn      *websocket.Conn
+	afterItem string
+	closeOnce sync.Once
+}
+
+type clientPayloadError struct {
+	err error
+}
+
+func (e clientPayloadError) Error() string {
+	return e.err.Error()
+}
+
+func (e clientPayloadError) Unwrap() error {
+	return e.err
 }
 
 func newClient(cfg clientConfig) *client {
-	return &client{cfg: cfg}
+	return &client{
+		cfg:       cfg,
+		afterItem: cfg.afterItem,
+	}
 }
 
-// serve upgrades the HTTP connection to a WebSocket and runs the event loop.
-func (c *client) serve(w http.ResponseWriter, r *http.Request) {
+func (c *client) serve(w http.ResponseWriter, r *http.Request, hub *eventHub) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: wsOriginPatterns,
 	})
@@ -61,9 +80,12 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 		c.cfg.logger.Warn("failed to accept websocket", "error", err)
 		return
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "stream closed")
 
-	ctx := r.Context()
+	ctx, cancel := context.WithCancel(r.Context())
+	c.ctx = ctx
+	c.cancel = cancel
+	c.conn = conn
+	defer c.close(websocket.StatusNormalClosure, "stream closed")
 
 	meta, err := c.loadThread(ctx)
 	if err != nil {
@@ -71,136 +93,56 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := c.writeSnapshot(ctx, conn, meta); err != nil {
+	if err := c.writeSnapshot(ctx, meta); err != nil {
 		c.cfg.logger.Warn("failed to write initial snapshot", "error", err)
 		return
 	}
 
-	sub, err := c.cfg.js.SubscribeSync(
-		threadevents.Subject(c.cfg.threadID),
-		nats.DeliverNew(),
-		nats.AckExplicit(),
-		nats.AckWait(30*time.Second),
-	)
-	if err != nil {
-		c.cfg.logger.Warn("nats subscribe failed", "error", err)
-		return
-	}
-	defer func() { _ = sub.Unsubscribe() }()
-
-	c.runEventLoop(ctx, conn, sub)
-}
-
-// runEventLoop is the primary NATS-driven loop.
-func (c *client) runEventLoop(ctx context.Context, conn *websocket.Conn, sub *nats.Subscription) {
-	heartbeatTicker := time.NewTicker(heartbeatInterval)
-	defer heartbeatTicker.Stop()
-
-	batchTimer := time.NewTimer(batchFlushInterval)
-	batchTimer.Stop()
-	defer batchTimer.Stop()
-
-	afterItem := c.cfg.afterItem
-	var batch []json.RawMessage
-	batchActive := false
-
-	if err := c.writeItemsDelta(ctx, conn, &afterItem); err != nil {
+	if err := c.writeItemsDelta(ctx); err != nil {
 		c.logStreamError(err)
 		return
 	}
 
+	unregister := hub.register(c.cfg.threadID, c)
+	defer unregister()
+
+	// Close the registration gap with one last catch-up pass before we idle on heartbeats.
+	if err := c.writeItemsDelta(ctx); err != nil {
+		c.logStreamError(err)
+		return
+	}
+
+	c.run()
+}
+
+func (c *client) run() {
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
+	defer heartbeatTicker.Stop()
+
 	for {
 		select {
-		case <-ctx.Done():
+		case <-c.ctx.Done():
 			return
-
 		case <-heartbeatTicker.C:
-			if err := wsjson.Write(ctx, conn, map[string]any{
-				"type":      "thread.heartbeat",
-				"thread_id": c.cfg.threadID,
-				"time":      time.Now().UTC().Format(time.RFC3339),
-			}); err != nil {
+			if err := c.writeHeartbeat(); err != nil {
 				c.logStreamError(err)
 				return
-			}
-
-		case <-batchTimer.C:
-			if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
-				c.logStreamError(err)
-				return
-			}
-
-		default:
-			msg, err := sub.NextMsg(50 * time.Millisecond)
-			if err != nil {
-				if errors.Is(err, nats.ErrTimeout) {
-					continue
-				}
-				if errors.Is(err, nats.ErrBadSubscription) {
-					return
-				}
-				c.cfg.logger.Warn("nats receive error", "error", err)
-				continue
-			}
-
-			_ = msg.Ack()
-
-			env, err := threadevents.Decode(msg.Data)
-			if err != nil {
-				c.cfg.logger.Warn("failed to decode nats event", "error", err)
-				continue
-			}
-
-			if !isDeltaEventType(env.EventType) {
-				c.cfg.logger.Info("wsserver received event", "event_type", env.EventType, "thread_id", env.ThreadID)
-			}
-
-			switch env.EventType {
-			case threadevents.EventTypeThreadItem:
-				if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
-					c.logStreamError(err)
-					return
-				}
-				if err := c.writeStreamItem(ctx, conn, &afterItem, env.Payload); err != nil {
-					c.logStreamError(err)
-					return
-				}
-			case threadevents.EventTypeThreadSnapshot:
-				if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
-					c.logStreamError(err)
-					return
-				}
-				if err := c.writeStreamSnapshot(ctx, conn, env.Payload); err != nil {
-					c.logStreamError(err)
-					return
-				}
-			default:
-				if isDeltaEventType(env.EventType) {
-					batch = append(batch, env.Payload)
-
-					if !batchActive {
-						batchTimer.Reset(batchFlushInterval)
-						batchActive = true
-					}
-
-					if len(batch) >= batchMaxEvents {
-						if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
-							c.logStreamError(err)
-							return
-						}
-					}
-				} else {
-					if err := c.flushPendingEventBatch(ctx, conn, &batch, &batchActive, batchTimer); err != nil {
-						c.logStreamError(err)
-						return
-					}
-					if err := c.writeStreamEvent(ctx, conn, env.Payload); err != nil {
-						c.logStreamError(err)
-						return
-					}
-				}
 			}
 		}
+	}
+}
+
+func (c *client) handleEvent(env threadevents.EventEnvelope) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	switch env.EventType {
+	case threadevents.EventTypeThreadItem:
+		return c.writeStreamItemLocked(env.Payload)
+	case threadevents.EventTypeThreadSnapshot:
+		return c.writeStreamSnapshotLocked(env.Payload)
+	default:
+		return c.writeStreamEventLocked(env.Payload)
 	}
 }
 
@@ -208,7 +150,10 @@ func (c *client) loadThread(ctx context.Context) (threadstore.ThreadMeta, error)
 	return c.cfg.store.LoadThread(ctx, c.cfg.threadID)
 }
 
-func (c *client) writeSnapshot(ctx context.Context, conn *websocket.Conn, meta threadstore.ThreadMeta) error {
+func (c *client) writeSnapshot(ctx context.Context, meta threadstore.ThreadMeta) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	attachedDocuments, err := c.loadAttachedDocuments(ctx, meta.ID)
 	if err != nil {
 		return err
@@ -231,23 +176,25 @@ func (c *client) writeSnapshot(ctx context.Context, conn *websocket.Conn, meta t
 		}
 	}
 
-	return wsjson.Write(ctx, conn, msg)
+	return c.writeJSONLocked(msg)
 }
 
 func (c *client) loadSpawnGroup(ctx context.Context, id string) (threadstore.SpawnGroupMeta, error) {
 	return c.cfg.store.LoadSpawnGroup(ctx, id)
 }
 
-func (c *client) writeItemsDelta(ctx context.Context, conn *websocket.Conn, afterItem *string) error {
+func (c *client) writeItemsDelta(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	options := threadstore.ListOptions{
 		Limit: itemsBatchLimit,
-		After: *afterItem,
+		After: c.afterItem,
 	}
 	items, err := c.cfg.store.ListItems(ctx, c.cfg.threadID, options)
 	if err != nil {
 		return err
 	}
-
 	if len(items) == 0 {
 		return nil
 	}
@@ -259,15 +206,16 @@ func (c *client) writeItemsDelta(ctx context.Context, conn *websocket.Conn, afte
 
 	last := items[len(items)-1]
 	cursor := strconv.FormatInt(last.Seq, 10)
-	*afterItem = cursor
+	pageAfter := c.afterItem
+	c.afterItem = cursor
 
-	return wsjson.Write(ctx, conn, map[string]any{
+	return c.writeJSONLocked(map[string]any{
 		"type":      "thread.items.delta",
 		"thread_id": c.cfg.threadID,
 		"items":     presented,
 		"page": map[string]any{
 			"limit":        itemsBatchLimit,
-			"after":        options.After,
+			"after":        pageAfter,
 			"count":        len(items),
 			"first_cursor": strconv.FormatInt(items[0].Seq, 10),
 			"last_cursor":  cursor,
@@ -295,10 +243,10 @@ type streamSnapshotPayload struct {
 	UpdatedAt          string `json:"updated_at,omitempty"`
 }
 
-func (c *client) writeStreamItem(ctx context.Context, conn *websocket.Conn, afterItem *string, raw json.RawMessage) error {
+func (c *client) writeStreamItemLocked(raw json.RawMessage) error {
 	var item streamItemPayload
 	if err := json.Unmarshal(raw, &item); err != nil {
-		return err
+		return clientPayloadError{err: err}
 	}
 
 	cursor := strings.TrimSpace(item.Cursor)
@@ -307,14 +255,14 @@ func (c *client) writeStreamItem(ctx context.Context, conn *websocket.Conn, afte
 		item.Cursor = cursor
 	}
 
-	if after := parseCursor(*afterItem); after > 0 && item.Seq <= after {
+	if after := parseCursor(c.afterItem); after > 0 && item.Seq <= after {
 		return nil
 	}
 
-	pageAfter := *afterItem
-	*afterItem = cursor
+	pageAfter := c.afterItem
+	c.afterItem = cursor
 
-	return wsjson.Write(ctx, conn, map[string]any{
+	return c.writeJSONLocked(map[string]any{
 		"type":      "thread.items.delta",
 		"thread_id": c.cfg.threadID,
 		"items":     []streamItemPayload{item},
@@ -328,10 +276,10 @@ func (c *client) writeStreamItem(ctx context.Context, conn *websocket.Conn, afte
 	})
 }
 
-func (c *client) writeStreamSnapshot(ctx context.Context, conn *websocket.Conn, raw json.RawMessage) error {
+func (c *client) writeStreamSnapshotLocked(raw json.RawMessage) error {
 	var snapshot streamSnapshotPayload
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return err
+		return clientPayloadError{err: err}
 	}
 
 	threadID := strings.TrimSpace(snapshot.ID)
@@ -339,12 +287,12 @@ func (c *client) writeStreamSnapshot(ctx context.Context, conn *websocket.Conn, 
 		threadID = c.cfg.threadID
 	}
 
-	attachedDocuments, err := c.loadAttachedDocuments(ctx, threadID)
+	attachedDocuments, err := c.loadAttachedDocuments(c.ctx, threadID)
 	if err != nil {
 		return err
 	}
 
-	return wsjson.Write(ctx, conn, map[string]any{
+	return c.writeJSONLocked(map[string]any{
 		"type":               "thread.snapshot",
 		"thread_id":          threadID,
 		"thread":             snapshot,
@@ -365,45 +313,44 @@ func (c *client) loadAttachedDocuments(ctx context.Context, threadID string) ([]
 	return presentAttachedDocuments(documents), nil
 }
 
-func (c *client) flushPendingEventBatch(
-	ctx context.Context,
-	conn *websocket.Conn,
-	batch *[]json.RawMessage,
-	batchActive *bool,
-	batchTimer *time.Timer,
-) error {
-	if *batchActive {
-		if !batchTimer.Stop() {
-			select {
-			case <-batchTimer.C:
-			default:
-			}
-		}
+func (c *client) writeStreamEventLocked(raw json.RawMessage) error {
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return clientPayloadError{err: err}
 	}
 
-	if len(*batch) > 0 {
-		if err := c.flushEventBatch(ctx, conn, *batch); err != nil {
-			return err
-		}
-		*batch = (*batch)[:0]
-	}
-	*batchActive = false
-	return nil
-}
-
-func (c *client) flushEventBatch(ctx context.Context, conn *websocket.Conn, events []json.RawMessage) error {
-	decoded := make([]any, 0, len(events))
-	for _, raw := range events {
-		var v any
-		if err := json.Unmarshal(raw, &v); err == nil {
-			decoded = append(decoded, v)
-		}
-	}
-
-	return wsjson.Write(ctx, conn, map[string]any{
+	return c.writeJSONLocked(map[string]any{
 		"type":      "thread.events.delta",
 		"thread_id": c.cfg.threadID,
-		"events":    decoded,
+		"events":    []any{decoded},
+	})
+}
+
+func (c *client) writeHeartbeat() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.writeJSONLocked(map[string]any{
+		"type":      "thread.heartbeat",
+		"thread_id": c.cfg.threadID,
+		"time":      time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (c *client) writeJSONLocked(payload any) error {
+	writeCtx, cancel := context.WithTimeout(c.ctx, writeTimeout)
+	defer cancel()
+	return wsjson.Write(writeCtx, c.conn, payload)
+}
+
+func (c *client) close(code websocket.StatusCode, reason string) {
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		if c.conn != nil {
+			_ = c.conn.Close(code, reason)
+		}
 	})
 }
 
@@ -418,28 +365,15 @@ func (c *client) logStreamError(err error) {
 	c.cfg.logger.Warn("websocket stream error", "error", err)
 }
 
-func isTerminalEventType(eventType string) bool {
-	switch eventType {
-	case "response.completed", "response.failed", "response.incomplete":
-		return true
+func websocketCloseStatus(err error) websocket.StatusCode {
+	status := websocket.CloseStatus(err)
+	if status != -1 {
+		return status
 	}
-	return false
-}
-
-func isDeltaEventType(eventType string) bool {
-	return strings.HasSuffix(eventType, ".delta")
-}
-
-func (c *client) writeStreamEvent(ctx context.Context, conn *websocket.Conn, raw json.RawMessage) error {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return err
+	if errors.Is(err, context.Canceled) {
+		return websocket.StatusGoingAway
 	}
-	return wsjson.Write(ctx, conn, map[string]any{
-		"type":      "thread.events.delta",
-		"thread_id": c.cfg.threadID,
-		"events":    []any{v},
-	})
+	return websocket.StatusInternalError
 }
 
 func parseCursor(raw string) int64 {
@@ -449,8 +383,6 @@ func parseCursor(raw string) int64 {
 	}
 	return value
 }
-
-// Presentation helpers — mirrors internal/httpserver/command_api.go presenters.
 
 func presentThreadMeta(meta threadstore.ThreadMeta) map[string]any {
 	response := map[string]any{

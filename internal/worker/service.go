@@ -331,7 +331,7 @@ func rawJSONToAny(raw json.RawMessage) (any, error) {
 	return decoded, nil
 }
 
-func (s *Service) publishThreadEvent(_ context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) {
+func (s *Service) publishThreadEvent(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error {
 	env := threadevents.EventEnvelope{
 		ThreadID:         threadID,
 		EventType:        eventType,
@@ -342,8 +342,7 @@ func (s *Service) publishThreadEvent(_ context.Context, threadID string, socketG
 
 	data, err := threadevents.Encode(env)
 	if err != nil {
-		s.logger.Warn("failed to encode thread event for nats", "thread_id", threadID, "error", err)
-		return
+		return fmt.Errorf("encode thread event for %s: %w", threadID, err)
 	}
 
 	msg := &nats.Msg{
@@ -353,9 +352,11 @@ func (s *Service) publishThreadEvent(_ context.Context, threadID string, socketG
 	}
 	msg.Header.Set("Nats-Msg-Id", threadevents.MsgID(threadID, socketGeneration, key))
 
-	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
-		s.logger.Warn("failed to publish thread event to nats", "thread_id", threadID, "event_type", eventType, "error", err)
+	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg, nats.Context(ctx)); err != nil {
+		return fmt.Errorf("publish thread event for %s (%s): %w", threadID, eventType, err)
 	}
+
+	return nil
 }
 
 func (s *Service) publishCommand(ctx context.Context, subject string, cmd agentcmd.Command) error {
