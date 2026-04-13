@@ -40,7 +40,7 @@ Owns document-adjacent runtime preparation:
 
 - build runtime-context augmentation for attached documents
 - inject the `query_attached_documents` tool definition
-- build prepared input artifacts for first-touch document queries
+- build prepared input artifacts for first-touch document warmups
 
 It does not open OpenAI sockets and does not execute document queries.
 
@@ -53,7 +53,7 @@ Owns OpenAI execution:
 - detect `query_attached_documents`
 - spawn one child thread per document
 - regroup child results
-- update thread-local document lineage
+- update shared base anchors when warmups complete
 
 ### storage
 
@@ -67,10 +67,9 @@ Owns OpenAI execution:
 
 Attached documents are persisted in `thread_documents`.
 
-That relation currently serves two roles:
+That relation is back to a single role:
 
 - attachment membership for a thread
-- thread-local document lineage for that `(thread_id, document_id)` pair
 
 ### 2. Runtime context is applied before send
 
@@ -123,14 +122,21 @@ Instead it:
 - chooses a model per document
 - resolves `previous_response_id` from thread-local lineage first
 - falls back to a compatible shared base anchor if one already exists on the document row
-- if no usable lineage exists, asks `documenthandler` for a `PrepareKindDocumentQuery` artifact that bundles document pages plus the task
+- if no usable lineage exists, asks `documenthandler` for a `PrepareKindWarmup` artifact that bundles the document pages
 - creates one child thread per document
 - moves the parent thread to `waiting_children`
 
-Each child thread starts in one of two ways:
+Each document path starts in one of three ways:
 
 - `previous_response_id` + `initial_input` containing the task
-- `prepared_input_ref` when the document has no usable prior lineage
+- direct branch from `documents.base_response_id` when the shared base anchor model matches
+- a warmup child from `prepared_input_ref` when the document has no usable prior lineage
+
+If the warmup child completes successfully, the actor:
+
+- persists `documents.base_response_id` and `documents.base_model`
+- spawns the real document-query child from that warmup response
+- keeps the parent in the same spawn barrier until the real query child finishes
 
 ### 5. Child threads are normal threads
 
@@ -152,7 +158,8 @@ When a child finishes, the parent handles it through the same child-result path 
 
 That path:
 
-- stores the child result in the spawn group
+- stores terminal child results in the spawn group
+- treats successful document warmup children as bootstrap steps, not final results
 - aggregates the final tool output when all children are done
 - resumes the parent thread normally
 
@@ -168,35 +175,29 @@ Today, follow-up document queries inside one parent thread use:
 
 `thread_documents` is back to attachment membership only.
 
-### Shared base anchor is only an optional read path right now
+### Shared base anchor is now a live bootstrap path
 
-The current actor will branch from:
+The current actor will:
 
-- `documents.base_response_id`
-- only if `documents.base_model` matches the chosen model
+- branch from `documents.base_response_id`
+- only when `documents.base_model` matches the chosen model
+- create or refresh that shared base anchor when a first-touch warmup child completes
 
-But the current child-thread document-query flow does not create or rebuild new shared base anchors.
+That means a later parent thread can skip page bootstrap entirely if a compatible base anchor already exists.
 
-That means:
+### First-touch bootstrap is two-phase when no anchor exists
 
-- the read path exists
-- the schema and API surface exist
-- the automatic write path is not currently part of the live query flow
+If there is no usable `previous_response_id`, the worker now does a deliberate warmup-then-query handoff:
 
-### First-touch bootstrap is now one-shot
-
-If there is no usable `previous_response_id`, the worker does not do a separate warmup-then-query dance.
-
-Instead it asks `documenthandler` for a `document_query` prepared input artifact that contains:
-
+1. ask `documenthandler` for a `PrepareKindWarmup` artifact that contains:
 - the document wrapper text
 - page markers
 - page image refs
-- the user task
+2. start a warmup child from that prepared input
+3. persist the warmup response as the shared base anchor
+4. start the real query child from that new `previous_response_id`
 
-The child thread then starts directly from that prepared input.
-
-`PrepareKindWarmup` still exists as a helper shape, but it is not the path used by the current document-query flow.
+The actual task text only enters on the real query child.
 
 ## Current Model Semantics
 
@@ -251,23 +252,22 @@ Still true:
 
 ## Next Stages
 
-### Stage 1: Shared base-anchor optimization
+### Stage 1: Product/runtime hardening
 
-If cross-thread first-query latency matters, reintroduce a real shared base-anchor write path.
+Now that the shared base-anchor path is live, the next engineering work is hardening it in production.
 
-That would mean:
-
-- a deliberate policy for creating `documents.base_response_id`
-- versioning / invalidation rules for model and prompt changes
-- explicit document-change invalidation rules
-
-### Stage 2: Product/runtime hardening
-
-After the model is stable:
+That means:
 
 - live validation with real PDFs and real OpenAI traffic
-- observability around document-query fan-out and failure modes
+- observability around warmup frequency, anchor reuse rate, and failure modes
+- recovery testing for warmup-completed / query-pending edge cases
+
+### Stage 2: Product/UX follow-through
+
+After the runtime proves out:
+
 - attachment-management UX beyond attach-on-send
+- better visibility into per-document query model / base-anchor state
 
 ## Short Summary
 
@@ -278,5 +278,5 @@ The important current mental model is:
 - document queries run as child threads
 - child threads are normal threads, not a special executor path
 - thread-local lineage is derived from the latest completed document child thread
-- shared base-anchor reuse is only partial today
-- the next real implementation stage is shared base-anchor optimization
+- shared base anchors are now created on warmup completion and reused across parent threads
+- the next real implementation stage is product/runtime hardening

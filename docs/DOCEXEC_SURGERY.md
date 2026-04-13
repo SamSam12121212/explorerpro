@@ -72,9 +72,10 @@ After surgery, the document query flow will be:
   - validates the requested document IDs are attached
   - resolves the model for each document
   - resolves `previous_response_id` from thread-local lineage, then from a compatible shared base anchor if present
-  - if no usable lineage exists, requests a `document_query` prepared input from `documenthandler`
-  - creates one child thread per document
-  - each child thread starts either from `previous_response_id` + task input, or from `prepared_input_ref`, with `store: true`
+  - if no usable lineage exists, requests a `warmup` prepared input from `documenthandler`
+  - creates one child thread per document immediately, either a real query child or a warmup child
+  - a successful warmup child persists `documents.base_response_id` / `documents.base_model` and then spawns the real query child
+  - each real query child starts from `previous_response_id` + task input with `store: true`
   - publishes `thread.start` commands for each child
   - creates a spawn group, sets parent status to `waiting_children`
 4. Each child thread is a **normal thread** — it gets claimed by a worker, opens a normal socket, runs `sendAndStream` → `streamUntilTerminal`, persists items and events, publishes `thread.child_completed`
@@ -102,16 +103,23 @@ Everything the thread model already provides, which the document executor curren
 Replaced `handlePendingDocumentQuery` (inline `docExec.Execute()`) with `startDocumentQueryGroup`:
 
 - resolves `previous_response_id` for each document from the latest completed document-query child thread, then from the shared base anchor on `documents`
-- if no lineage exists, requests a `document_query` prepared input from `documenthandler` that bundles page images + task into one blob
+- if no lineage exists, requests a `warmup` prepared input from `documenthandler` that bundles the document pages
 - builds one child thread per document with `store: true`, the resolved model, and `document_id` in metadata
 - delegates to the same spawn group + dispatch barrier used by `spawn_subagents`
 - parent status → `waiting_children`
 
 New interfaces on the actor: `docActorDocStore`, `docActorPreparedInputClient`, plus a runtime-store lookup for latest completed document child lineage.
 
-### Incision 2: Warmup strategy — SIMPLIFIED
+### Incision 2: Warmup strategy — DONE
 
-Instead of a separate warmup-then-query two-phase flow, the first query for a document that has no lineage sends pages + task together in one shot via `PrepareKindDocumentQuery`. The response ID from that query becomes the thread-local lineage for follow-up queries. The shared base anchor optimization (cross-thread warmup reuse) can be re-added later.
+The first query for a document that has no usable lineage now does a deliberate two-phase bootstrap:
+
+- request `PrepareKindWarmup` from `documenthandler`
+- run a warmup child thread from that prepared input
+- persist the warmup response into `documents.base_response_id` / `documents.base_model`
+- spawn the real query child from that response ID
+
+That reintroduces cross-thread shared base-anchor reuse without reviving a private executor runtime.
 
 ### Incision 3: Kill `docexec.go` — DONE
 
@@ -179,8 +187,8 @@ The child thread does not know it is a "document query." It is just a thread tha
 - Follow-up queries to the same document in the same parent thread branch from that child thread's `last_response_id`
 - Sticky model reuse comes from that child thread's stored `model`
 - If `documents.base_response_id` already exists and `documents.base_model` matches, a new parent thread can branch from that anchor
-- If no usable lineage exists, the first query sends pages + task together via `PrepareKindDocumentQuery`
-- The current child-thread flow does **not** rebuild shared base anchors automatically; reintroducing that optimization is future work
+- If no usable lineage exists, the first query warms the document first, then spawns the real query child from that new anchor
+- Successful warmup children rebuild shared base anchors automatically
 
 ## Files Changed
 
@@ -188,10 +196,10 @@ The child thread does not know it is a "document query." It is just a thread tha
 - `internal/worker/docexec_test.go` — **DELETED** (executor tests)
 - `internal/worker/actor.go` — new `startDocumentQueryGroup`; removed `handlePendingDocumentQuery`, `executeDocumentQuery`, `updateDocumentLineageFromChild`, `closeDocumentSessions`, `docExec` field
 - `internal/worker/service.go` — removed `docExec` creation/wiring and old doc-lineage wiring; kept `docStore` + `PreparedInputs` for the child-thread flow
-- `internal/doccmd/command.go` — added `PrepareKindDocumentQuery` constant
-- `internal/documenthandler/service.go` — new `prepareDocumentQueryInput` + `buildDocumentQueryInput` for pages+task prepared input
+- `internal/doccmd/command.go` — document prep kinds used by the child-thread flow, including warmup
+- `internal/documenthandler/service.go` — prepared input builders used for document warmup / query bootstrap
 - `db/migrations/000012_document_child_lineage.sql` — dropped `thread_documents` lineage columns and added an index for latest completed document-query child lookup
 
 ## What Remains
 
-1. **Shared base anchor optimization**: re-add cross-thread warmup reuse for first queries (skipped for POC simplicity)
+1. **Product/runtime hardening**: validate real-PDF behavior, anchor reuse, and warmup/query recovery edges under production-like load

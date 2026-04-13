@@ -97,6 +97,56 @@ func TestAggregateSpawnOutputItem(t *testing.T) {
 	}
 }
 
+func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
+	t.Parallel()
+
+	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
+		ID:           "sg_123",
+		ParentCallID: "call_parent",
+	}, []threadstore.SpawnChildResult{
+		{
+			ChildThreadID: "thread_warmup",
+			Status:        "pending",
+		},
+		{
+			ChildThreadID:   "thread_query",
+			Status:          "completed",
+			ChildResponseID: "resp_query",
+		},
+	})
+	if err != nil {
+		t.Fatalf("aggregateSpawnOutputItem() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	output, ok := decoded["output"].(string)
+	if !ok {
+		t.Fatalf("output = %#v, want string", decoded["output"])
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(output) error = %v", err)
+	}
+
+	children, ok := parsed["children"].([]any)
+	if !ok || len(children) != 1 {
+		t.Fatalf("children = %#v, want 1 terminal entry", parsed["children"])
+	}
+
+	child, ok := children[0].(map[string]any)
+	if !ok {
+		t.Fatalf("child = %#v, want object", children[0])
+	}
+	if child["thread_id"] != "thread_query" {
+		t.Fatalf("thread_id = %v, want thread_query", child["thread_id"])
+	}
+}
+
 func TestValidateCommandPreconditions(t *testing.T) {
 	t.Parallel()
 
@@ -1793,7 +1843,14 @@ func (f fakeDocRuntimeContextClient) RuntimeContext(ctx context.Context, req doc
 }
 
 type fakeDocActorDocStore struct {
-	docs map[string]docstore.Document
+	docs        map[string]docstore.Document
+	baseUpdates []docBaseLineageUpdate
+}
+
+type docBaseLineageUpdate struct {
+	DocumentID string
+	ResponseID string
+	Model      string
 }
 
 func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Document, error) {
@@ -1804,12 +1861,30 @@ func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Docum
 	return doc, nil
 }
 
-type fakeDocActorPreparedInputClient struct {
-	ref string
-	err error
+func (s *fakeDocActorDocStore) UpdateBaseLineage(_ context.Context, id, baseResponseID, baseModel string) error {
+	s.baseUpdates = append(s.baseUpdates, docBaseLineageUpdate{
+		DocumentID: id,
+		ResponseID: baseResponseID,
+		Model:      baseModel,
+	})
+
+	if doc, ok := s.docs[id]; ok {
+		doc.BaseResponseID = baseResponseID
+		doc.BaseModel = baseModel
+		s.docs[id] = doc
+	}
+
+	return nil
 }
 
-func (c *fakeDocActorPreparedInputClient) PrepareInput(_ context.Context, _ doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error) {
+type fakeDocActorPreparedInputClient struct {
+	ref      string
+	err      error
+	requests []doccmd.PrepareInputRequest
+}
+
+func (c *fakeDocActorPreparedInputClient) PrepareInput(_ context.Context, req doccmd.PrepareInputRequest) (doccmd.PrepareInputResponse, error) {
+	c.requests = append(c.requests, req)
 	if c.err != nil {
 		return doccmd.PrepareInputResponse{}, c.err
 	}
@@ -2076,6 +2151,301 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	}
 	if _, exists := body["prepared_input_ref"]; exists {
 		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
+	}
+}
+
+func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:           "thread_parent",
+		RootThreadID: "thread_parent",
+		Model:        "gpt-5.4",
+	}
+
+	preparedInputs := &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"}
+	var publishedCommands []agentcmd.Command
+	actor := &threadActor{
+		ctx:    context.Background(),
+		logger: testActorLogger(),
+		store:  store,
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+		docStore: &fakeDocActorDocStore{
+			docs: map[string]docstore.Document{
+				"doc_1": {
+					ID:             "doc_1",
+					Filename:       "report.pdf",
+					QueryModel:     "gpt-5.4-mini",
+					BaseResponseID: "resp_doc_base",
+					BaseModel:      "gpt-5.4-mini",
+				},
+			},
+		},
+		preparedInputs: preparedInputs,
+		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+			publishedCommands = append(publishedCommands, cmd)
+			return nil
+		},
+	}
+
+	meta := store.threads["thread_parent"]
+	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
+		DocumentIDs: []string{"doc_1"},
+		Task:        "summarize",
+	}); err != nil {
+		t.Fatalf("startDocumentQueryGroup() error = %v", err)
+	}
+
+	if len(preparedInputs.requests) != 0 {
+		t.Fatalf("preparedInputs.requests = %d, want 0", len(preparedInputs.requests))
+	}
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(publishedCommands[0].Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	if body["model"] != "gpt-5.4-mini" {
+		t.Fatalf("model = %v, want gpt-5.4-mini", body["model"])
+	}
+	if body["previous_response_id"] != "resp_doc_base" {
+		t.Fatalf("previous_response_id = %v, want resp_doc_base", body["previous_response_id"])
+	}
+	if _, exists := body["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
+	}
+
+	metadata, ok := body["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want object", body["metadata"])
+	}
+	if metadata["spawn_mode"] != "document_query" {
+		t.Fatalf("spawn_mode = %v, want document_query", metadata["spawn_mode"])
+	}
+}
+
+func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:           "thread_parent",
+		RootThreadID: "thread_parent",
+		Model:        "gpt-5.4",
+	}
+
+	preparedInputs := &fakeDocActorPreparedInputClient{ref: "blob://prepared/warmup"}
+	var publishedCommands []agentcmd.Command
+	actor := &threadActor{
+		ctx:    context.Background(),
+		logger: testActorLogger(),
+		store:  store,
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+		docStore: &fakeDocActorDocStore{
+			docs: map[string]docstore.Document{
+				"doc_1": {
+					ID:         "doc_1",
+					Filename:   "report.pdf",
+					QueryModel: "gpt-5.4-mini",
+				},
+			},
+		},
+		preparedInputs: preparedInputs,
+		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+			publishedCommands = append(publishedCommands, cmd)
+			return nil
+		},
+	}
+
+	meta := store.threads["thread_parent"]
+	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
+		DocumentIDs: []string{"doc_1", "doc_1"},
+		Task:        "summarize",
+	}); err != nil {
+		t.Fatalf("startDocumentQueryGroup() error = %v", err)
+	}
+
+	if len(preparedInputs.requests) != 1 {
+		t.Fatalf("preparedInputs.requests = %d, want 1", len(preparedInputs.requests))
+	}
+	if preparedInputs.requests[0].Kind != doccmd.PrepareKindWarmup {
+		t.Fatalf("preparedInputs.requests[0].Kind = %q, want %q", preparedInputs.requests[0].Kind, doccmd.PrepareKindWarmup)
+	}
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+	if publishedCommands[0].ThreadID != stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup") {
+		t.Fatalf("publishedCommands[0].ThreadID = %q, want warmup thread id", publishedCommands[0].ThreadID)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(publishedCommands[0].Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	if body["prepared_input_ref"] != "blob://prepared/warmup" {
+		t.Fatalf("prepared_input_ref = %v, want blob://prepared/warmup", body["prepared_input_ref"])
+	}
+	if _, exists := body["previous_response_id"]; exists {
+		t.Fatalf("previous_response_id should not be set, got %#v", body["previous_response_id"])
+	}
+
+	metadata, ok := body["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want object", body["metadata"])
+	}
+	if metadata["spawn_mode"] != "document_warmup" {
+		t.Fatalf("spawn_mode = %v, want document_warmup", metadata["spawn_mode"])
+	}
+	if metadata["document_task"] != "summarize" {
+		t.Fatalf("document_task = %v, want summarize", metadata["document_task"])
+	}
+}
+
+func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQueryChild(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	spawnGroupID := stableDocumentSpawnGroupID("thread_parent", "call_1")
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:                 "thread_parent",
+		RootThreadID:       "thread_parent",
+		Model:              "gpt-5.4",
+		Status:             threadstore.ThreadStatusWaitingChildren,
+		ActiveSpawnGroupID: spawnGroupID,
+	}
+
+	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup")
+	store.threads[warmupThreadID] = threadstore.ThreadMeta{
+		ID:                 warmupThreadID,
+		RootThreadID:       "thread_parent",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_1",
+		Depth:              1,
+		Status:             threadstore.ThreadStatusCompleted,
+		Model:              "gpt-5.4-mini",
+		LastResponseID:     "resp_warmup",
+		ActiveSpawnGroupID: spawnGroupID,
+		MetadataJSON:       `{"document_id":"doc_1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+	}
+	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
+		ID:             spawnGroupID,
+		ParentThreadID: "thread_parent",
+		ParentCallID:   "call_1",
+		Expected:       1,
+		Status:         threadstore.SpawnGroupStatusWaiting,
+	}
+
+	docStore := &fakeDocActorDocStore{
+		docs: map[string]docstore.Document{
+			"doc_1": {
+				ID:       "doc_1",
+				Filename: "report.pdf",
+			},
+		},
+	}
+
+	var publishedSubject string
+	var publishedCommands []agentcmd.Command
+	actor := newActorRecoveryHarness(t, store, nil)
+	actor.docStore = docStore
+	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+		publishedSubject = subject
+		publishedCommands = append(publishedCommands, cmd)
+		return nil
+	}
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_child_completed",
+		Kind:     agentcmd.KindThreadChildCompleted,
+		ThreadID: "thread_parent",
+		Body: json.RawMessage(`{
+			"spawn_group_id":"` + spawnGroupID + `",
+			"child_thread_id":"` + warmupThreadID + `",
+			"child_response_id":"resp_warmup",
+			"status":"completed"
+		}`),
+	}
+
+	if err := actor.handleChildResult(cmd, "completed"); err != nil {
+		t.Fatalf("handleChildResult() error = %v", err)
+	}
+
+	if len(docStore.baseUpdates) != 1 {
+		t.Fatalf("baseUpdates = %d, want 1", len(docStore.baseUpdates))
+	}
+	if docStore.baseUpdates[0].DocumentID != "doc_1" {
+		t.Fatalf("DocumentID = %q, want doc_1", docStore.baseUpdates[0].DocumentID)
+	}
+	if docStore.baseUpdates[0].ResponseID != "resp_warmup" {
+		t.Fatalf("ResponseID = %q, want resp_warmup", docStore.baseUpdates[0].ResponseID)
+	}
+	if docStore.baseUpdates[0].Model != "gpt-5.4-mini" {
+		t.Fatalf("Model = %q, want gpt-5.4-mini", docStore.baseUpdates[0].Model)
+	}
+
+	if publishedSubject != agentcmd.DispatchStartSubject {
+		t.Fatalf("publishedSubject = %q, want %q", publishedSubject, agentcmd.DispatchStartSubject)
+	}
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+
+	queryThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "query")
+	if publishedCommands[0].ThreadID != queryThreadID {
+		t.Fatalf("publishedCommands[0].ThreadID = %q, want %q", publishedCommands[0].ThreadID, queryThreadID)
+	}
+	if publishedCommands[0].CausationID != "resp_warmup" {
+		t.Fatalf("publishedCommands[0].CausationID = %q, want resp_warmup", publishedCommands[0].CausationID)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(publishedCommands[0].Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	if body["model"] != "gpt-5.4-mini" {
+		t.Fatalf("model = %v, want gpt-5.4-mini", body["model"])
+	}
+	if body["previous_response_id"] != "resp_warmup" {
+		t.Fatalf("previous_response_id = %v, want resp_warmup", body["previous_response_id"])
+	}
+	if _, exists := body["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
+	}
+
+	metadata, ok := body["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want object", body["metadata"])
+	}
+	if metadata["spawn_mode"] != "document_query" {
+		t.Fatalf("spawn_mode = %v, want document_query", metadata["spawn_mode"])
+	}
+	if metadata["bootstrap_child_thread_id"] != warmupThreadID {
+		t.Fatalf("bootstrap_child_thread_id = %v, want %q", metadata["bootstrap_child_thread_id"], warmupThreadID)
+	}
+
+	queryMeta, ok := store.threads[queryThreadID]
+	if !ok {
+		t.Fatalf("query thread %q was not created", queryThreadID)
+	}
+	if queryMeta.ActiveSpawnGroupID != spawnGroupID {
+		t.Fatalf("queryMeta.ActiveSpawnGroupID = %q, want %q", queryMeta.ActiveSpawnGroupID, spawnGroupID)
+	}
+	if len(store.spawnResults[spawnGroupID]) != 0 {
+		t.Fatalf("spawnResults = %#v, want no stored result after warmup completion", store.spawnResults[spawnGroupID])
 	}
 }
 

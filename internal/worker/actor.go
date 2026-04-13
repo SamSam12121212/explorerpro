@@ -92,6 +92,7 @@ type threadDocumentStore interface {
 
 type docActorDocStore interface {
 	Get(ctx context.Context, id string) (docstore.Document, error)
+	UpdateBaseLineage(ctx context.Context, id, baseResponseID, baseModel string) error
 }
 
 type docActorPreparedInputClient interface {
@@ -778,6 +779,15 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 		status = fallbackStatus
 	}
 
+	warmupHandled, err := a.handleDocumentWarmupChildResult(meta, spawn, body, status)
+	if err != nil {
+		return err
+	}
+	if warmupHandled {
+		a.startIdleLoop(meta)
+		return nil
+	}
+
 	stored, results, err := a.store.UpsertSpawnResult(a.ctx, spawnGroupID, threadstore.SpawnChildResult{
 		ChildThreadID:   body.ChildThreadID,
 		Status:          status,
@@ -857,6 +867,83 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 
 	a.startIdleLoop(meta)
 	return nil
+}
+
+func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.ThreadMeta, spawn threadstore.SpawnGroupMeta, body agentcmd.ChildResultBody, status string) (bool, error) {
+	if status != "completed" || strings.TrimSpace(body.ChildThreadID) == "" {
+		return false, nil
+	}
+
+	childMeta, err := a.store.LoadThread(a.ctx, body.ChildThreadID)
+	if err != nil {
+		if errors.Is(err, threadstore.ErrThreadNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	childMetadata, err := decodeThreadMetadataJSON(childMeta.MetadataJSON)
+	if err != nil {
+		return false, fmt.Errorf("decode child metadata for %s: %w", body.ChildThreadID, err)
+	}
+	if childMetadata["spawn_mode"] != "document_warmup" {
+		return false, nil
+	}
+	if strings.TrimSpace(body.ChildResponseID) == "" {
+		return false, fmt.Errorf("document warmup child %s completed without child_response_id", body.ChildThreadID)
+	}
+	if a.docStore == nil {
+		return false, fmt.Errorf("document store not available")
+	}
+
+	documentID := strings.TrimSpace(childMetadata["document_id"])
+	if documentID == "" {
+		return false, fmt.Errorf("document warmup child %s missing document_id metadata", body.ChildThreadID)
+	}
+	documentTask := strings.TrimSpace(childMetadata["document_task"])
+	if documentTask == "" {
+		return false, fmt.Errorf("document warmup child %s missing document_task metadata", body.ChildThreadID)
+	}
+	parentCallID := strings.TrimSpace(childMeta.ParentCallID)
+	if parentCallID == "" {
+		parentCallID = spawn.ParentCallID
+	}
+	model := defaultString(strings.TrimSpace(childMeta.Model), strings.TrimSpace(parentMeta.Model))
+
+	if err := a.docStore.UpdateBaseLineage(a.ctx, documentID, body.ChildResponseID, model); err != nil {
+		return false, fmt.Errorf("update document base lineage for %s: %w", documentID, err)
+	}
+
+	queryThreadID, startCmd, err := a.buildDocumentChildStartCommand(
+		parentMeta,
+		spawn.ID,
+		parentCallID,
+		documentID,
+		childMetadata["document_name"],
+		model,
+		"query",
+		body.ChildResponseID,
+		"",
+		documentTask,
+		body.ChildThreadID,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, startCmd); err != nil {
+		return false, err
+	}
+
+	a.logger.Info("document warmup child completed, spawned query child",
+		"parent_thread_id", parentMeta.ID,
+		"spawn_group_id", spawn.ID,
+		"warmup_child_thread_id", body.ChildThreadID,
+		"query_child_thread_id", queryThreadID,
+		"document_id", documentID,
+		"model", model,
+	)
+	return true, nil
 }
 
 func (a *threadActor) handleAdopt(cmd agentcmd.Command) error {
@@ -2478,6 +2565,12 @@ func summarizeSpawnResults(results []threadstore.SpawnChildResult) (completed, f
 func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []threadstore.SpawnChildResult) (json.RawMessage, error) {
 	children := make([]map[string]any, 0, len(results))
 	for _, result := range results {
+		switch result.Status {
+		case "completed", "failed", "cancelled":
+		default:
+			continue
+		}
+
 		child := map[string]any{
 			"thread_id":   result.ChildThreadID,
 			"response_id": result.ChildResponseID,
@@ -2585,6 +2678,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	if a.threadDocs == nil {
 		return "", fmt.Errorf("document store not available")
 	}
+	req.DocumentIDs = uniqueStringsPreserveOrder(req.DocumentIDs)
 
 	attached, err := a.threadDocs.FilterAttached(a.ctx, parentMeta.ID, req.DocumentIDs)
 	if err != nil {
@@ -2605,11 +2699,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		return "", fmt.Errorf("documents not attached to thread: %v", missing)
 	}
 
-	spawnGroupID, err := idgen.New("sg")
-	if err != nil {
-		return "", err
-	}
-
+	spawnGroupID := stableDocumentSpawnGroupID(parentMeta.ID, parentCallID)
 	childThreadIDs := make([]string, 0, len(req.DocumentIDs))
 	childCommands := make([]agentcmd.Command, 0, len(req.DocumentIDs))
 
@@ -2639,110 +2729,36 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			previousResponseID = doc.BaseResponseID
 		}
 
+		phase := "query"
 		var preparedInputRef string
 		if previousResponseID == "" {
-			reqID, err := idgen.New("prep")
-			if err != nil {
-				return "", err
-			}
+			phase = "warmup"
 			resp, err := a.preparedInputs.PrepareInput(a.ctx, doccmd.PrepareInputRequest{
-				RequestID:  reqID,
-				Kind:       doccmd.PrepareKindDocumentQuery,
+				RequestID:  stableDocumentPreparedInputID(parentMeta.ID, parentCallID, docID, phase),
+				Kind:       doccmd.PrepareKindWarmup,
 				ThreadID:   parentMeta.ID,
 				DocumentID: docID,
-				Task:       req.Task,
 			})
 			if err != nil {
-				return "", fmt.Errorf("prepare input for document %s: %w", docID, err)
+				return "", fmt.Errorf("prepare warmup input for document %s: %w", docID, err)
 			}
 			if resp.Status != doccmd.PrepareStatusOK {
-				return "", fmt.Errorf("prepare input for document %s failed: %s", docID, resp.Error)
+				return "", fmt.Errorf("prepare warmup input for document %s failed: %s", docID, resp.Error)
 			}
 			preparedInputRef = resp.PreparedInputRef
 		}
 
-		threadID, err := idgen.New("thread")
+		threadID, startCmd, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, parentCallID, docID, doc.Filename, model, phase, previousResponseID, preparedInputRef, req.Task, "")
 		if err != nil {
 			return "", err
 		}
-
-		cmdID, err := idgen.New("cmd")
-		if err != nil {
-			return "", err
-		}
-
-		startBody := map[string]any{
-			"model": model,
-			"store": true,
-		}
-
-		if preparedInputRef != "" {
-			startBody["prepared_input_ref"] = preparedInputRef
-		} else {
-			startBody["initial_input"] = []any{
-				map[string]any{
-					"type": "message",
-					"role": "user",
-					"content": []any{
-						map[string]any{
-							"type": "input_text",
-							"text": req.Task,
-						},
-					},
-				},
-			}
-			startBody["previous_response_id"] = previousResponseID
-		}
-
-		childMetadataJSON, err := json.Marshal(map[string]string{
-			"document_id":   docID,
-			"document_name": doc.Filename,
-			"spawn_mode":    "document_query",
-		})
-		if err != nil {
-			return "", fmt.Errorf("marshal child metadata: %w", err)
-		}
-
-		metadata, err := rawJSONToAny(childMetadataJSON)
-		if err != nil {
-			return "", fmt.Errorf("decode child metadata: %w", err)
-		}
-		startBody["metadata"] = metadata
-
-		body, err := json.Marshal(startBody)
-		if err != nil {
-			return "", fmt.Errorf("marshal child start body: %w", err)
-		}
-
-		childCommands = append(childCommands, agentcmd.Command{
-			CmdID:        cmdID,
-			Kind:         agentcmd.KindThreadStart,
-			ThreadID:     threadID,
-			RootThreadID: parentMeta.RootThreadID,
-			CausationID:  parentMeta.LastResponseID,
-			Body:         body,
-		})
+		childCommands = append(childCommands, startCmd)
 		childThreadIDs = append(childThreadIDs, threadID)
 
-		if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
-			ID:                 threadID,
-			RootThreadID:       parentMeta.RootThreadID,
-			ParentThreadID:     parentMeta.ID,
-			ParentCallID:       parentCallID,
-			Depth:              parentMeta.Depth + 1,
-			Status:             threadstore.ThreadStatusNew,
-			Model:              model,
-			MetadataJSON:       string(childMetadataJSON),
-			ActiveSpawnGroupID: spawnGroupID,
-			CreatedAt:          time.Now().UTC(),
-			UpdatedAt:          time.Now().UTC(),
-		}); err != nil {
-			return "", err
-		}
-
-		a.logger.Info("spawning document query child",
+		a.logger.Info("spawning document child",
 			"child_thread_id", threadID,
 			"document_id", docID,
+			"phase", phase,
 			"model", model,
 			"has_lineage", previousResponseID != "",
 		)
@@ -2767,6 +2783,171 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	}
 
 	return spawnGroupID, nil
+}
+
+func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID, documentID, documentName, model, phase, previousResponseID, preparedInputRef, task, bootstrapChildThreadID string) (string, agentcmd.Command, error) {
+	threadID := stableDocumentChildThreadID(parentMeta.ID, parentCallID, documentID, phase)
+	cmdID := stableDocumentChildCmdID(parentMeta.ID, parentCallID, documentID, phase)
+
+	startBody := map[string]any{
+		"model": model,
+		"store": true,
+	}
+	if strings.TrimSpace(preparedInputRef) != "" {
+		startBody["prepared_input_ref"] = preparedInputRef
+	} else {
+		startBody["initial_input"] = []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": task,
+					},
+				},
+			},
+		}
+		startBody["previous_response_id"] = previousResponseID
+	}
+
+	metadataMap := map[string]string{
+		"document_id":   documentID,
+		"document_name": documentName,
+	}
+	switch phase {
+	case "warmup":
+		metadataMap["spawn_mode"] = "document_warmup"
+		metadataMap["document_task"] = task
+	default:
+		metadataMap["spawn_mode"] = "document_query"
+		if strings.TrimSpace(bootstrapChildThreadID) != "" {
+			metadataMap["bootstrap_child_thread_id"] = bootstrapChildThreadID
+		}
+	}
+
+	childMetadataJSON, err := json.Marshal(metadataMap)
+	if err != nil {
+		return "", agentcmd.Command{}, fmt.Errorf("marshal child metadata: %w", err)
+	}
+
+	metadata, err := rawJSONToAny(childMetadataJSON)
+	if err != nil {
+		return "", agentcmd.Command{}, fmt.Errorf("decode child metadata: %w", err)
+	}
+	startBody["metadata"] = metadata
+
+	body, err := json.Marshal(startBody)
+	if err != nil {
+		return "", agentcmd.Command{}, fmt.Errorf("marshal child start body: %w", err)
+	}
+
+	if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
+		ID:                 threadID,
+		RootThreadID:       parentMeta.RootThreadID,
+		ParentThreadID:     parentMeta.ID,
+		ParentCallID:       parentCallID,
+		Depth:              parentMeta.Depth + 1,
+		Status:             threadstore.ThreadStatusNew,
+		Model:              model,
+		MetadataJSON:       string(childMetadataJSON),
+		ActiveSpawnGroupID: spawnGroupID,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		return "", agentcmd.Command{}, err
+	}
+
+	causationID := parentMeta.LastResponseID
+	if strings.TrimSpace(previousResponseID) != "" {
+		causationID = previousResponseID
+	}
+
+	return threadID, agentcmd.Command{
+		CmdID:        cmdID,
+		Kind:         agentcmd.KindThreadStart,
+		ThreadID:     threadID,
+		RootThreadID: parentMeta.RootThreadID,
+		CausationID:  causationID,
+		Body:         body,
+	}, nil
+}
+
+func stableDocumentSpawnGroupID(parentThreadID, parentCallID string) string {
+	return stableDocumentDerivedID("sg_doc", parentThreadID, parentCallID)
+}
+
+func stableDocumentChildThreadID(parentThreadID, parentCallID, documentID, phase string) string {
+	return stableDocumentDerivedID("thread_doc", parentThreadID, parentCallID, documentID, phase)
+}
+
+func stableDocumentChildCmdID(parentThreadID, parentCallID, documentID, phase string) string {
+	return stableDocumentDerivedID("cmd_doc", parentThreadID, parentCallID, documentID, phase, "start")
+}
+
+func stableDocumentPreparedInputID(parentThreadID, parentCallID, documentID, phase string) string {
+	return stableDocumentDerivedID("prep_doc", parentThreadID, parentCallID, documentID, phase)
+}
+
+func stableDocumentDerivedID(prefix string, parts ...string) string {
+	var builder strings.Builder
+	builder.WriteString(prefix)
+	for _, part := range parts {
+		sanitized := sanitizeStableDocumentIDPart(part)
+		if sanitized == "" {
+			continue
+		}
+		builder.WriteByte('_')
+		builder.WriteString(sanitized)
+	}
+	return builder.String()
+}
+
+func sanitizeStableDocumentIDPart(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		case r == '_' || r == '-':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				builder.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), "_")
+}
+
+func uniqueStringsPreserveOrder(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	deduped := make([]string, 0, len(values))
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		deduped = append(deduped, value)
+	}
+	return deduped
+}
+
+func decodeThreadMetadataJSON(raw string) (shared.Metadata, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return shared.Metadata{}, nil
+	}
+	return decodeMetadataParam(json.RawMessage(raw))
 }
 
 func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentCallID string, request spawnRequest) (string, error) {
