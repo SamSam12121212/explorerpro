@@ -97,7 +97,7 @@ Everything the thread model already provides, which the document executor curren
 
 ## Incision Plan
 
-### Incision 1: Make `query_attached_documents` spawn child threads — DONE ✓
+### Incision 1: Make `query_attached_documents` spawn child threads — DONE
 
 Replaced `handlePendingDocumentQuery` (inline `docExec.Execute()`) with `startDocumentQueryGroup`:
 
@@ -113,7 +113,7 @@ New interfaces on the actor: `docActorDocStore`, `docActorLineageStore`, `docAct
 
 Instead of a separate warmup-then-query two-phase flow, the first query for a document that has no lineage sends pages + task together in one shot via `PrepareKindDocumentQuery`. The response ID from that query becomes the thread-local lineage for follow-up queries. The shared base anchor optimization (cross-thread warmup reuse) can be re-added later.
 
-### Incision 3: Kill `docexec.go` — DONE ✓
+### Incision 3: Kill `docexec.go` — DONE
 
 Deleted:
 
@@ -131,7 +131,7 @@ For now, `thread_documents` lineage columns are still used to track `latest_resp
 
 The lineage simplification (dropping the columns, querying child threads directly) is a future incision.
 
-### Incision 5: Clean up actor.go — DONE ✓
+### Incision 5: Clean up actor.go — DONE
 
 Removed:
 
@@ -142,7 +142,7 @@ Removed:
 - the `newDocumentExec()` call in `service.go`
 - `CloseIdleSessions` sweep in `recoverThreads`
 
-### Incision 6: Update the docs — DONE ✓
+### Incision 6: Update the docs — DONE
 
 Aligned:
 
