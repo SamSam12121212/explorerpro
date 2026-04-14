@@ -147,6 +147,102 @@ func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
 	}
 }
 
+func TestResponseCreateInputKind(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{
+			name: "prepared input",
+			payload: map[string]any{
+				"prepared_input_ref": "blob://prepared/input.json",
+			},
+			want: "prepared_input",
+		},
+		{
+			name: "user message",
+			payload: map[string]any{
+				"input": json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
+			},
+			want: "user_message",
+		},
+		{
+			name: "function call output",
+			payload: map[string]any{
+				"input": json.RawMessage(`[{"type":"function_call_output","call_id":"call_123","output":"{}"}]`),
+			},
+			want: "function_call_output",
+		},
+		{
+			name:    "no input",
+			payload: map[string]any{},
+			want:    "none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := responseCreateInputKind(tt.payload); got != tt.want {
+				t.Fatalf("responseCreateInputKind() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppendThreadGraphAttrs(t *testing.T) {
+	meta := threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		RootThreadID:       "thread_root",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_parent",
+		Depth:              2,
+		ActiveSpawnGroupID: "sg_123",
+	}
+
+	got := appendThreadGraphAttrs([]any{"event", "start"}, meta)
+	want := []any{
+		"event", "start",
+		"root_thread_id", "thread_root",
+		"parent_thread_id", "thread_parent",
+		"parent_call_id", "call_parent",
+		"depth", 2,
+		"spawn_group_id", "sg_123",
+	}
+
+	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
+		t.Fatalf("appendThreadGraphAttrs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
+	meta := threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		RootThreadID:       "thread_root",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_parent",
+		Depth:              2,
+		ActiveSpawnGroupID: "sg_meta",
+	}
+
+	got := appendThreadGraphAttrs([]any{
+		"spawn_group_id", "sg_explicit",
+		"depth", 9,
+		"root_thread_id", "thread_explicit_root",
+	}, meta)
+	want := []any{
+		"spawn_group_id", "sg_explicit",
+		"depth", 9,
+		"root_thread_id", "thread_explicit_root",
+		"parent_thread_id", "thread_parent",
+		"parent_call_id", "call_parent",
+	}
+
+	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
+		t.Fatalf("appendThreadGraphAttrs() with explicit keys = %#v, want %#v", got, want)
+	}
+}
+
 func TestValidateCommandPreconditions(t *testing.T) {
 	t.Parallel()
 
@@ -1203,7 +1299,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 		SocketGeneration: 1,
 	}
 
-	if err := actor.continueWithInputItems(meta, "cmd_resume", json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]`)); err != nil {
+	if err := actor.continueWithInputItems(meta, "cmd_resume", json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]`), "user_input"); err != nil {
 		t.Fatalf("continueWithInputItems() error = %v", err)
 	}
 

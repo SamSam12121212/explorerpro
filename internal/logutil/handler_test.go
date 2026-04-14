@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestNewHandlerRendersBareShortIDs(t *testing.T) {
+func TestNewHandlerRendersBareCmdIDAndExplicitThreadID(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(NewHandler(&buf, slog.LevelInfo))
 
@@ -23,17 +23,14 @@ func TestNewHandlerRendersBareShortIDs(t *testing.T) {
 	if strings.Contains(got, "msg=") {
 		t.Fatalf("log line still contains msg key: %q", got)
 	}
-	if strings.Contains(got, "thread_id=") {
-		t.Fatalf("log line still contains thread_id key: %q", got)
-	}
 	if strings.Contains(got, "cmd_id=") {
 		t.Fatalf("log line still contains cmd_id key: %q", got)
 	}
-	if !strings.Contains(got, `"stream completed" thread_d746fa6e55`) {
-		t.Fatalf("log line missing bare message or shortened thread id: %q", got)
+	if !strings.Contains(got, `"stream completed" thread_id=thread_d746fa6e55f798e8c133d14c`) {
+		t.Fatalf("log line missing explicit full thread id: %q", got)
 	}
-	if !strings.Contains(got, " cmd_123456789a ") {
-		t.Fatalf("log line missing bare shortened cmd id: %q", got)
+	if !strings.Contains(got, " cmd_123456789ab ") {
+		t.Fatalf("log line missing bare full cmd id: %q", got)
 	}
 	if !strings.Contains(got, "last_response_id=resp_8db52bca1") {
 		t.Fatalf("response id should remain full: %q", got)

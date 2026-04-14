@@ -278,14 +278,12 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 			a.logger.Warn("ignoring command for foreign owner",
 				"cmd_id", queued.cmd.CmdID,
 				"kind", queued.cmd.Kind,
-				"thread_id", queued.cmd.ThreadID,
 			)
 			return queued.msg.Ack()
 		case errors.Is(err, errCommandPrecond):
 			a.logger.Warn("dropping command that failed thread preconditions",
 				"cmd_id", queued.cmd.CmdID,
 				"kind", queued.cmd.Kind,
-				"thread_id", queued.cmd.ThreadID,
 				"error", err,
 			)
 			return queued.msg.Ack()
@@ -293,7 +291,6 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 			a.logger.Info("dropping command for missing thread",
 				"cmd_id", queued.cmd.CmdID,
 				"kind", queued.cmd.Kind,
-				"thread_id", queued.cmd.ThreadID,
 				"error", err,
 			)
 			return queued.msg.Ack()
@@ -307,7 +304,6 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 			a.logger.Warn("dropping command after permanent openai error",
 				"cmd_id", queued.cmd.CmdID,
 				"kind", queued.cmd.Kind,
-				"thread_id", queued.cmd.ThreadID,
 				"error", err,
 			)
 			return queued.msg.Ack()
@@ -339,7 +335,6 @@ func (a *threadActor) handleTransientCommandError(queued queuedCommand, cause er
 		a.logger.Warn("dropping command after transient retry exhaustion",
 			"cmd_id", queued.cmd.CmdID,
 			"kind", queued.cmd.Kind,
-			"thread_id", queued.cmd.ThreadID,
 			"deliveries", deliveries,
 			"max_deliveries", maxTransientCommandDeliveries,
 			"error", cause,
@@ -357,7 +352,6 @@ func (a *threadActor) handleTransientCommandError(queued queuedCommand, cause er
 	a.logger.Warn("transient command failure, delaying retry",
 		"cmd_id", queued.cmd.CmdID,
 		"kind", queued.cmd.Kind,
-		"thread_id", queued.cmd.ThreadID,
 		"deliveries", deliveries,
 		"max_deliveries", maxTransientCommandDeliveries,
 		"retry_in", delay,
@@ -509,12 +503,6 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	a.logger.Info("starting thread",
-		"cmd_id", cmd.CmdID,
-		"model", body.Model,
-		"has_previous_response_id", strings.TrimSpace(body.PreviousResponseID) != "",
-	)
-
 	if strings.TrimSpace(body.PreviousResponseID) != "" && !boolOrDefault(body.Store, true) {
 		return fmt.Errorf("thread.start previous_response_id requires store=true")
 	}
@@ -572,6 +560,24 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if err := validateCommandPreconditions(cmd, meta); err != nil {
 		return err
 	}
+
+	startKind := "root"
+	if strings.TrimSpace(meta.ParentThreadID) != "" {
+		startKind = "child"
+	}
+
+	a.logger.Info("starting thread",
+		appendThreadGraphAttrs([]any{
+			"cmd_id", cmd.CmdID,
+			"model", body.Model,
+			"start_kind", startKind,
+			"input_kind", responseCreateInputKind(map[string]any{
+				"input":              body.InitialInput,
+				"prepared_input_ref": body.PreparedInputRef,
+			}),
+			"has_previous_response_id", strings.TrimSpace(body.PreviousResponseID) != "",
+		}, meta)...,
+	)
 
 	claim, err := a.store.ClaimOwnership(a.ctx, cmd.ThreadID, a.workerID, now.Add(workerLeaseTTL))
 	if err != nil {
@@ -631,7 +637,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 		return err
 	}
 
-	return a.sendAndStream(meta, cmd.CmdID, payload)
+	return a.sendAndStream(meta, cmd.CmdID, payload, "start")
 }
 
 func (a *threadActor) handleResume(cmd agentcmd.Command) error {
@@ -675,6 +681,17 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
+	a.logger.Info("resuming thread",
+		appendThreadGraphAttrs([]any{
+			"cmd_id", cmd.CmdID,
+			"resume_reason", "user_input",
+			"input_kind", responseCreateInputKind(map[string]any{
+				"input":              body.InputItems,
+				"prepared_input_ref": body.PreparedInputRef,
+			}),
+		}, meta)...,
+	)
+
 	if err := a.ensureSession(); err != nil {
 		return err
 	}
@@ -685,7 +702,7 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 		}
 	}
 
-	return a.continueWithPreparedInput(meta, cmd.CmdID, body.InputItems, body.PreparedInputRef)
+	return a.continueWithPreparedInput(meta, cmd.CmdID, body.InputItems, body.PreparedInputRef, "user_input")
 }
 
 func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
@@ -730,6 +747,14 @@ func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
 	a.startLeaseLoop(meta)
 	a.stopIdleLoop()
 
+	a.logger.Info("resuming thread",
+		appendThreadGraphAttrs([]any{
+			"cmd_id", cmd.CmdID,
+			"resume_reason", "tool_output",
+			"input_kind", "function_call_output",
+		}, meta)...,
+	)
+
 	if err := a.ensureSession(); err != nil {
 		return err
 	}
@@ -743,7 +768,7 @@ func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
 		return err
 	}
 
-	return a.continueWithInputItems(meta, cmd.CmdID, inputItems)
+	return a.continueWithInputItems(meta, cmd.CmdID, inputItems, "tool_output")
 }
 
 func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus string) error {
@@ -813,6 +838,19 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 	}
 	spawn.UpdatedAt = time.Now().UTC()
 
+	a.logger.Info("child barrier updated",
+		appendThreadGraphAttrs([]any{
+			"cmd_id", cmd.CmdID,
+			"spawn_group_id", spawnGroupID,
+			"child_thread_id", body.ChildThreadID,
+			"child_status", status,
+			"completed_children", spawn.Completed,
+			"failed_children", spawn.Failed,
+			"cancelled_children", spawn.Cancelled,
+			"expected_children", spawn.Expected,
+		}, meta)...,
+	)
+
 	if spawn.AggregateSubmittedAt.IsZero() && spawn.Completed+spawn.Failed+spawn.Cancelled >= spawn.Expected {
 		outputItem, err := aggregateSpawnOutputItem(spawn, results)
 		if err != nil {
@@ -850,6 +888,18 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 		a.startLeaseLoop(meta)
 		a.stopIdleLoop()
 
+		a.logger.Info("resuming thread",
+			appendThreadGraphAttrs([]any{
+				"cmd_id", cmd.CmdID,
+				"resume_reason", "child_barrier",
+				"input_kind", "function_call_output",
+				"completed_children", spawn.Completed,
+				"failed_children", spawn.Failed,
+				"cancelled_children", spawn.Cancelled,
+				"expected_children", spawn.Expected,
+			}, meta)...,
+		)
+
 		if err := a.ensureSession(); err != nil {
 			return err
 		}
@@ -858,7 +908,7 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 			return err
 		}
 
-		return a.continueWithInputItems(meta, cmd.CmdID, inputItems)
+		return a.continueWithInputItems(meta, cmd.CmdID, inputItems, "child_barrier")
 	}
 
 	if err := a.store.SaveSpawnGroup(a.ctx, spawn); err != nil {
@@ -935,13 +985,16 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 		return false, err
 	}
 
-	a.logger.Info("document warmup child completed, spawned query child",
-		"parent_thread_id", parentMeta.ID,
-		"spawn_group_id", spawn.ID,
-		"warmup_child_thread_id", body.ChildThreadID,
-		"query_child_thread_id", queryThreadID,
-		"document_id", documentID,
-		"model", model,
+	a.logger.Info("spawning child thread",
+		appendThreadGraphAttrs([]any{
+			"spawn_group_id", spawn.ID,
+			"child_thread_id", queryThreadID,
+			"bootstrap_child_thread_id", body.ChildThreadID,
+			"child_kind", "document_query",
+			"lineage_source", "warmup",
+			"document_id", documentID,
+			"model", model,
+		}, parentMeta)...,
 	)
 	return true, nil
 }
@@ -1006,7 +1059,7 @@ func (a *threadActor) handleRotateSocket(cmd agentcmd.Command) error {
 	oldSession := a.swapSession(freshSession)
 	if oldSession != nil {
 		if err := oldSession.Close(); err != nil {
-			a.logger.Warn("failed to close rotated socket", "thread_id", meta.ID, "error", err)
+			a.logger.Warn("failed to close rotated socket", "error", err)
 		}
 	}
 
@@ -1162,8 +1215,9 @@ func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
 	}
 
 	a.logger.Info("disconnecting idle socket",
-		"thread_id", meta.ID,
-		"socket_generation", meta.SocketGeneration,
+		appendThreadGraphAttrs([]any{
+			"socket_generation", meta.SocketGeneration,
+		}, meta)...,
 	)
 
 	a.stopIdleLoop()
@@ -1208,6 +1262,16 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 		if err := a.saveThreadMeta(meta); err != nil {
 			return err
 		}
+		a.logger.Info("child barrier still waiting after recovery",
+			appendThreadGraphAttrs([]any{
+				"cmd_id", cmdID,
+				"spawn_group_id", spawn.ID,
+				"completed_children", spawn.Completed,
+				"failed_children", spawn.Failed,
+				"cancelled_children", spawn.Cancelled,
+				"expected_children", spawn.Expected,
+			}, meta)...,
+		)
 		a.startIdleLoop(meta)
 		return nil
 	}
@@ -1244,7 +1308,20 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	return a.continueWithInputItems(meta, cmdID, inputItems)
+	a.logger.Info("resuming thread",
+		appendThreadGraphAttrs([]any{
+			"cmd_id", cmdID,
+			"resume_reason", "child_barrier_recovery",
+			"input_kind", "function_call_output",
+			"spawn_group_id", spawn.ID,
+			"completed_children", spawn.Completed,
+			"failed_children", spawn.Failed,
+			"cancelled_children", spawn.Cancelled,
+			"expected_children", spawn.Expected,
+		}, meta)...,
+	)
+
+	return a.continueWithInputItems(meta, cmdID, inputItems, "child_barrier_recovery")
 }
 
 func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID string) error {
@@ -1278,7 +1355,7 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payload)
+	return a.sendAndStream(meta, cmdID, payload, "checkpoint_recovery")
 }
 
 func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMeta) error {
@@ -1303,8 +1380,9 @@ func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMet
 	}
 
 	a.logger.Info("recovery checkpoint missing, leaving thread passive",
-		"thread_id", meta.ID,
-		"status", meta.Status,
+		appendThreadGraphAttrs([]any{
+			"status", meta.Status,
+		}, meta)...,
 	)
 
 	return nil
@@ -1322,9 +1400,11 @@ func (a *threadActor) ensureSession() error {
 		}
 
 		a.logger.Info("existing session not connected, reconnecting",
-			"previous_state", snapshot.State,
-			"socket_generation", a.currentSocketGeneration(),
-			"session_connect_count", snapshot.SocketGeneration,
+			appendThreadGraphAttrs([]any{
+				"previous_state", snapshot.State,
+				"socket_generation", a.currentSocketGeneration(),
+				"session_connect_count", snapshot.SocketGeneration,
+			}, a.currentMeta())...,
 		)
 	}
 
@@ -1333,7 +1413,9 @@ func (a *threadActor) ensureSession() error {
 
 func (a *threadActor) reconnectSession() error {
 	a.logger.Info("connecting openai websocket session",
-		"socket_generation", a.currentSocketGeneration(),
+		appendThreadGraphAttrs([]any{
+			"socket_generation", a.currentSocketGeneration(),
+		}, a.currentMeta())...,
 	)
 
 	newSession, err := a.openFreshSession()
@@ -1343,14 +1425,16 @@ func (a *threadActor) reconnectSession() error {
 	}
 
 	a.logger.Info("openai websocket session connected",
-		"socket_generation", a.currentSocketGeneration(),
-		"session_connect_count", newSession.Snapshot().SocketGeneration,
+		appendThreadGraphAttrs([]any{
+			"socket_generation", a.currentSocketGeneration(),
+			"session_connect_count", newSession.Snapshot().SocketGeneration,
+		}, a.currentMeta())...,
 	)
 
 	oldSession := a.swapSession(newSession)
 	if oldSession != nil {
 		if err := oldSession.Close(); err != nil {
-			a.logger.Warn("failed to close previous socket", "thread_id", a.threadID, "error", err)
+			a.logger.Warn("failed to close previous socket", "error", err)
 		}
 	}
 	return nil
@@ -1415,11 +1499,11 @@ func (a *threadActor) runLeaseLoop(ctx context.Context, meta threadstore.ThreadM
 			renewed, err := a.store.RenewOwnership(renewCtx, meta.ID, a.workerID, meta.SocketGeneration, time.Now().UTC().Add(workerLeaseTTL))
 			cancel()
 			if err != nil {
-				a.logger.Warn("failed to renew thread lease", "thread_id", meta.ID, "socket_generation", meta.SocketGeneration, "error", err)
+				a.logger.Warn("failed to renew thread lease", "socket_generation", meta.SocketGeneration, "error", err)
 				continue
 			}
 			if !renewed {
-				a.logger.Warn("lost thread lease", "thread_id", meta.ID, "socket_generation", meta.SocketGeneration)
+				a.logger.Warn("lost thread lease", "socket_generation", meta.SocketGeneration)
 				a.handleLeaseLoss(meta.SocketGeneration)
 				return
 			}
@@ -1459,7 +1543,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	a.cancel()
 }
 
-func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any) error {
+func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any, trigger string) error {
 	logPayload, err := marshalResponseCreatePayload(payload)
 	if err != nil {
 		return fmt.Errorf("marshal response.create payload for log: %w", err)
@@ -1496,12 +1580,17 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string,
 	}
 
 	a.logger.Info("sending response.create to openai",
-		"model", meta.Model,
-		"reasoning_effort", responseCreateReasoningEffort(wirePayload),
-		"socket_generation", meta.SocketGeneration,
-		"input_items_count", stats.InputItemsCount,
-		"lowered_image_inputs", stats.LoweredImageInputs,
-		"lowered_blob_refs", stats.LoweredBlobRefs,
+		appendThreadGraphAttrs([]any{
+			"trigger", trigger,
+			"input_kind", responseCreateInputKind(payload),
+			"has_previous_response_id", strings.TrimSpace(stringValue(payload["previous_response_id"])) != "",
+			"model", meta.Model,
+			"reasoning_effort", responseCreateReasoningEffort(wirePayload),
+			"socket_generation", meta.SocketGeneration,
+			"input_items_count", stats.InputItemsCount,
+			"lowered_image_inputs", stats.LoweredImageInputs,
+			"lowered_blob_refs", stats.LoweredBlobRefs,
+		}, meta)...,
 	)
 
 	if err := a.sendResponseCreate(event); err != nil {
@@ -1578,11 +1667,87 @@ func stringValue(value any) string {
 	return text
 }
 
-func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage) error {
-	return a.continueWithPreparedInput(meta, cmdID, inputItems, "")
+func hasLogAttrKey(attrs []any, key string) bool {
+	for index := 0; index+1 < len(attrs); index += 2 {
+		attrKey, ok := attrs[index].(string)
+		if ok && attrKey == key {
+			return true
+		}
+	}
+	return false
 }
 
-func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, preparedInputRef string) error {
+func appendThreadGraphAttrs(attrs []any, meta threadstore.ThreadMeta) []any {
+	if rootThreadID := strings.TrimSpace(defaultRootThreadID(meta)); rootThreadID != "" && !hasLogAttrKey(attrs, "root_thread_id") {
+		attrs = append(attrs, "root_thread_id", rootThreadID)
+	}
+	if parentThreadID := strings.TrimSpace(meta.ParentThreadID); parentThreadID != "" && !hasLogAttrKey(attrs, "parent_thread_id") {
+		attrs = append(attrs, "parent_thread_id", parentThreadID)
+	}
+	if parentCallID := strings.TrimSpace(meta.ParentCallID); parentCallID != "" && !hasLogAttrKey(attrs, "parent_call_id") {
+		attrs = append(attrs, "parent_call_id", parentCallID)
+	}
+	if !hasLogAttrKey(attrs, "depth") {
+		attrs = append(attrs, "depth", meta.Depth)
+	}
+	if spawnGroupID := strings.TrimSpace(meta.ActiveSpawnGroupID); spawnGroupID != "" && !hasLogAttrKey(attrs, "spawn_group_id") {
+		attrs = append(attrs, "spawn_group_id", spawnGroupID)
+	}
+	return attrs
+}
+
+func responseCreateInputKind(payload map[string]any) string {
+	if strings.TrimSpace(stringValue(payload["prepared_input_ref"])) != "" {
+		return "prepared_input"
+	}
+
+	items := decodeResponseCreateInputItems(payload["input"])
+	if len(items) == 0 {
+		return "none"
+	}
+
+	itemType := strings.TrimSpace(stringValue(items[0]["type"]))
+	switch itemType {
+	case "message":
+		if strings.TrimSpace(stringValue(items[0]["role"])) == "user" {
+			return "user_message"
+		}
+		return "message"
+	case "":
+		return "input_items"
+	default:
+		return itemType
+	}
+}
+
+func decodeResponseCreateInputItems(value any) []map[string]any {
+	switch typed := value.(type) {
+	case json.RawMessage:
+		var items []map[string]any
+		if err := json.Unmarshal(typed, &items); err == nil {
+			return items
+		}
+	case []map[string]any:
+		return typed
+	case []any:
+		items := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			decoded, ok := item.(map[string]any)
+			if !ok {
+				return nil
+			}
+			items = append(items, decoded)
+		}
+		return items
+	}
+	return nil
+}
+
+func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, trigger string) error {
+	return a.continueWithPreparedInput(meta, cmdID, inputItems, "", trigger)
+}
+
+func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, preparedInputRef string, trigger string) error {
 	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
 		"instructions":         meta.Instructions,
@@ -1595,7 +1760,7 @@ func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmd
 		return err
 	}
 
-	return a.sendAndStream(meta, cmdID, payload)
+	return a.sendAndStream(meta, cmdID, payload, trigger)
 }
 
 func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[string]any) error {
@@ -1658,10 +1823,9 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID string, payload map[s
 	return nil
 }
 
-func (a *threadActor) fallbackDocumentRuntimeContext(threadID string, payload map[string]any, documents []docstore.Document, cause error) error {
+func (a *threadActor) fallbackDocumentRuntimeContext(_ string, payload map[string]any, documents []docstore.Document, cause error) error {
 	if a.logger != nil {
 		a.logger.Warn("document runtime context unavailable, falling back to local augmentation",
-			"thread_id", threadID,
 			"document_count", len(documents),
 			"error", cause,
 		)
@@ -1823,7 +1987,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	}
 
 	a.logger.Info("streaming response events from openai",
-		"socket_generation", meta.SocketGeneration,
+		appendThreadGraphAttrs([]any{
+			"socket_generation", meta.SocketGeneration,
+		}, meta)...,
 	)
 
 	waitingTool := false
@@ -1999,10 +2165,12 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 
 		if meta.Status != prevStatus {
 			a.logger.Info("thread status changed",
-				"from", prevStatus,
-				"to", meta.Status,
-				"event_type", event.Type,
-				"response_id", responseID,
+				appendThreadGraphAttrs([]any{
+					"from", prevStatus,
+					"to", meta.Status,
+					"event_type", event.Type,
+					"response_id", responseID,
+				}, meta)...,
 			)
 			prevStatus = meta.Status
 		}
@@ -2023,9 +2191,11 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		if event.Type.IsTerminal() {
 			a.flushAllDeltaLogs(deltaLogs)
 			a.logger.Info("stream completed",
-				"final_status", meta.Status,
-				"last_response_id", meta.LastResponseID,
-				"events_received", eventCount,
+				appendThreadGraphAttrs([]any{
+					"final_status", meta.Status,
+					"last_response_id", meta.LastResponseID,
+					"events_received", eventCount,
+				}, meta)...,
 			)
 			if shouldPublishChildTerminal(meta.Status, meta) {
 				if err := a.publishChildTerminal(meta); err != nil {
@@ -2125,7 +2295,6 @@ func (a *threadActor) runIdleLoop(ctx context.Context, done chan struct{}, meta 
 					continue
 				}
 				a.logger.Warn("idle socket heartbeat failed",
-					"thread_id", meta.ID,
 					"socket_generation", meta.SocketGeneration,
 					"error", err,
 				)
@@ -2170,7 +2339,6 @@ func (a *threadActor) sendResponseCreate(event openaiws.ClientEvent) error {
 		return nil
 	} else {
 		a.logger.Warn("response.create send failed, reconnecting",
-			"thread_id", a.threadID,
 			"error", err,
 		)
 	}
@@ -2267,7 +2435,7 @@ func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
 		"updated_at":            meta.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		a.logger.Warn("failed to marshal thread snapshot event", "thread_id", meta.ID, "error", err)
+		a.logger.Warn("failed to marshal thread snapshot event", "error", err)
 		return
 	}
 
@@ -2279,7 +2447,7 @@ func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
 		threadevents.EventTypeThreadSnapshot,
 		payload,
 	); err != nil {
-		a.logger.Warn("failed to publish thread snapshot event", "thread_id", meta.ID, "error", err)
+		a.logger.Warn("failed to publish thread snapshot event", "error", err)
 	}
 }
 
@@ -2290,7 +2458,7 @@ func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
 
 	payload, err := json.Marshal(presentThreadItem(item))
 	if err != nil {
-		a.logger.Warn("failed to marshal thread item event", "thread_id", a.threadID, "seq", item.Seq, "error", err)
+		a.logger.Warn("failed to marshal thread item event", "seq", item.Seq, "error", err)
 		return
 	}
 
@@ -2302,7 +2470,7 @@ func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
 		threadevents.EventTypeThreadItem,
 		payload,
 	); err != nil {
-		a.logger.Warn("failed to publish thread item event", "thread_id", a.threadID, "seq", item.Seq, "error", err)
+		a.logger.Warn("failed to publish thread item event", "seq", item.Seq, "error", err)
 	}
 }
 
@@ -2408,8 +2576,10 @@ func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta
 	meta.SocketExpiresAt = time.Time{}
 	a.setMeta(*meta)
 
-	a.logger.Info("released terminal child socket",
-		"socket_generation", meta.SocketGeneration,
+	a.logger.Info("released terminal thread socket",
+		appendThreadGraphAttrs([]any{
+			"socket_generation", meta.SocketGeneration,
+		}, *meta)...,
 	)
 
 	return nil
@@ -2715,18 +2885,21 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		}
 
 		previousResponseID := ""
+		lineageSource := "warmup"
 		lineage, err := a.store.LoadLatestCompletedDocumentQueryLineage(a.ctx, parentMeta.ID, docID)
 		if err != nil && !errors.Is(err, threadstore.ErrThreadNotFound) {
 			return "", fmt.Errorf("get latest completed document child lineage for %s: %w", docID, err)
 		}
 		if err == nil {
 			previousResponseID = lineage.ResponseID
+			lineageSource = "thread_local"
 			if strings.TrimSpace(lineage.Model) != "" {
 				model = lineage.Model
 			}
 		}
 		if previousResponseID == "" && doc.BaseResponseID != "" && doc.BaseModel == model {
 			previousResponseID = doc.BaseResponseID
+			lineageSource = "document_base"
 		}
 
 		phase := "query"
@@ -2755,12 +2928,22 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		childCommands = append(childCommands, startCmd)
 		childThreadIDs = append(childThreadIDs, threadID)
 
-		a.logger.Info("spawning document child",
-			"child_thread_id", threadID,
-			"document_id", docID,
-			"phase", phase,
-			"model", model,
-			"has_lineage", previousResponseID != "",
+		childKind := "document_query"
+		if phase == "warmup" {
+			childKind = "document_warmup"
+		}
+		a.logger.Info("spawning child thread",
+			appendThreadGraphAttrs([]any{
+				"spawn_group_id", spawnGroupID,
+				"child_thread_id", threadID,
+				"child_kind", childKind,
+				"document_id", docID,
+				"document_name", doc.Filename,
+				"phase", phase,
+				"model", model,
+				"lineage_source", lineageSource,
+				"has_previous_response_id", previousResponseID != "",
+			}, parentMeta)...,
 		)
 	}
 
@@ -2775,6 +2958,14 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	}, childThreadIDs); err != nil {
 		return "", err
 	}
+
+	a.logger.Info("opened child barrier",
+		appendThreadGraphAttrs([]any{
+			"spawn_group_id", spawnGroupID,
+			"child_source", "document_query",
+			"expected_children", len(childCommands),
+		}, parentMeta)...,
+	)
 
 	for _, cmd := range childCommands {
 		if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, cmd); err != nil {
@@ -3092,6 +3283,17 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 		}); err != nil {
 			return "", err
 		}
+
+		a.logger.Info("spawning child thread",
+			appendThreadGraphAttrs([]any{
+				"spawn_group_id", spawnGroupID,
+				"child_thread_id", threadID,
+				"child_kind", "subagent",
+				"spawn_mode", spawnMode,
+				"child_model", defaultString(child.Model, parentMeta.Model),
+				"branch_previous_response_id", strings.TrimSpace(branchPreviousResponseID) != "",
+			}, parentMeta)...,
+		)
 	}
 
 	if err := a.store.CreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
@@ -3105,6 +3307,15 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 	}, childThreadIDs); err != nil {
 		return "", err
 	}
+
+	a.logger.Info("opened child barrier",
+		appendThreadGraphAttrs([]any{
+			"spawn_group_id", spawnGroupID,
+			"child_source", "spawn_subagents",
+			"spawn_mode", spawnMode,
+			"expected_children", len(childCommands),
+		}, parentMeta)...,
+	)
 
 	for _, cmd := range childCommands {
 		if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, cmd); err != nil {
@@ -3134,7 +3345,6 @@ func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
 	assistantText, err := a.loadLatestAssistantText(meta.ID)
 	if err != nil {
 		a.logger.Warn("failed to load child assistant summary",
-			"thread_id", meta.ID,
 			"spawn_group_id", meta.ActiveSpawnGroupID,
 			"error", err,
 		)
