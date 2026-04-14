@@ -3,6 +3,7 @@ package logutil
 import (
 	"bytes"
 	"log/slog"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,9 @@ func TestNewHandlerRendersBareCmdIDAndExplicitThreadID(t *testing.T) {
 	)
 
 	got := strings.TrimSpace(buf.String())
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} `).MatchString(got) {
+		t.Fatalf("log line missing bare timestamp prefix: %q", got)
+	}
 	if strings.Contains(got, "msg=") {
 		t.Fatalf("log line still contains msg key: %q", got)
 	}

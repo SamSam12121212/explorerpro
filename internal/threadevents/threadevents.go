@@ -3,6 +3,7 @@ package threadevents
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -17,19 +18,19 @@ const (
 )
 
 type EventEnvelope struct {
-	ThreadID         string          `json:"thread_id"`
+	ThreadID         int64           `json:"thread_id"`
 	EventType        string          `json:"event_type"`
 	SocketGeneration uint64          `json:"socket_generation"`
 	Timestamp        string          `json:"ts"`
 	Payload          json.RawMessage `json:"payload"`
 }
 
-func Subject(threadID string) string {
-	return SubjectPrefix + threadID
+func Subject(threadID int64) string {
+	return SubjectPrefix + strconv.FormatInt(threadID, 10)
 }
 
-func MsgID(threadID string, socketGeneration uint64, key string) string {
-	return fmt.Sprintf("%s-%d-%s", threadID, socketGeneration, key)
+func MsgID(threadID int64, socketGeneration uint64, key string) string {
+	return fmt.Sprintf("%d-%d-%s", threadID, socketGeneration, key)
 }
 
 func Encode(env EventEnvelope) ([]byte, error) {
@@ -45,7 +46,7 @@ func Decode(data []byte) (EventEnvelope, error) {
 	if err := json.Unmarshal(data, &env); err != nil {
 		return EventEnvelope{}, fmt.Errorf("decode thread event envelope: %w", err)
 	}
-	if strings.TrimSpace(env.ThreadID) == "" {
+	if env.ThreadID <= 0 {
 		return EventEnvelope{}, fmt.Errorf("thread event envelope missing thread_id")
 	}
 	if strings.TrimSpace(env.EventType) == "" {

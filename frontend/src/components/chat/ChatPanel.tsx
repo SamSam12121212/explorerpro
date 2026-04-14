@@ -31,7 +31,7 @@ interface ChatPanelProps {
   setReasoningEffort: (value: ReasoningEffort) => void;
   submitDisabled: boolean;
   thinking: boolean;
-  threadId: string | null;
+  threadId: number | null;
   uploadCount: number;
   addPendingFiles: (files: File[]) => Promise<void>;
 }

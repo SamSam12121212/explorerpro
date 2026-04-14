@@ -9,7 +9,7 @@ func TestDecodeDefaultsRootThreadID(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_123",
 		"kind":"thread.start",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{"model":"gpt-5.4","initial_input":[{"type":"message"}]}
 	}`))
 	if err != nil {
@@ -17,7 +17,7 @@ func TestDecodeDefaultsRootThreadID(t *testing.T) {
 	}
 
 	if cmd.RootThreadID != cmd.ThreadID {
-		t.Fatalf("RootThreadID = %q, want %q", cmd.RootThreadID, cmd.ThreadID)
+		t.Fatalf("RootThreadID = %d, want %d", cmd.RootThreadID, cmd.ThreadID)
 	}
 }
 
@@ -25,7 +25,7 @@ func TestStartBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_123",
 		"kind":"thread.start",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{
 			"model":"gpt-5.4",
 			"instructions":"be sharp",
@@ -58,7 +58,7 @@ func TestStartBody(t *testing.T) {
 	cmd, err = Decode([]byte(`{
 		"cmd_id":"cmd_branch",
 		"kind":"thread.start",
-		"thread_id":"thread_branch",
+		"thread_id":456,
 		"body":{
 			"model":"gpt-5.4",
 			"initial_input":[{"type":"message","role":"user"}],
@@ -83,7 +83,7 @@ func TestStartBodyAcceptsPreparedInputRef(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_prepared",
 		"kind":"thread.start",
-		"thread_id":"thread_prepared",
+		"thread_id":789,
 		"body":{
 			"model":"gpt-5.4",
 			"prepared_input_ref":"blob://prepared-inputs/pi_123.json"
@@ -107,7 +107,7 @@ func TestResumeBodyAcceptsPreparedInputRef(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_resume_prepared",
 		"kind":"thread.resume",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{
 			"prepared_input_ref":"blob://prepared-inputs/pi_456.json"
 		}
@@ -136,7 +136,7 @@ func TestSubmitToolOutputBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_456",
 		"kind":"thread.submit_tool_output",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{
 			"call_id":"call_123",
 			"output_item":{
@@ -164,7 +164,7 @@ func TestRotateSocketBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_rotate",
 		"kind":"thread.rotate_socket",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{
 			"reason":"pre_expiry_rotation",
 			"scheduled_at":"2026-03-13T19:20:00Z"
@@ -188,10 +188,10 @@ func TestChildResultBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_789",
 		"kind":"thread.child_completed",
-		"thread_id":"thread_parent",
+		"thread_id":100,
 		"body":{
 			"spawn_group_id":"sg_123",
-			"child_thread_id":"thread_child_1",
+			"child_thread_id":101,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
 			"result_ref":"blob://child-results/1.json"
@@ -256,8 +256,8 @@ func TestLogAttrs(t *testing.T) {
 		cmd, err := Decode([]byte(`{
 			"cmd_id":"cmd_start",
 			"kind":"thread.start",
-			"thread_id":"thread_123",
-			"root_thread_id":"thread_root",
+			"thread_id":123,
+			"root_thread_id":999,
 			"body":{
 				"model":"gpt-5.4",
 				"initial_input":[{"type":"message","role":"user"}],
@@ -272,8 +272,8 @@ func TestLogAttrs(t *testing.T) {
 		if attrs["cmd_id"] != "cmd_start" {
 			t.Fatalf("cmd_id = %v, want cmd_start", attrs["cmd_id"])
 		}
-		if attrs["root_thread_id"] != "thread_root" {
-			t.Fatalf("root_thread_id = %v, want thread_root", attrs["root_thread_id"])
+		if attrs["root_thread_id"] != int64(999) {
+			t.Fatalf("root_thread_id = %v, want 999", attrs["root_thread_id"])
 		}
 		if attrs["input_kind"] != "user_message" {
 			t.Fatalf("input_kind = %v, want user_message", attrs["input_kind"])
@@ -287,12 +287,12 @@ func TestLogAttrs(t *testing.T) {
 		cmd, err := Decode([]byte(`{
 			"cmd_id":"cmd_child",
 			"kind":"thread.child_completed",
-			"thread_id":"thread_parent",
-			"root_thread_id":"thread_root",
+			"thread_id":100,
+			"root_thread_id":999,
 			"causation_id":"resp_child",
 			"body":{
 				"spawn_group_id":"sg_123",
-				"child_thread_id":"thread_child",
+				"child_thread_id":101,
 				"child_response_id":"resp_child",
 				"status":"completed"
 			}
@@ -305,8 +305,8 @@ func TestLogAttrs(t *testing.T) {
 		if attrs["spawn_group_id"] != "sg_123" {
 			t.Fatalf("spawn_group_id = %v, want sg_123", attrs["spawn_group_id"])
 		}
-		if attrs["child_thread_id"] != "thread_child" {
-			t.Fatalf("child_thread_id = %v, want thread_child", attrs["child_thread_id"])
+		if attrs["child_thread_id"] != int64(101) {
+			t.Fatalf("child_thread_id = %v, want 101", attrs["child_thread_id"])
 		}
 		if attrs["child_response_id"] != "resp_child" {
 			t.Fatalf("child_response_id = %v, want resp_child", attrs["child_response_id"])
@@ -333,7 +333,7 @@ func TestReconcileBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_recover",
 		"kind":"thread.reconcile",
-		"thread_id":"thread_123",
+		"thread_id":123,
 		"body":{
 			"previous_worker_id":"worker_old",
 			"required_generation":7

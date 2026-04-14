@@ -36,7 +36,7 @@ export interface HealthResponse {
 
 export interface ThreadResponse {
   thread?: {
-    id?: string;
+    id?: number;
     status?: string;
     model?: string;
   };
@@ -44,12 +44,12 @@ export interface ThreadResponse {
 }
 
 export interface ThreadCreateResponse {
-  thread_id?: string;
+  thread_id?: number;
 }
 
 export interface ThreadListResponse {
   threads?: {
-    id?: string;
+    id?: number;
     label?: string;
     preview_text?: string;
     model?: string;
@@ -165,27 +165,27 @@ export interface ThreadItemsResponse {
 
 export interface ThreadStreamSnapshotMessage {
   type: "thread.snapshot";
-  thread_id: string;
+  thread_id: number;
   thread?: ThreadResponse["thread"];
   attached_documents?: AttachedDocument[];
 }
 
 export interface ThreadStreamItemsDeltaMessage {
   type: "thread.items.delta";
-  thread_id: string;
+  thread_id: number;
   items?: ThreadItemsResponse["items"];
   page?: ThreadItemsResponse["page"];
 }
 
 export interface ThreadStreamEventsDeltaMessage {
   type: "thread.events.delta";
-  thread_id: string;
+  thread_id: number;
   events?: Record<string, unknown>[];
 }
 
 export interface ThreadStreamHeartbeatMessage {
   type: "thread.heartbeat";
-  thread_id: string;
+  thread_id: number;
   time?: string;
 }
 

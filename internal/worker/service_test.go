@@ -13,7 +13,7 @@ func TestShouldRotateSocket(t *testing.T) {
 
 	now := time.Date(2026, 3, 13, 18, 30, 0, 0, time.UTC)
 	meta := threadstore.ThreadMeta{
-		ID:               "thread_123",
+		ID:               123,
 		OwnerWorkerID:    "worker_a",
 		Status:           threadstore.ThreadStatusReady,
 		SocketGeneration: 3,

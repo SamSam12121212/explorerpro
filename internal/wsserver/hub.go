@@ -20,14 +20,14 @@ type eventHub struct {
 	js     nats.JetStreamContext
 
 	mu      sync.RWMutex
-	clients map[string]map[*client]struct{}
+	clients map[int64]map[*client]struct{}
 }
 
 func newEventHub(logger *slog.Logger, js nats.JetStreamContext) *eventHub {
 	return &eventHub{
 		logger:  logger,
 		js:      js,
-		clients: map[string]map[*client]struct{}{},
+		clients: map[int64]map[*client]struct{}{},
 	}
 }
 
@@ -98,7 +98,7 @@ func (h *eventHub) ack(msg *nats.Msg) {
 	}
 }
 
-func (h *eventHub) register(threadID string, c *client) func() {
+func (h *eventHub) register(threadID int64, c *client) func() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -112,7 +112,7 @@ func (h *eventHub) register(threadID string, c *client) func() {
 	}
 }
 
-func (h *eventHub) unregister(threadID string, c *client) {
+func (h *eventHub) unregister(threadID int64, c *client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -126,7 +126,7 @@ func (h *eventHub) unregister(threadID string, c *client) {
 	}
 }
 
-func (h *eventHub) recipients(threadID string) []*client {
+func (h *eventHub) recipients(threadID int64) []*client {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 

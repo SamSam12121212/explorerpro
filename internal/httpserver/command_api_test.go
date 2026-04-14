@@ -17,11 +17,11 @@ type fakeEventHistoryStore struct {
 	err    error
 }
 
-func (s fakeEventHistoryStore) ListEvents(_ context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
+func (s fakeEventHistoryStore) ListEvents(_ context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	if threadID != "thread_123" {
+	if threadID != 123 {
 		return nil, errors.New("unexpected thread id")
 	}
 	if options.Limit != 2 || options.After != "41" || options.Before != "" {
@@ -75,51 +75,51 @@ func TestNormalizeResponseInput(t *testing.T) {
 func TestParseThreadRoute(t *testing.T) {
 	t.Parallel()
 
-	route, ok := parseThreadRoute("/threads/thread_123/commands")
+	route, ok := parseThreadRoute("/threads/123/commands")
 	if !ok {
 		t.Fatal("expected path to parse")
 	}
-	if route.ThreadID != "thread_123" {
-		t.Fatalf("unexpected thread id: %s", route.ThreadID)
+	if route.ThreadID != 123 {
+		t.Fatalf("unexpected thread id: %d", route.ThreadID)
 	}
 	if route.Resource != "commands" {
 		t.Fatalf("unexpected resource: %s", route.Resource)
 	}
 
-	route, ok = parseThreadRoute("/threads/thread_123")
+	route, ok = parseThreadRoute("/threads/123")
 	if !ok {
 		t.Fatal("expected thread path to parse")
 	}
-	if route.ThreadID != "thread_123" || route.Resource != "" {
+	if route.ThreadID != 123 || route.Resource != "" {
 		t.Fatalf("unexpected route: %+v", route)
 	}
 
-	route, ok = parseThreadRoute("/threads/thread_123/responses/resp_123")
+	route, ok = parseThreadRoute("/threads/123/responses/resp_123")
 	if !ok {
 		t.Fatal("expected response path to parse")
 	}
-	if route.ThreadID != "thread_123" || route.Resource != "responses" || route.ResourceID != "resp_123" {
+	if route.ThreadID != 123 || route.Resource != "responses" || route.ResourceID != "resp_123" {
 		t.Fatalf("unexpected response route: %+v", route)
 	}
 
-	if _, ok := parseThreadRoute("/threads/thread_123/commands/extra"); ok {
+	if _, ok := parseThreadRoute("/threads/123/commands/extra"); ok {
 		t.Fatal("expected invalid path to fail")
 	}
-	if _, ok := parseThreadRoute("/threads/thread_123/items/extra"); ok {
+	if _, ok := parseThreadRoute("/threads/123/items/extra"); ok {
 		t.Fatal("expected invalid items path to fail")
 	}
-	route, ok = parseThreadRoute("/threads/thread_123/spawn-groups/sg_123")
+	route, ok = parseThreadRoute("/threads/123/spawn-groups/sg_123")
 	if !ok {
 		t.Fatal("expected spawn group path to parse")
 	}
-	if route.ThreadID != "thread_123" || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "" {
+	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "" {
 		t.Fatalf("unexpected spawn group route: %+v", route)
 	}
-	route, ok = parseThreadRoute("/threads/thread_123/spawn-groups/sg_123/results")
+	route, ok = parseThreadRoute("/threads/123/spawn-groups/sg_123/results")
 	if !ok {
 		t.Fatal("expected spawn group results path to parse")
 	}
-	if route.ThreadID != "thread_123" || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "results" {
+	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "results" {
 		t.Fatalf("unexpected spawn group results route: %+v", route)
 	}
 }
@@ -292,7 +292,7 @@ func TestListEventsForReadUsesHistoryStore(t *testing.T) {
 		},
 	}
 
-	events, err := api.listEventsForRead(context.Background(), "thread_123", listQuery{
+	events, err := api.listEventsForRead(context.Background(), 123, listQuery{
 		Limit: 2,
 		After: "41",
 	})

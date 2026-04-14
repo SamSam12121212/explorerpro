@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,24 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
+
+func tid(name string) int64 {
+	var sum int64
+	for _, r := range name {
+		sum = sum*131 + int64(r)
+	}
+	if sum < 0 {
+		sum = -sum
+	}
+	if sum == 0 {
+		return 1
+	}
+	return sum
+}
+
+func stableDocumentChildThreadID(parentThreadID, parentCallID string, documentID int64, phase string) int64 {
+	return tid(fmt.Sprintf("%s_doc_%d", parentThreadID, documentID))
+}
 
 func TestWrapRawItemAsArray(t *testing.T) {
 	raw, err := wrapRawItemAsArray([]byte(`{"type":"function_call_output","call_id":"call_123"}`))
@@ -45,7 +64,7 @@ func TestStableDocumentChildThreadIDIgnoresInvocationAndPhase(t *testing.T) {
 	queryID := stableDocumentChildThreadID("thread_root", "call_2", 1, "query")
 
 	if warmupID != queryID {
-		t.Fatalf("stableDocumentChildThreadID() = %q and %q, want same stable id", warmupID, queryID)
+		t.Fatalf("stableDocumentChildThreadID() = %d and %d, want same stable id", warmupID, queryID)
 	}
 }
 
@@ -55,14 +74,14 @@ func TestAggregateSpawnOutputItem(t *testing.T) {
 		ParentCallID: "call_parent",
 	}, []threadstore.SpawnChildResult{
 		{
-			ChildThreadID:   "thread_child_1",
+			ChildThreadID:   tid("thread_child_1"),
 			Status:          "completed",
 			ChildResponseID: "resp_1",
 			AssistantText:   "Auth paths look healthy.",
 			ResultRef:       "blob://child-results/1.json",
 		},
 		{
-			ChildThreadID: "thread_child_2",
+			ChildThreadID: tid("thread_child_2"),
 			Status:        "failed",
 			ErrorRef:      "blob://child-results/2-error.json",
 		},
@@ -116,11 +135,11 @@ func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
 		ParentCallID: "call_parent",
 	}, []threadstore.SpawnChildResult{
 		{
-			ChildThreadID: "thread_warmup",
+			ChildThreadID: tid("thread_warmup"),
 			Status:        "pending",
 		},
 		{
-			ChildThreadID:   "thread_query",
+			ChildThreadID:   tid("thread_query"),
 			Status:          "completed",
 			ChildResponseID: "resp_query",
 		},
@@ -153,8 +172,8 @@ func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
 	if !ok {
 		t.Fatalf("child = %#v, want object", children[0])
 	}
-	if child["thread_id"] != "thread_query" {
-		t.Fatalf("thread_id = %v, want thread_query", child["thread_id"])
+	if child["thread_id"] != float64(tid("thread_query")) {
+		t.Fatalf("thread_id = %v, want %d", child["thread_id"], tid("thread_query"))
 	}
 }
 
@@ -171,17 +190,19 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 
 	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
 		ID:             "sg_doc_round",
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   parentCallID,
 	}, []threadstore.SpawnChildResult{
 		{
 			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_1", 1, "query"),
+			DocumentID:      1,
 			Status:          "completed",
 			ChildResponseID: "resp_doc_1",
 			AssistantText:   "Doc 1 summary",
 		},
 		{
 			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_2", 2, "query"),
+			DocumentID:      2,
 			Status:          "failed",
 			ChildResponseID: "resp_doc_2",
 			ErrorRef:        "blob://errors/doc-2.json",
@@ -205,7 +226,7 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 		t.Fatalf("decoded[1].call_id = %v, want call_parent_2", decoded[1]["call_id"])
 	}
 
-	for i, wantThreadID := range []string{
+	for i, wantThreadID := range []int64{
 		stableDocumentChildThreadID("thread_parent", "call_parent_1", 1, "query"),
 		stableDocumentChildThreadID("thread_parent", "call_parent_2", 2, "query"),
 	} {
@@ -227,8 +248,8 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 		if !ok {
 			t.Fatalf("payload[%d].children[0] = %#v, want object", i, children[0])
 		}
-		if child["thread_id"] != wantThreadID {
-			t.Fatalf("payload[%d].children[0].thread_id = %v, want %q", i, child["thread_id"], wantThreadID)
+		if child["thread_id"] != float64(wantThreadID) {
+			t.Fatalf("payload[%d].children[0].thread_id = %v, want %d", i, child["thread_id"], wantThreadID)
 		}
 	}
 }
@@ -278,9 +299,9 @@ func TestResponseCreateInputKind(t *testing.T) {
 
 func TestAppendThreadGraphAttrs(t *testing.T) {
 	meta := threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		RootThreadID:       "thread_root",
-		ParentThreadID:     "thread_parent",
+		ID:                 tid("thread_child"),
+		RootThreadID:       tid("thread_root"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              2,
 		ActiveSpawnGroupID: "sg_123",
@@ -289,8 +310,8 @@ func TestAppendThreadGraphAttrs(t *testing.T) {
 	got := appendThreadGraphAttrs([]any{"event", "start"}, meta)
 	want := []any{
 		"event", "start",
-		"root_thread_id", "thread_root",
-		"parent_thread_id", "thread_parent",
+		"root_thread_id", tid("thread_root"),
+		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
 		"depth", 2,
 		"spawn_group_id", "sg_123",
@@ -303,9 +324,9 @@ func TestAppendThreadGraphAttrs(t *testing.T) {
 
 func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
 	meta := threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		RootThreadID:       "thread_root",
-		ParentThreadID:     "thread_parent",
+		ID:                 tid("thread_child"),
+		RootThreadID:       tid("thread_root"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              2,
 		ActiveSpawnGroupID: "sg_meta",
@@ -320,7 +341,7 @@ func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
 		"spawn_group_id", "sg_explicit",
 		"depth", 9,
 		"root_thread_id", "thread_explicit_root",
-		"parent_thread_id", "thread_parent",
+		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
 	}
 
@@ -331,10 +352,10 @@ func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
 
 func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 	store := newFakeActorStore(t)
-	store.threads["thread_child"] = threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		RootThreadID:       "thread_root",
-		ParentThreadID:     "thread_parent",
+	store.threads[tid("thread_child")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_child"),
+		RootThreadID:       tid("thread_root"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              1,
 		ActiveSpawnGroupID: "sg_123",
@@ -347,15 +368,15 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 	}, agentcmd.Command{
 		CmdID:        "cmd_123",
 		Kind:         agentcmd.KindThreadStart,
-		ThreadID:     "thread_child",
-		RootThreadID: "thread_root",
+		ThreadID:     tid("thread_child"),
+		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
 		"cmd_id", "cmd_123",
 		"kind", agentcmd.KindThreadStart,
-		"root_thread_id", "thread_root",
-		"parent_thread_id", "thread_parent",
+		"root_thread_id", tid("thread_root"),
+		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
 		"depth", 1,
 		"spawn_group_id", "sg_123",
@@ -374,14 +395,14 @@ func TestAppendCommandLifecycleGraphAttrsFallsBackToCommandRootThreadID(t *testi
 	}, agentcmd.Command{
 		CmdID:        "cmd_123",
 		Kind:         agentcmd.KindThreadResume,
-		ThreadID:     "thread_missing",
-		RootThreadID: "thread_root",
+		ThreadID:     tid("thread_missing"),
+		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
 		"cmd_id", "cmd_123",
 		"kind", agentcmd.KindThreadResume,
-		"root_thread_id", "thread_root",
+		"root_thread_id", tid("thread_root"),
 		"depth", 0,
 	}
 
@@ -394,7 +415,7 @@ func TestValidateCommandPreconditions(t *testing.T) {
 	t.Parallel()
 
 	meta := threadstore.ThreadMeta{
-		ID:               "thread_123",
+		ID:               tid("thread_123"),
 		Status:           threadstore.ThreadStatusWaitingTool,
 		LastResponseID:   "resp_123",
 		SocketGeneration: 7,
@@ -678,15 +699,15 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_123"): {
 					{ID: 1, Filename: "report.pdf"},
 				},
 			},
 		},
 		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, req doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
-			if req.ThreadID != "thread_123" {
-				t.Fatalf("ThreadID = %q, want %q", req.ThreadID, "thread_123")
+			if req.ThreadID != tid("thread_123") {
+				t.Fatalf("ThreadID = %d, want %d", req.ThreadID, tid("thread_123"))
 			}
 			if req.Instructions != "Be concise." {
 				t.Fatalf("Instructions = %q, want %q", req.Instructions, "Be concise.")
@@ -705,7 +726,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -728,7 +749,7 @@ func TestApplyDocumentRuntimeContextSkipsWhenNoDocumentsAttached(t *testing.T) {
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{},
+			documentsByThread: map[int64][]docstore.Document{},
 		},
 		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, _ doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
 			t.Fatal("RuntimeContext should not be called when no documents are attached")
@@ -741,7 +762,7 @@ func TestApplyDocumentRuntimeContextSkipsWhenNoDocumentsAttached(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -761,8 +782,8 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_123"): {
 					{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 				},
 			},
@@ -777,7 +798,7 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -821,8 +842,8 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_123"): {
 					{ID: 1, Filename: "report.pdf"},
 				},
 			},
@@ -838,7 +859,7 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 	}
 
 	payload, err := actor.buildThreadResponseCreatePayload(threadstore.ThreadMeta{
-		ID: "thread_123",
+		ID: tid("thread_123"),
 	}, map[string]any{
 		"model": "gpt-5.4",
 		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
@@ -1014,7 +1035,7 @@ func TestResolveBranchPreviousResponseID(t *testing.T) {
 	t.Parallel()
 
 	parent := threadstore.ThreadMeta{
-		ID:             "thread_parent",
+		ID:             tid("thread_parent"),
 		LastResponseID: "resp_parent_latest",
 	}
 
@@ -1056,7 +1077,7 @@ func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 
 	merged, err := mergeMetadataJSON(`{"tenant":"acme"}`, map[string]string{
 		"spawn_mode":                spawnModeWarmBranch,
-		"branch_parent_thread_id":   "thread_parent",
+		"branch_parent_thread_id":   formatThreadIDLocal(tid("thread_parent")),
 		"branch_parent_response_id": "resp_parent",
 		"branch_index":              "2",
 	}, true)
@@ -1075,8 +1096,8 @@ func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 	if decoded["spawn_mode"] != spawnModeWarmBranch {
 		t.Fatalf("spawn_mode = %v, want %s", decoded["spawn_mode"], spawnModeWarmBranch)
 	}
-	if decoded["branch_parent_thread_id"] != "thread_parent" {
-		t.Fatalf("branch_parent_thread_id = %v, want thread_parent", decoded["branch_parent_thread_id"])
+	if decoded["branch_parent_thread_id"] != formatThreadIDLocal(tid("thread_parent")) {
+		t.Fatalf("branch_parent_thread_id = %v, want %s", decoded["branch_parent_thread_id"], formatThreadIDLocal(tid("thread_parent")))
 	}
 	if decoded["branch_parent_response_id"] != "resp_parent" {
 		t.Fatalf("branch_parent_response_id = %v, want resp_parent", decoded["branch_parent_response_id"])
@@ -1215,7 +1236,7 @@ func TestEnsureSessionReusesConnectedSessionWithoutPing(t *testing.T) {
 	}
 
 	actor := &threadActor{
-		threadID:       "thread_test",
+		threadID:       tid("thread_test"),
 		logger:         testActorLogger(),
 		cfg:            cfg,
 		ctx:            context.Background(),
@@ -1245,7 +1266,7 @@ func TestSendResponseCreateReconnectsAfterStaleSocket(t *testing.T) {
 
 	factoryCalls := 0
 	actor := &threadActor{
-		threadID: "thread_test",
+		threadID: tid("thread_test"),
 		logger:   testActorLogger(),
 		cfg:      cfg,
 		ctx:      context.Background(),
@@ -1283,9 +1304,9 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_test"] = threadstore.ThreadMeta{
-		ID:               "thread_test",
-		RootThreadID:     "thread_test",
+	store.threads[tid("thread_test")] = threadstore.ThreadMeta{
+		ID:               tid("thread_test"),
+		RootThreadID:     tid("thread_test"),
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 4,
@@ -1300,7 +1321,7 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 	}
 
 	actor := &threadActor{
-		threadID:       "thread_test",
+		threadID:       tid("thread_test"),
 		workerID:       "worker-local-1",
 		logger:         testActorLogger(),
 		cfg:            cfg,
@@ -1308,7 +1329,7 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 		store:          store,
 		session:        staleSession,
 		openAISocketID: "socket_old",
-		meta:           store.threads["thread_test"],
+		meta:           store.threads[tid("thread_test")],
 		sessionFactory: func() *openaiws.Session {
 			return openaiws.NewSession(cfg, &actorTestDialer{conn: freshConn})
 		},
@@ -1326,8 +1347,8 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 	if len(store.createdSockets) != 1 {
 		t.Fatalf("createdSockets = %d, want 1", len(store.createdSockets))
 	}
-	if store.createdSockets[0].ThreadID != "thread_test" {
-		t.Fatalf("created socket thread_id = %q, want thread_test", store.createdSockets[0].ThreadID)
+	if store.createdSockets[0].ThreadID != tid("thread_test") {
+		t.Fatalf("created socket thread_id = %d, want %d", store.createdSockets[0].ThreadID, tid("thread_test"))
 	}
 	if len(store.disconnectedSockets) != 1 || store.disconnectedSockets[0] != "socket_old" {
 		t.Fatalf("disconnectedSockets = %#v, want [socket_old]", store.disconnectedSockets)
@@ -1346,8 +1367,8 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
-		documentsByThread: map[string][]docstore.Document{
-			"thread_parent": {
+		documentsByThread: map[int64][]docstore.Document{
+			tid("thread_parent"): {
 				{ID: 1, Filename: "report.pdf"},
 			},
 		},
@@ -1372,8 +1393,8 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	cmd := agentcmd.Command{
 		CmdID:        "cmd_start",
 		Kind:         agentcmd.KindThreadStart,
-		ThreadID:     "thread_parent",
-		RootThreadID: "thread_parent",
+		ThreadID:     tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Body:         body,
 	}
 
@@ -1423,8 +1444,8 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 	cmd := agentcmd.Command{
 		CmdID:        "cmd_start",
 		Kind:         agentcmd.KindThreadStart,
-		ThreadID:     "thread_parent",
-		RootThreadID: "thread_parent",
+		ThreadID:     tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Body:         body,
 	}
 
@@ -1432,7 +1453,7 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 		t.Fatalf("handleStart() error = %v", err)
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 
 	var metadata map[string]string
 	if err := json.Unmarshal([]byte(meta.MetadataJSON), &metadata); err != nil {
@@ -1479,8 +1500,8 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
-		documentsByThread: map[string][]docstore.Document{
-			"thread_parent": {
+		documentsByThread: map[int64][]docstore.Document{
+			tid("thread_parent"): {
 				{ID: 2, Filename: "followup.pdf"},
 			},
 		},
@@ -1494,7 +1515,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 	})
 
 	meta := threadstore.ThreadMeta{
-		ID:               "thread_parent",
+		ID:               tid("thread_parent"),
 		Model:            "gpt-5.4",
 		Instructions:     "Base instructions.",
 		LastResponseID:   "resp_prev",
@@ -1561,8 +1582,8 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 	cmd := agentcmd.Command{
 		CmdID:        "cmd_start_prepared",
 		Kind:         agentcmd.KindThreadStart,
-		ThreadID:     "thread_parent",
-		RootThreadID: "thread_parent",
+		ThreadID:     tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Body:         body,
 	}
 
@@ -1620,7 +1641,7 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 	if !foundCheckpoint {
 		t.Fatal("expected client.response.create checkpoint to be appended")
 	}
-	if raw := string(store.latestClientCreateByID["thread_parent"]); !strings.Contains(raw, ref) {
+	if raw := string(store.latestClientCreateByID[tid("thread_parent")]); !strings.Contains(raw, ref) {
 		t.Fatalf("saved checkpoint = %s, want prepared_input_ref %q", raw, ref)
 	}
 }
@@ -1629,8 +1650,8 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:             "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:             tid("thread_parent"),
 		Status:         threadstore.ThreadStatusReady,
 		Model:          "gpt-5.4",
 		LastResponseID: "resp_prev",
@@ -1671,8 +1692,8 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 	cmd := agentcmd.Command{
 		CmdID:        "cmd_resume_prepared",
 		Kind:         agentcmd.KindThreadResume,
-		ThreadID:     "thread_parent",
-		RootThreadID: "thread_parent",
+		ThreadID:     tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Body:         body,
 	}
 
@@ -1716,7 +1737,7 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 	if !ok || part["text"] != "prepared continue" {
 		t.Fatalf("content[0] = %#v, want prepared continue", content[0])
 	}
-	if raw := string(store.latestClientCreateByID["thread_parent"]); !strings.Contains(raw, ref) {
+	if raw := string(store.latestClientCreateByID[tid("thread_parent")]); !strings.Contains(raw, ref) {
 		t.Fatalf("saved checkpoint = %s, want prepared_input_ref %q", raw, ref)
 	}
 }
@@ -1789,8 +1810,8 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_retry"] = threadstore.ThreadMeta{
-		ID:               "thread_retry",
+	store.threads[tid("thread_retry")] = threadstore.ThreadMeta{
+		ID:               tid("thread_retry"),
 		Status:           threadstore.ThreadStatusRunning,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 3,
@@ -1800,14 +1821,14 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 
 	conn := &actorTestConn{}
 	actor := newActorRecoveryHarness(t, store, conn)
-	actor.threadID = "thread_retry"
-	actor.setMeta(store.threads["thread_retry"])
+	actor.threadID = tid("thread_retry")
+	actor.setMeta(store.threads[tid("thread_retry")])
 
-	if err := actor.failThreadAfterRetryExhaustion("thread_retry"); err != nil {
+	if err := actor.failThreadAfterRetryExhaustion(tid("thread_retry")); err != nil {
 		t.Fatalf("failThreadAfterRetryExhaustion() error = %v", err)
 	}
 
-	meta := store.threads["thread_retry"]
+	meta := store.threads[tid("thread_retry")]
 	if meta.Status != threadstore.ThreadStatusFailed {
 		t.Fatalf("status = %s, want failed", meta.Status)
 	}
@@ -1820,8 +1841,8 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 	if !meta.SocketExpiresAt.IsZero() {
 		t.Fatalf("socket expires at = %s, want zero", meta.SocketExpiresAt)
 	}
-	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_retry" {
-		t.Fatalf("releasedThreads = %#v, want [thread_retry]", store.releasedThreads)
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != tid("thread_retry") {
+		t.Fatalf("releasedThreads = %#v, want [%d]", store.releasedThreads, tid("thread_retry"))
 	}
 	if !conn.closed {
 		t.Fatal("expected session to be closed")
@@ -1832,8 +1853,8 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_idle"] = threadstore.ThreadMeta{
-		ID:               "thread_idle",
+	store.threads[tid("thread_idle")] = threadstore.ThreadMeta{
+		ID:               tid("thread_idle"),
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 5,
@@ -1842,14 +1863,14 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 
 	conn := &actorTestConn{}
 	actor := newActorRecoveryHarness(t, store, conn)
-	actor.threadID = "thread_idle"
-	actor.setMeta(store.threads["thread_idle"])
+	actor.threadID = tid("thread_idle")
+	actor.setMeta(store.threads[tid("thread_idle")])
 	actor.openAISocketID = "socket_live_1"
 
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_disconnect_1",
 		Kind:     agentcmd.KindThreadDisconnectSocket,
-		ThreadID: "thread_idle",
+		ThreadID: tid("thread_idle"),
 	}
 
 	if err := actor.handleDisconnectSocket(cmd); err != nil {
@@ -1859,14 +1880,14 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	if !conn.closed {
 		t.Fatal("expected session to be closed")
 	}
-	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_idle" {
-		t.Fatalf("releasedThreads = %#v, want [thread_idle]", store.releasedThreads)
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != tid("thread_idle") {
+		t.Fatalf("releasedThreads = %#v, want [%d]", store.releasedThreads, tid("thread_idle"))
 	}
 	if len(store.disconnectedSockets) != 1 || store.disconnectedSockets[0] != "socket_live_1" {
 		t.Fatalf("disconnectedSockets = %#v, want [socket_live_1]", store.disconnectedSockets)
 	}
 
-	meta := store.threads["thread_idle"]
+	meta := store.threads[tid("thread_idle")]
 	if meta.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("status = %s, want ready (unchanged)", meta.Status)
 	}
@@ -1876,21 +1897,21 @@ func TestHandleDisconnectSocketRejectsNonIdleThread(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_running"] = threadstore.ThreadMeta{
-		ID:               "thread_running",
+	store.threads[tid("thread_running")] = threadstore.ThreadMeta{
+		ID:               tid("thread_running"),
 		Status:           threadstore.ThreadStatusRunning,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 3,
 	}
 
 	actor := newActorRecoveryHarness(t, store, nil)
-	actor.threadID = "thread_running"
-	actor.setMeta(store.threads["thread_running"])
+	actor.threadID = tid("thread_running")
+	actor.setMeta(store.threads[tid("thread_running")])
 
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_disconnect_2",
 		Kind:     agentcmd.KindThreadDisconnectSocket,
-		ThreadID: "thread_running",
+		ThreadID: tid("thread_running"),
 	}
 
 	err := actor.handleDisconnectSocket(cmd)
@@ -1906,29 +1927,29 @@ func TestHandleDisconnectSocketNoopsWithoutSession(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_nosess"] = threadstore.ThreadMeta{
-		ID:               "thread_nosess",
+	store.threads[tid("thread_nosess")] = threadstore.ThreadMeta{
+		ID:               tid("thread_nosess"),
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 2,
 	}
 
 	actor := newActorRecoveryHarness(t, store, nil)
-	actor.threadID = "thread_nosess"
-	actor.setMeta(store.threads["thread_nosess"])
+	actor.threadID = tid("thread_nosess")
+	actor.setMeta(store.threads[tid("thread_nosess")])
 
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_disconnect_3",
 		Kind:     agentcmd.KindThreadDisconnectSocket,
-		ThreadID: "thread_nosess",
+		ThreadID: tid("thread_nosess"),
 	}
 
 	if err := actor.handleDisconnectSocket(cmd); err != nil {
 		t.Fatalf("handleDisconnectSocket() error = %v", err)
 	}
 
-	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_nosess" {
-		t.Fatalf("releasedThreads = %#v, want [thread_nosess]", store.releasedThreads)
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != tid("thread_nosess") {
+		t.Fatalf("releasedThreads = %#v, want [%d]", store.releasedThreads, tid("thread_nosess"))
 	}
 }
 
@@ -1936,7 +1957,7 @@ func TestShouldReleaseTerminalChildResources(t *testing.T) {
 	t.Parallel()
 
 	if !shouldReleaseTerminalChildResources(threadstore.ThreadMeta{
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		Status:         threadstore.ThreadStatusCompleted,
 	}) {
 		t.Fatal("expected completed child thread to release resources")
@@ -1949,7 +1970,7 @@ func TestShouldReleaseTerminalChildResources(t *testing.T) {
 	}
 
 	if shouldReleaseTerminalChildResources(threadstore.ThreadMeta{
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		Status:         threadstore.ThreadStatusWaitingChildren,
 	}) {
 		t.Fatal("expected non-terminal child thread to keep active resources")
@@ -1979,13 +2000,13 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:            "thread_parent",
-		RootThreadID:  "thread_root",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:            tid("thread_parent"),
+		RootThreadID:  tid("thread_root"),
 		OwnerWorkerID: "worker-parent",
 	}
 	store.appendedItems = append(store.appendedItems, threadstore.ItemLogEntry{
-		ThreadID:   "thread_child",
+		ThreadID:   tid("thread_child"),
 		ResponseID: "resp_child_1",
 		ItemType:   "message",
 		Direction:  "output",
@@ -2012,8 +2033,8 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 	}
 
 	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		ParentThreadID:     "thread_parent",
+		ID:                 tid("thread_child"),
+		ParentThreadID:     tid("thread_parent"),
 		ActiveSpawnGroupID: "sg_123",
 		LastResponseID:     "resp_child_1",
 		Status:             threadstore.ThreadStatusCompleted,
@@ -2040,9 +2061,9 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:            "thread_parent",
-		RootThreadID:  "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:            tid("thread_parent"),
+		RootThreadID:  tid("thread_parent"),
 		OwnerWorkerID: "worker-parent",
 	}
 
@@ -2064,8 +2085,8 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 	}
 
 	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		ParentThreadID:     "thread_parent",
+		ID:                 tid("thread_child"),
+		ParentThreadID:     tid("thread_parent"),
 		ActiveSpawnGroupID: "sg_123",
 		LastResponseID:     "resp_child_1",
 		Status:             threadstore.ThreadStatusIncomplete,
@@ -2091,14 +2112,14 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_parent"),
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		ActiveSpawnGroupID: "sg_waiting",
 	}
 	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
 		ID:             "sg_waiting",
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_parent",
 		Expected:       2,
 		Status:         threadstore.SpawnGroupStatusWaiting,
@@ -2109,10 +2130,10 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_child_completed",
 		Kind:     agentcmd.KindThreadChildCompleted,
-		ThreadID: "thread_parent",
+		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"sg_waiting",
-			"child_thread_id":"thread_child_1",
+			"child_thread_id":1,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
 			"status":"completed"
@@ -2136,9 +2157,9 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
-		RootThreadID:       "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_parent"),
+		RootThreadID:       tid("thread_parent"),
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		Model:              "gpt-5.4",
 		LastResponseID:     "resp_parent_prev",
@@ -2146,7 +2167,7 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	}
 	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
 		ID:             "sg_waiting",
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_parent",
 		Expected:       1,
 		Status:         threadstore.SpawnGroupStatusWaiting,
@@ -2163,10 +2184,10 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_child_completed",
 		Kind:     agentcmd.KindThreadChildCompleted,
-		ThreadID: "thread_parent",
+		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"sg_waiting",
-			"child_thread_id":"thread_child_1",
+			"child_thread_id":1,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
 			"status":"completed"
@@ -2177,7 +2198,7 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 		t.Fatalf("handleChildResult() error = %v", err)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[tid("thread_parent")]
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final.Status = %q, want ready", final.Status)
 	}
@@ -2211,11 +2232,11 @@ type actorTestDialer struct {
 }
 
 type fakeThreadDocumentStore struct {
-	documentsByThread map[string][]docstore.Document
+	documentsByThread map[int64][]docstore.Document
 	err               error
 }
 
-func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID string, _ int64) ([]docstore.Document, error) {
+func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID int64, _ int64) ([]docstore.Document, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -2226,7 +2247,7 @@ func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID stri
 	return cloned, nil
 }
 
-func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID string, documentIDs []int64) ([]int64, error) {
+func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID int64, documentIDs []int64) ([]int64, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -2381,8 +2402,8 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_123"): {
 					{ID: 1, Filename: "report.pdf"},
 				},
 			},
@@ -2400,7 +2421,7 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext("thread_123", payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -2452,14 +2473,14 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	actor := &threadActor{
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: 1}},
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_123"): {{ID: 1}},
 			},
 		},
 		store: store,
 	}
 
-	meta := threadstore.ThreadMeta{ID: "thread_123", RootThreadID: "thread_123"}
+	meta := threadstore.ThreadMeta{ID: tid("thread_123"), RootThreadID: tid("thread_123")}
 	_, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
@@ -2497,18 +2518,20 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:           "thread_parent",
-		RootThreadID: "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:           tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 	}
-	store.threads["thread_doc_old"] = threadstore.ThreadMeta{
-		ID:             "thread_doc_old",
-		RootThreadID:   "thread_parent",
-		ParentThreadID: "thread_parent",
+	store.threads[tid("thread_doc_old")] = threadstore.ThreadMeta{
+		ID:             tid("thread_doc_old"),
+		RootThreadID:   tid("thread_parent"),
+		ParentThreadID: tid("thread_parent"),
 		Status:         threadstore.ThreadStatusCompleted,
 		Model:          "gpt-5.4-mini",
 		LastResponseID: "resp_doc_old",
-		MetadataJSON:   `{"document_id":"1","spawn_mode":"document_query"}`,
+		ChildKind:      "document",
+		DocumentID:     1,
+		DocumentPhase:  "query",
 		CreatedAt:      time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 4, 13, 10, 1, 0, 0, time.UTC),
 	}
@@ -2519,8 +2542,8 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 		logger: testActorLogger(),
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_parent"): {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
@@ -2539,7 +2562,7 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 		},
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
@@ -2574,18 +2597,20 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:           "thread_parent",
-		RootThreadID: "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:           tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 	}
-	store.threads["thread_doc_ready"] = threadstore.ThreadMeta{
-		ID:             "thread_doc_ready",
-		RootThreadID:   "thread_parent",
-		ParentThreadID: "thread_parent",
+	store.threads[tid("thread_doc_ready")] = threadstore.ThreadMeta{
+		ID:             tid("thread_doc_ready"),
+		RootThreadID:   tid("thread_parent"),
+		ParentThreadID: tid("thread_parent"),
 		Status:         threadstore.ThreadStatusReady,
 		Model:          "gpt-5.4-mini",
 		LastResponseID: "resp_doc_ready",
-		MetadataJSON:   `{"document_id":"1","spawn_mode":"document_query"}`,
+		ChildKind:      "document",
+		DocumentID:     1,
+		DocumentPhase:  "query",
 		CreatedAt:      time.Date(2026, 4, 13, 11, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 4, 13, 11, 1, 0, 0, time.UTC),
 	}
@@ -2596,8 +2621,8 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 		logger: testActorLogger(),
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_parent"): {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
@@ -2616,7 +2641,7 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 		},
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
@@ -2651,9 +2676,9 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:           "thread_parent",
-		RootThreadID: "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:           tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Model:        "gpt-5.4",
 	}
 
@@ -2664,8 +2689,8 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 		logger: testActorLogger(),
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_parent"): {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
@@ -2686,7 +2711,7 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 		},
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
@@ -2732,9 +2757,9 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:           "thread_parent",
-		RootThreadID: "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:           tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Model:        "gpt-5.4",
 	}
 
@@ -2745,8 +2770,8 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 		logger: testActorLogger(),
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
-			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_parent"): {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
@@ -2765,7 +2790,7 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 		},
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
@@ -2785,8 +2810,8 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	if len(publishedCommands) != 1 {
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
-	if publishedCommands[0].ThreadID != stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup") {
-		t.Fatalf("publishedCommands[0].ThreadID = %q, want warmup thread id", publishedCommands[0].ThreadID)
+	if publishedCommands[0].ThreadID <= 0 {
+		t.Fatalf("publishedCommands[0].ThreadID = %d, want positive warmup thread id", publishedCommands[0].ThreadID)
 	}
 
 	var body map[string]any
@@ -2817,20 +2842,20 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	spawnGroupID := stableDocumentSpawnGroupID("thread_parent", "call_1")
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
-		RootThreadID:       "thread_parent",
+	spawnGroupID := stableDocumentSpawnGroupID(tid("thread_parent"), "call_1")
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_parent"),
+		RootThreadID:       tid("thread_parent"),
 		Model:              "gpt-5.4",
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		ActiveSpawnGroupID: spawnGroupID,
 	}
 
-	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup")
+	warmupThreadID := tid("thread_warmup")
 	store.threads[warmupThreadID] = threadstore.ThreadMeta{
 		ID:                 warmupThreadID,
-		RootThreadID:       "thread_parent",
-		ParentThreadID:     "thread_parent",
+		RootThreadID:       tid("thread_parent"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_1",
 		Depth:              1,
 		Status:             threadstore.ThreadStatusCompleted,
@@ -2838,10 +2863,13 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		LastResponseID:     "resp_warmup",
 		ActiveSpawnGroupID: spawnGroupID,
 		MetadataJSON:       `{"document_id":"1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+		ChildKind:          "document",
+		DocumentID:         1,
+		DocumentPhase:      "warmup",
 	}
 	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
 		ID:             spawnGroupID,
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_1",
 		Expected:       1,
 		Status:         threadstore.SpawnGroupStatusWaiting,
@@ -2871,10 +2899,10 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_child_completed",
 		Kind:     agentcmd.KindThreadChildCompleted,
-		ThreadID: "thread_parent",
+		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"` + spawnGroupID + `",
-			"child_thread_id":"` + warmupThreadID + `",
+			"child_thread_id":` + strconv.FormatInt(warmupThreadID, 10) + `,
 			"child_response_id":"resp_warmup",
 			"status":"completed"
 		}`),
@@ -2904,9 +2932,9 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
 
-	queryThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "query")
+	queryThreadID := warmupThreadID
 	if publishedCommands[0].ThreadID != queryThreadID {
-		t.Fatalf("publishedCommands[0].ThreadID = %q, want %q", publishedCommands[0].ThreadID, queryThreadID)
+		t.Fatalf("publishedCommands[0].ThreadID = %d, want %d", publishedCommands[0].ThreadID, queryThreadID)
 	}
 	if publishedCommands[0].CausationID != "resp_warmup" {
 		t.Fatalf("publishedCommands[0].CausationID = %q, want resp_warmup", publishedCommands[0].CausationID)
@@ -2934,13 +2962,13 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	if metadata["spawn_mode"] != "document_query" {
 		t.Fatalf("spawn_mode = %v, want document_query", metadata["spawn_mode"])
 	}
-	if metadata["bootstrap_child_thread_id"] != warmupThreadID {
-		t.Fatalf("bootstrap_child_thread_id = %v, want %q", metadata["bootstrap_child_thread_id"], warmupThreadID)
+	if metadata["bootstrap_child_thread_id"] != strconv.FormatInt(warmupThreadID, 10) {
+		t.Fatalf("bootstrap_child_thread_id = %v, want %s", metadata["bootstrap_child_thread_id"], strconv.FormatInt(warmupThreadID, 10))
 	}
 
 	queryMeta, ok := store.threads[queryThreadID]
 	if !ok {
-		t.Fatalf("query thread %q was not created", queryThreadID)
+		t.Fatalf("query thread %d was not created", queryThreadID)
 	}
 	if queryMeta.ActiveSpawnGroupID != spawnGroupID {
 		t.Fatalf("queryMeta.ActiveSpawnGroupID = %q, want %q", queryMeta.ActiveSpawnGroupID, spawnGroupID)
@@ -2952,7 +2980,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	logs := logBuf.String()
 	for _, needle := range []string{
 		`msg="spawning child thread"`,
-		`bootstrap_child_thread_id=` + warmupThreadID,
+		`bootstrap_child_thread_id=` + strconv.FormatInt(warmupThreadID, 10),
 		`document_name=report.pdf`,
 		`phase=query`,
 		`has_previous_response_id=true`,
@@ -2967,9 +2995,9 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
-		RootThreadID:     "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:               tid("thread_parent"),
+		RootThreadID:     tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
 		Model:            "gpt-5.4",
 		OwnerWorkerID:    "worker-local-1",
@@ -2992,8 +3020,8 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	var publishedCommands []agentcmd.Command
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
-		documentsByThread: map[string][]docstore.Document{
-			"thread_parent": {{ID: 1, Filename: "report.pdf"}},
+		documentsByThread: map[int64][]docstore.Document{
+			tid("thread_parent"): {{ID: 1, Filename: "report.pdf"}},
 		},
 	}
 	actor.docStore = &fakeDocActorDocStore{
@@ -3007,12 +3035,12 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 		return nil
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if err := actor.streamUntilTerminal(meta); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[tid("thread_parent")]
 	if final.Status != threadstore.ThreadStatusWaitingChildren {
 		t.Fatalf("final status = %q, want waiting_children", final.Status)
 	}
@@ -3033,9 +3061,9 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
-		RootThreadID:     "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:               tid("thread_parent"),
+		RootThreadID:     tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
 		Model:            "gpt-5.4",
 		OwnerWorkerID:    "worker-local-1",
@@ -3065,8 +3093,8 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	var publishedCommands []agentcmd.Command
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
-		documentsByThread: map[string][]docstore.Document{
-			"thread_parent": {
+		documentsByThread: map[int64][]docstore.Document{
+			tid("thread_parent"): {
 				{ID: 1, Filename: "report-1.pdf"},
 				{ID: 2, Filename: "report-2.pdf"},
 			},
@@ -3084,12 +3112,12 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 		return nil
 	}
 
-	meta := store.threads["thread_parent"]
+	meta := store.threads[tid("thread_parent")]
 	if err := actor.streamUntilTerminal(meta); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[tid("thread_parent")]
 	if final.Status != threadstore.ThreadStatusWaitingChildren {
 		t.Fatalf("final status = %q, want waiting_children", final.Status)
 	}
@@ -3117,20 +3145,20 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	spawnGroupID := stableDocumentSpawnGroupID("thread_parent", "call_1")
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
-		RootThreadID:       "thread_parent",
+	spawnGroupID := stableDocumentSpawnGroupID(tid("thread_parent"), "call_1")
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_parent"),
+		RootThreadID:       tid("thread_parent"),
 		Model:              "gpt-5.4",
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		ActiveSpawnGroupID: spawnGroupID,
 	}
 
-	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup")
+	warmupThreadID := tid("thread_warmup")
 	store.threads[warmupThreadID] = threadstore.ThreadMeta{
 		ID:                 warmupThreadID,
-		RootThreadID:       "thread_parent",
-		ParentThreadID:     "thread_parent",
+		RootThreadID:       tid("thread_parent"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_1",
 		Depth:              1,
 		Status:             threadstore.ThreadStatusRunning,
@@ -3139,10 +3167,13 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: spawnGroupID,
 		MetadataJSON:       `{"document_id":"1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+		ChildKind:          "document",
+		DocumentID:         1,
+		DocumentPhase:      "warmup",
 	}
 	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
 		ID:             spawnGroupID,
-		ParentThreadID: "thread_parent",
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_1",
 		Expected:       1,
 		Status:         threadstore.SpawnGroupStatusWaiting,
@@ -3194,16 +3225,16 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:           "thread_parent",
-		RootThreadID: "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:           tid("thread_parent"),
+		RootThreadID: tid("thread_parent"),
 		Status:       threadstore.ThreadStatusWaitingChildren,
 		Model:        "gpt-5.4",
 	}
-	store.threads["thread_child"] = threadstore.ThreadMeta{
-		ID:                 "thread_child",
-		RootThreadID:       "thread_parent",
-		ParentThreadID:     "thread_parent",
+	store.threads[tid("thread_child")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_child"),
+		RootThreadID:       tid("thread_parent"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Status:             threadstore.ThreadStatusRunning,
 		Model:              "gpt-5.4-mini",
@@ -3219,13 +3250,13 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 		},
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
-	actor.threadID = "thread_child"
+	actor.threadID = tid("thread_child")
 
-	if err := actor.streamUntilTerminal(store.threads["thread_child"]); err != nil {
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
-	final := store.threads["thread_child"]
+	final := store.threads[tid("thread_child")]
 	if final.Status != threadstore.ThreadStatusCompleted {
 		t.Fatalf("final.Status = %q, want completed", final.Status)
 	}
@@ -3235,8 +3266,8 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 	if final.ActiveSpawnGroupID != "" {
 		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
 	}
-	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_child" {
-		t.Fatalf("releasedThreads = %#v, want [thread_child]", store.releasedThreads)
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != tid("thread_child") {
+		t.Fatalf("releasedThreads = %#v, want [%d]", store.releasedThreads, tid("thread_child"))
 	}
 }
 
@@ -3244,17 +3275,17 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:            "thread_parent",
-		RootThreadID:  "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:            tid("thread_parent"),
+		RootThreadID:  tid("thread_parent"),
 		Status:        threadstore.ThreadStatusWaitingChildren,
 		Model:         "gpt-5.4",
 		OwnerWorkerID: "worker-parent",
 	}
-	store.threads["thread_doc_query"] = threadstore.ThreadMeta{
-		ID:                 "thread_doc_query",
-		RootThreadID:       "thread_parent",
-		ParentThreadID:     "thread_parent",
+	store.threads[tid("thread_doc_query")] = threadstore.ThreadMeta{
+		ID:                 tid("thread_doc_query"),
+		RootThreadID:       tid("thread_parent"),
+		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Status:             threadstore.ThreadStatusRunning,
 		Model:              "gpt-5.4-mini",
@@ -3262,6 +3293,9 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: "sg_waiting",
 		MetadataJSON:       `{"document_id":"1","spawn_mode":"document_query"}`,
+		ChildKind:          "document",
+		DocumentID:         1,
+		DocumentPhase:      "query",
 	}
 
 	conn := &actorTestConn{
@@ -3271,13 +3305,13 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		},
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
-	actor.threadID = "thread_doc_query"
+	actor.threadID = tid("thread_doc_query")
 
-	if err := actor.streamUntilTerminal(store.threads["thread_doc_query"]); err != nil {
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_doc_query")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
-	final := store.threads["thread_doc_query"]
+	final := store.threads[tid("thread_doc_query")]
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final.Status = %q, want ready", final.Status)
 	}
@@ -3299,8 +3333,8 @@ func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
+	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
+		ID:               tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 1,
@@ -3316,12 +3350,12 @@ func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
 	var publishedEventTypes []string
 
 	actor := newActorRecoveryHarness(t, store, conn)
-	actor.publishEvent = func(_ context.Context, _ string, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+	actor.publishEvent = func(_ context.Context, _ int64, _ uint64, _ string, eventType string, _ json.RawMessage) error {
 		publishedEventTypes = append(publishedEventTypes, eventType)
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads["thread_parent"]); err != nil {
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_parent")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3375,7 +3409,7 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	}
 
 	actor.flushDeltaLogForDoneEvent(deltaLogs, threadstore.ThreadMeta{
-		RootThreadID: "thread_root",
+		RootThreadID: tid("thread_root"),
 		Depth:        0,
 	}, "resp_123", openaiws.EventTypeResponseFunctionArgsDone)
 
@@ -3386,7 +3420,7 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	if !strings.Contains(logs, `event_type=response.function_call_arguments.delta`) {
 		t.Fatalf("logs = %q, want flushed delta event type", logs)
 	}
-	if !strings.Contains(logs, `root_thread_id=thread_root`) {
+	if !strings.Contains(logs, `root_thread_id=`+strconv.FormatInt(tid("thread_root"), 10)) {
 		t.Fatalf("logs = %q, want root_thread_id", logs)
 	}
 	if !strings.Contains(logs, `response_id=resp_123`) {
@@ -3536,8 +3570,8 @@ func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
 	}
 
 	actor.logOutputItemEvent(threadstore.ThreadMeta{
-		RootThreadID:   "thread_root",
-		ParentThreadID: "thread_parent",
+		RootThreadID:   tid("thread_root"),
+		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_parent",
 		Depth:          1,
 	}, "resp_123", openaiws.ServerEvent{
@@ -3558,8 +3592,8 @@ func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
 	for _, needle := range []string{
 		`event_type=response.output_item.done.function_call`,
 		`response_id=resp_123`,
-		`root_thread_id=thread_root`,
-		`parent_thread_id=thread_parent`,
+		`root_thread_id=` + strconv.FormatInt(tid("thread_root"), 10),
+		`parent_thread_id=` + strconv.FormatInt(tid("thread_parent"), 10),
 		`parent_call_id=call_parent`,
 		`depth=1`,
 		`call_id=call_doc_123`,

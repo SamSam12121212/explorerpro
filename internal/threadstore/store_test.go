@@ -11,7 +11,7 @@ func TestSpawnChildResultJSONIncludesAssistantText(t *testing.T) {
 
 	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
 	result := SpawnChildResult{
-		ChildThreadID:   "thread_child_1",
+		ChildThreadID:   101,
 		Status:          "completed",
 		ChildResponseID: "resp_child_1",
 		AssistantText:   "Child summary",
@@ -31,8 +31,8 @@ func TestSpawnChildResultJSONIncludesAssistantText(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if decoded["child_thread_id"] != "thread_child_1" {
-		t.Fatalf("child_thread_id = %v, want thread_child_1", decoded["child_thread_id"])
+	if decoded["child_thread_id"] != float64(101) {
+		t.Fatalf("child_thread_id = %v, want 101", decoded["child_thread_id"])
 	}
 	if decoded["assistant_text"] != "Child summary" {
 		t.Fatalf("assistant_text = %v, want Child summary", decoded["assistant_text"])
@@ -46,7 +46,7 @@ func TestSpawnChildResultJSONOmitsEmptyOptionalFields(t *testing.T) {
 	t.Parallel()
 
 	result := SpawnChildResult{
-		ChildThreadID: "thread_child_2",
+		ChildThreadID: 102,
 		Status:        "failed",
 	}
 

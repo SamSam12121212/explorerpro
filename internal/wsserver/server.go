@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,8 +79,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	threadID := r.PathValue("thread_id")
-	if strings.TrimSpace(threadID) == "" {
+	threadID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("thread_id")), 10, 64)
+	if err != nil || threadID <= 0 {
 		http.Error(w, "missing thread_id", http.StatusBadRequest)
 		return
 	}

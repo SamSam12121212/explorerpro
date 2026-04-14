@@ -20,7 +20,6 @@ ReactDOM.createRoot(rootElement).render(
         <Route path="/documents" element={<App />} />
         <Route path="/doc/:documentId" element={<App />} />
         <Route path="/repos" element={<App />} />
-        <Route path="/thread/:threadId" element={<App />} />
       </Routes>
     </BrowserRouter>
   </StrictMode>,

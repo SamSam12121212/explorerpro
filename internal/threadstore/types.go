@@ -25,9 +25,9 @@ const (
 )
 
 type ThreadMeta struct {
-	ID                 string
-	RootThreadID       string
-	ParentThreadID     string
+	ID                 int64
+	RootThreadID       int64
+	ParentThreadID     int64
 	ParentCallID       string
 	Depth              int
 	Status             ThreadStatus
@@ -44,12 +44,15 @@ type ThreadMeta struct {
 	LastResponseID     string
 	ActiveResponseID   string
 	ActiveSpawnGroupID string
+	ChildKind          string
+	DocumentID         int64
+	DocumentPhase      string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
 
 type ItemLogEntry struct {
-	ThreadID    string
+	ThreadID    int64
 	ResponseID  string
 	ItemType    string
 	Direction   string
@@ -58,7 +61,7 @@ type ItemLogEntry struct {
 }
 
 type EventLogEntry struct {
-	ThreadID         string
+	ThreadID         int64
 	SocketGeneration uint64
 	EventType        string
 	ResponseID       string
@@ -106,7 +109,7 @@ const (
 
 type SpawnGroupMeta struct {
 	ID                   string
-	ParentThreadID       string
+	ParentThreadID       int64
 	ParentCallID         string
 	Expected             int
 	Completed            int
@@ -120,7 +123,8 @@ type SpawnGroupMeta struct {
 }
 
 type SpawnChildResult struct {
-	ChildThreadID   string    `json:"child_thread_id"`
+	ChildThreadID   int64     `json:"child_thread_id"`
+	DocumentID      int64     `json:"-"`
 	Status          string    `json:"status"`
 	ChildResponseID string    `json:"child_response_id,omitempty"`
 	AssistantText   string    `json:"assistant_text,omitempty"`
@@ -139,7 +143,7 @@ type OwnerRecord struct {
 }
 
 type DocumentQueryLineage struct {
-	ChildThreadID string
+	ChildThreadID int64
 	ResponseID    string
 	Model         string
 }
@@ -153,9 +157,9 @@ const (
 
 type OpenAISocketSession struct {
 	ID                     string
-	ThreadID               string
-	RootThreadID           string
-	ParentThreadID         string
+	ThreadID               int64
+	RootThreadID           int64
+	ParentThreadID         int64
 	WorkerID               string
 	ThreadSocketGeneration uint64
 	State                  OpenAISocketState

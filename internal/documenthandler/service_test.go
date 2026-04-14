@@ -55,7 +55,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
 		RequestID:  "req_123",
 		Kind:       doccmd.PrepareKindWarmup,
-		ThreadID:   "thread_123",
+		ThreadID:   123,
 		DocumentID: documentID,
 	})
 
@@ -132,8 +132,8 @@ func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
 
 func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{
-		documentsByThread: map[string][]docstore.Document{
-			"thread_123": {
+		documentsByThread: map[int64][]docstore.Document{
+			123: {
 				{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 			},
 		},
@@ -141,7 +141,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
-		ThreadID:     "thread_123",
+		ThreadID:     123,
 		Instructions: "Be concise.",
 		Tools:        json.RawMessage(`[{"type":"function","name":"lookup"}]`),
 	})
@@ -174,7 +174,7 @@ func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
-		ThreadID:     "thread_123",
+		ThreadID:     123,
 		Instructions: "Be concise.",
 		Tools:        json.RawMessage(`[{"type":"function","name":"lookup"}]`),
 	})
@@ -203,11 +203,11 @@ func (s *fakeDocStore) Get(_ context.Context, id int64) (docstore.Document, erro
 }
 
 type fakeThreadDocStore struct {
-	documentsByThread map[string][]docstore.Document
+	documentsByThread map[int64][]docstore.Document
 	err               error
 }
 
-func (s *fakeThreadDocStore) ListDocuments(_ context.Context, threadID string, _ int64) ([]docstore.Document, error) {
+func (s *fakeThreadDocStore) ListDocuments(_ context.Context, threadID int64, _ int64) ([]docstore.Document, error) {
 	if s.err != nil {
 		return nil, s.err
 	}

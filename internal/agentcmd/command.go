@@ -35,8 +35,8 @@ var durableSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 type Command struct {
 	CmdID                    string          `json:"cmd_id"`
 	Kind                     Kind            `json:"kind"`
-	ThreadID                 string          `json:"thread_id"`
-	RootThreadID             string          `json:"root_thread_id"`
+	ThreadID                 int64           `json:"thread_id"`
+	RootThreadID             int64           `json:"root_thread_id"`
 	CausationID              string          `json:"causation_id,omitempty"`
 	CorrelationID            string          `json:"correlation_id,omitempty"`
 	ExpectedStatus           string          `json:"expected_status,omitempty"`
@@ -94,7 +94,7 @@ type ReconcileBody struct {
 
 type ChildResultBody struct {
 	SpawnGroupID    string `json:"spawn_group_id"`
-	ChildThreadID   string `json:"child_thread_id"`
+	ChildThreadID   int64  `json:"child_thread_id"`
 	ChildResponseID string `json:"child_response_id,omitempty"`
 	Status          string `json:"status,omitempty"`
 	AssistantText   string `json:"assistant_text,omitempty"`
@@ -133,7 +133,7 @@ func LogAttrs(cmd Command) []any {
 		"kind", cmd.Kind,
 		"thread_id", cmd.ThreadID,
 	}
-	if rootThreadID := strings.TrimSpace(cmd.RootThreadID); rootThreadID != "" {
+	if rootThreadID := cmd.RootThreadID; rootThreadID > 0 {
 		attrs = append(attrs, "root_thread_id", rootThreadID)
 	}
 	if causationID := strings.TrimSpace(cmd.CausationID); causationID != "" {
@@ -172,7 +172,7 @@ func LogAttrs(cmd Command) []any {
 			if spawnGroupID := strings.TrimSpace(body.SpawnGroupID); spawnGroupID != "" {
 				attrs = append(attrs, "spawn_group_id", spawnGroupID)
 			}
-			if childThreadID := strings.TrimSpace(body.ChildThreadID); childThreadID != "" {
+			if childThreadID := body.ChildThreadID; childThreadID > 0 {
 				attrs = append(attrs, "child_thread_id", childThreadID)
 			}
 			childStatus := strings.TrimSpace(body.Status)
@@ -201,7 +201,7 @@ func Decode(raw []byte) (Command, error) {
 		return Command{}, fmt.Errorf("command missing cmd_id")
 	}
 
-	if strings.TrimSpace(cmd.ThreadID) == "" {
+	if cmd.ThreadID <= 0 {
 		return Command{}, fmt.Errorf("command missing thread_id")
 	}
 
@@ -209,7 +209,7 @@ func Decode(raw []byte) (Command, error) {
 		return Command{}, fmt.Errorf("command missing kind")
 	}
 
-	if strings.TrimSpace(cmd.RootThreadID) == "" {
+	if cmd.RootThreadID <= 0 {
 		cmd.RootThreadID = cmd.ThreadID
 	}
 
@@ -355,7 +355,7 @@ func (c Command) ChildResultBody() (ChildResultBody, error) {
 		return ChildResultBody{}, fmt.Errorf("child result missing spawn_group_id")
 	}
 
-	if strings.TrimSpace(body.ChildThreadID) == "" {
+	if body.ChildThreadID <= 0 {
 		return ChildResultBody{}, fmt.Errorf("child result missing child_thread_id")
 	}
 

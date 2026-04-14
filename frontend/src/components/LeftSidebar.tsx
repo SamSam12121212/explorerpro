@@ -10,8 +10,8 @@ type Tab = "threads" | "collections" | "documents" | "repos";
 
 interface LeftSidebarProps {
   threads: ThreadEntry[];
-  activeThreadId: string | null;
-  onSelectThread: (id: string) => void;
+  activeThreadId: number | null;
+  onSelectThread: (id: number) => void;
   onNewChat: () => void;
   onAttachDocument: (document: AttachedDocument) => void;
   attachedDocumentIds: number[];
@@ -55,7 +55,7 @@ export function LeftSidebar({
         return;
       case "threads":
       default:
-        void navigate(activeThreadId ? `/thread/${activeThreadId}` : "/");
+        void navigate("/");
     }
   };
 

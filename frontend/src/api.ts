@@ -76,6 +76,28 @@ export async function checkHealthApi(): Promise<"online" | "degraded"> {
   return payload.status === "ok" ? "online" : "degraded";
 }
 
+export function sendKeepaliveApiPost(path: string, body: unknown) {
+  const payload = JSON.stringify(body);
+
+  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    try {
+      const blob = new Blob([payload], { type: "application/json" });
+      if (navigator.sendBeacon(path, blob)) {
+        return;
+      }
+    } catch {
+      /* fall through to keepalive fetch */
+    }
+  }
+
+  void fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: payload,
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 export function buildWebSocketUrl(path: string) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";

@@ -22,7 +22,7 @@ type documentStore interface {
 }
 
 type threadDocumentStore interface {
-	ListDocuments(ctx context.Context, threadID string, limit int64) ([]docstore.Document, error)
+	ListDocuments(ctx context.Context, threadID int64, limit int64) ([]docstore.Document, error)
 }
 
 type documentBlobStore interface {

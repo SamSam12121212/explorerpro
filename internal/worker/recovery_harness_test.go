@@ -12,8 +12,8 @@ import (
 )
 
 type fakeSweepStore struct {
-	threads                map[string]threadstore.ThreadMeta
-	owners                 map[string]threadstore.OwnerRecord
+	threads                map[int64]threadstore.ThreadMeta
+	owners                 map[int64]threadstore.OwnerRecord
 	disconnectBatchResults []int64
 	pruneBatchResults      []int64
 	disconnectCalls        int
@@ -22,13 +22,13 @@ type fakeSweepStore struct {
 
 func newFakeSweepStore() *fakeSweepStore {
 	return &fakeSweepStore{
-		threads: map[string]threadstore.ThreadMeta{},
-		owners:  map[string]threadstore.OwnerRecord{},
+		threads: map[int64]threadstore.ThreadMeta{},
+		owners:  map[int64]threadstore.OwnerRecord{},
 	}
 }
 
-func (s *fakeSweepStore) ListThreadIDsByStatus(_ context.Context, status threadstore.ThreadStatus) ([]string, error) {
-	ids := make([]string, 0, len(s.threads))
+func (s *fakeSweepStore) ListThreadIDsByStatus(_ context.Context, status threadstore.ThreadStatus) ([]int64, error) {
+	ids := make([]int64, 0, len(s.threads))
 	for id, meta := range s.threads {
 		if meta.Status == status {
 			ids = append(ids, id)
@@ -37,7 +37,7 @@ func (s *fakeSweepStore) ListThreadIDsByStatus(_ context.Context, status threads
 	return ids, nil
 }
 
-func (s *fakeSweepStore) LoadThread(_ context.Context, threadID string) (threadstore.ThreadMeta, error) {
+func (s *fakeSweepStore) LoadThread(_ context.Context, threadID int64) (threadstore.ThreadMeta, error) {
 	meta, ok := s.threads[threadID]
 	if !ok {
 		return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -45,7 +45,7 @@ func (s *fakeSweepStore) LoadThread(_ context.Context, threadID string) (threads
 	return meta, nil
 }
 
-func (s *fakeSweepStore) LoadOwner(_ context.Context, threadID string) (threadstore.OwnerRecord, error) {
+func (s *fakeSweepStore) LoadOwner(_ context.Context, threadID int64) (threadstore.OwnerRecord, error) {
 	owner, ok := s.owners[threadID]
 	if !ok {
 		return threadstore.OwnerRecord{}, threadstore.ErrThreadNotFound
@@ -100,7 +100,7 @@ func newRecoveryHarness(t *testing.T, workerID string) *recoveryHarness {
 		logger:     logger,
 		workerID:   workerID,
 		sweepStore: store,
-		actors:     map[string]*threadActor{},
+		actors:     map[int64]*threadActor{},
 	}
 	h.service.publishFn = func(_ context.Context, subject string, cmd agentcmd.Command) error {
 		h.published = append(h.published, publishedCommand{
@@ -114,29 +114,29 @@ func newRecoveryHarness(t *testing.T, workerID string) *recoveryHarness {
 
 func (h *recoveryHarness) addThread(meta threadstore.ThreadMeta) {
 	h.t.Helper()
-	if meta.ID == "" {
+	if meta.ID <= 0 {
 		h.t.Fatal("thread id is required")
 	}
-	if meta.RootThreadID == "" {
+	if meta.RootThreadID <= 0 {
 		meta.RootThreadID = meta.ID
 	}
 	h.store.threads[meta.ID] = meta
 }
 
-func (h *recoveryHarness) addOwner(threadID string, owner threadstore.OwnerRecord) {
+func (h *recoveryHarness) addOwner(threadID int64, owner threadstore.OwnerRecord) {
 	h.t.Helper()
 	h.store.owners[threadID] = owner
 }
 
-func (h *recoveryHarness) addLiveActor(threadID string) {
+func (h *recoveryHarness) addLiveActor(threadID int64) {
 	h.t.Helper()
 	h.service.actors[threadID] = &threadActor{done: make(chan struct{})}
 }
 
-func (h *recoveryHarness) recover(threadID string) {
+func (h *recoveryHarness) recover(threadID int64) {
 	h.t.Helper()
 	if err := h.service.recoverThread(h.ctx, threadID); err != nil {
-		h.t.Fatalf("recoverThread(%s) error = %v", threadID, err)
+		h.t.Fatalf("recoverThread(%d) error = %v", threadID, err)
 	}
 }
 
@@ -159,19 +159,19 @@ func TestRecoveryHarnessReconcilesExpiredRunningThread(t *testing.T) {
 	now := time.Now().UTC()
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_running",
-		RootThreadID:     "thread_root",
+		ID:               100,
+		RootThreadID:     100,
 		Status:           threadstore.ThreadStatusRunning,
 		SocketGeneration: 7,
 		ActiveResponseID: "resp_active",
 	})
-	h.addOwner("thread_running", threadstore.OwnerRecord{
+	h.addOwner(100, threadstore.OwnerRecord{
 		WorkerID:         "worker-dead",
 		SocketGeneration: 7,
 		LeaseUntil:       now.Add(-time.Minute),
 	})
 
-	h.recover("thread_running")
+	h.recover(100)
 
 	published := h.requireSinglePublish()
 	if published.subject != agentcmd.DispatchSubject(agentcmd.KindThreadReconcile) {
@@ -202,18 +202,18 @@ func TestRecoveryHarnessAdoptsExpiredWaitingChildrenThread(t *testing.T) {
 	now := time.Now().UTC()
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:                 "thread_waiting",
+		ID:                 200,
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		SocketGeneration:   3,
 		ActiveSpawnGroupID: "sg_123",
 	})
-	h.addOwner("thread_waiting", threadstore.OwnerRecord{
+	h.addOwner(200, threadstore.OwnerRecord{
 		WorkerID:         "worker-dead",
 		SocketGeneration: 3,
 		LeaseUntil:       now.Add(-time.Minute),
 	})
 
-	h.recover("thread_waiting")
+	h.recover(200)
 
 	published := h.requireSinglePublish()
 	if published.subject != agentcmd.DispatchAdoptSubject {
@@ -237,18 +237,18 @@ func TestRecoveryHarnessSkipsForeignLiveOwner(t *testing.T) {
 
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_foreign",
+		ID:               300,
 		Status:           threadstore.ThreadStatusRunning,
 		SocketGeneration: 5,
 		ActiveResponseID: "resp_active",
 	})
-	h.addOwner("thread_foreign", threadstore.OwnerRecord{
+	h.addOwner(300, threadstore.OwnerRecord{
 		WorkerID:         "worker-other",
 		SocketGeneration: 5,
 		LeaseUntil:       time.Now().UTC().Add(time.Minute),
 	})
 
-	h.recover("thread_foreign")
+	h.recover(300)
 
 	if len(h.published) != 0 {
 		t.Fatalf("published count = %d, want 0", len(h.published))
@@ -277,18 +277,18 @@ func TestRecoveryHarnessRequeuesOwnedThreadToSameWorkerOnRestart(t *testing.T) {
 
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_owned",
+		ID:               400,
 		Status:           threadstore.ThreadStatusReconciling,
 		SocketGeneration: 9,
 		ActiveResponseID: "resp_active",
 	})
-	h.addOwner("thread_owned", threadstore.OwnerRecord{
+	h.addOwner(400, threadstore.OwnerRecord{
 		WorkerID:         "worker-local-1",
 		SocketGeneration: 9,
 		LeaseUntil:       time.Now().UTC().Add(time.Minute),
 	})
 
-	h.recover("thread_owned")
+	h.recover(400)
 
 	published := h.requireSinglePublish()
 	wantSubject := agentcmd.WorkerCommandSubject("worker-local-1", agentcmd.KindThreadReconcile)
@@ -305,19 +305,19 @@ func TestRecoveryHarnessSkipsOwnedThreadWhenLiveActorExists(t *testing.T) {
 
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_live_actor",
+		ID:               500,
 		Status:           threadstore.ThreadStatusRunning,
 		SocketGeneration: 4,
 		ActiveResponseID: "resp_active",
 	})
-	h.addOwner("thread_live_actor", threadstore.OwnerRecord{
+	h.addOwner(500, threadstore.OwnerRecord{
 		WorkerID:         "worker-local-1",
 		SocketGeneration: 4,
 		LeaseUntil:       time.Now().UTC().Add(time.Minute),
 	})
-	h.addLiveActor("thread_live_actor")
+	h.addLiveActor(500)
 
-	h.recover("thread_live_actor")
+	h.recover(500)
 
 	if len(h.published) != 0 {
 		t.Fatalf("published count = %d, want 0", len(h.published))
@@ -330,7 +330,7 @@ func TestRecoveryHarnessSchedulesRotationOnlyForLocalLiveActors(t *testing.T) {
 	now := time.Now().UTC()
 	h := newRecoveryHarness(t, "worker-local-1")
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_rotate",
+		ID:               600,
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 11,
@@ -338,20 +338,20 @@ func TestRecoveryHarnessSchedulesRotationOnlyForLocalLiveActors(t *testing.T) {
 		LastResponseID:   "resp_latest",
 	})
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_no_actor",
+		ID:               601,
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-local-1",
 		SocketGeneration: 12,
 		SocketExpiresAt:  now.Add(4 * time.Minute),
 	})
 	h.addThread(threadstore.ThreadMeta{
-		ID:               "thread_foreign_owner",
+		ID:               602,
 		Status:           threadstore.ThreadStatusReady,
 		OwnerWorkerID:    "worker-other",
 		SocketGeneration: 13,
 		SocketExpiresAt:  now.Add(4 * time.Minute),
 	})
-	h.addLiveActor("thread_rotate")
+	h.addLiveActor(600)
 
 	h.rotateSweep()
 
@@ -363,8 +363,8 @@ func TestRecoveryHarnessSchedulesRotationOnlyForLocalLiveActors(t *testing.T) {
 	if published.cmd.Kind != agentcmd.KindThreadRotateSocket {
 		t.Fatalf("kind = %q, want %q", published.cmd.Kind, agentcmd.KindThreadRotateSocket)
 	}
-	if published.cmd.ThreadID != "thread_rotate" {
-		t.Fatalf("ThreadID = %q, want thread_rotate", published.cmd.ThreadID)
+	if published.cmd.ThreadID != 600 {
+		t.Fatalf("ThreadID = %d, want 600", published.cmd.ThreadID)
 	}
 	if published.cmd.ExpectedSocketGeneration != 11 {
 		t.Fatalf("ExpectedSocketGeneration = %d, want 11", published.cmd.ExpectedSocketGeneration)

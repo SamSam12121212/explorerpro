@@ -37,7 +37,7 @@ type commandAPI struct {
 }
 
 type eventHistoryStore interface {
-	ListEvents(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error)
+	ListEvents(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.EventRecord, error)
 }
 
 type createThreadRequest struct {
@@ -57,7 +57,7 @@ type createThreadRequest struct {
 type submitCommandRequest struct {
 	CmdID                    string          `json:"cmd_id,omitempty"`
 	Kind                     agentcmd.Kind   `json:"kind"`
-	RootThreadID             string          `json:"root_thread_id,omitempty"`
+	RootThreadID             int64           `json:"root_thread_id,omitempty"`
 	CausationID              string          `json:"causation_id,omitempty"`
 	CorrelationID            string          `json:"correlation_id,omitempty"`
 	ExpectedStatus           string          `json:"expected_status,omitempty"`
@@ -68,7 +68,7 @@ type submitCommandRequest struct {
 }
 
 type threadRoute struct {
-	ThreadID    string
+	ThreadID    int64
 	Resource    string
 	ResourceID  string
 	Subresource string
@@ -234,7 +234,7 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	threadID, err := idgen.New("thread")
+	threadID, err := a.store.ReserveThreadID(r.Context())
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -349,14 +349,14 @@ func (a *commandAPI) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request, threadID string) {
+func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request, threadID int64) {
 	meta, err := a.store.LoadThread(r.Context(), threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -377,7 +377,7 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 	}
 
 	if isTerminalThreadStatus(meta.Status) && requiresActiveThread(req.Kind) {
-		writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %s is in terminal status %s", threadID, meta.Status))
+		writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is in terminal status %s", threadID, meta.Status))
 		return
 	}
 
@@ -413,11 +413,11 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	rootThreadID := strings.TrimSpace(req.RootThreadID)
-	if rootThreadID == "" {
+	rootThreadID := req.RootThreadID
+	if rootThreadID <= 0 {
 		rootThreadID = meta.RootThreadID
 	}
-	if rootThreadID == "" {
+	if rootThreadID <= 0 {
 		rootThreadID = threadID
 	}
 
@@ -474,14 +474,14 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusAccepted, response)
 }
 
-func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, threadID string) {
+func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, threadID int64) {
 	meta, err := a.loadThreadForRead(r.Context(), threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -492,7 +492,7 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 
 	attachedDocuments, err := a.links.ListDocuments(r.Context(), threadID, 200)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list attached documents for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list attached documents for thread %d: %v", threadID, err))
 		return
 	}
 	if len(attachedDocuments) > 0 {
@@ -502,7 +502,7 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 	if owner, err := a.store.LoadOwner(r.Context(), threadID); err == nil {
 		response["owner"] = presentOwner(owner)
 	} else if !errors.Is(err, threadstore.ErrThreadNotFound) {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load owner for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load owner for thread %d: %v", threadID, err))
 		return
 	}
 
@@ -520,13 +520,13 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, threadID string) {
+func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, threadID int64) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -538,7 +538,7 @@ func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, thr
 
 	items, err := a.listItemsForRead(r.Context(), threadID, query)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list items for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list items for thread %d: %v", threadID, err))
 		return
 	}
 
@@ -555,13 +555,13 @@ func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, thr
 	})
 }
 
-func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, threadID string) {
+func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, threadID int64) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -573,7 +573,7 @@ func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, th
 
 	events, err := a.listEventsForRead(r.Context(), threadID, query)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list events for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list events for thread %d: %v", threadID, err))
 		return
 	}
 
@@ -590,23 +590,23 @@ func (a *commandAPI) handleListEvents(w http.ResponseWriter, r *http.Request, th
 	})
 }
 
-func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, threadID, responseID string) {
+func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, threadID int64, responseID string) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
 	linked, err := a.threadHasResponseForRead(r.Context(), threadID, responseID)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("check response index for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("check response index for thread %d: %v", threadID, err))
 		return
 	}
 	if !linked {
-		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("response %s not found for thread %s", responseID, threadID))
+		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("response %s not found for thread %d", responseID, threadID))
 		return
 	}
 
@@ -633,19 +633,19 @@ func (a *commandAPI) handleGetResponse(w http.ResponseWriter, r *http.Request, t
 	})
 }
 
-func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Request, threadID string) {
+func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Request, threadID int64) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
 	groups, err := a.listSpawnGroupsByParentForRead(r.Context(), threadID)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list spawn groups for thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list spawn groups for thread %d: %v", threadID, err))
 		return
 	}
 
@@ -661,13 +661,13 @@ func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request, threadID, spawnGroupID string) {
+func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID string) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -681,7 +681,7 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if spawn.ParentThreadID != threadID {
-		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %s", spawnGroupID, threadID))
+		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %d", spawnGroupID, threadID))
 		return
 	}
 
@@ -698,13 +698,13 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.Request, threadID, spawnGroupID string) {
+func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID string) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %s not found", threadID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %s: %v", threadID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
 
@@ -718,7 +718,7 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 		return
 	}
 	if spawn.ParentThreadID != threadID {
-		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %s", spawnGroupID, threadID))
+		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %d", spawnGroupID, threadID))
 		return
 	}
 
@@ -741,7 +741,7 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 	})
 }
 
-func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID string) (threadstore.ThreadMeta, error) {
+func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error) {
 	return a.store.LoadThread(ctx, threadID)
 }
 
@@ -749,7 +749,7 @@ func (a *commandAPI) loadSpawnGroupForRead(ctx context.Context, spawnGroupID str
 	return a.store.LoadSpawnGroup(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) listItemsForRead(ctx context.Context, threadID string, query listQuery) ([]threadstore.ItemRecord, error) {
+func (a *commandAPI) listItemsForRead(ctx context.Context, threadID int64, query listQuery) ([]threadstore.ItemRecord, error) {
 	options := threadstore.ListOptions{
 		Limit:  query.Limit,
 		After:  query.After,
@@ -758,7 +758,7 @@ func (a *commandAPI) listItemsForRead(ctx context.Context, threadID string, quer
 	return a.store.ListItems(ctx, threadID, options)
 }
 
-func (a *commandAPI) listEventsForRead(ctx context.Context, threadID string, query listQuery) ([]threadstore.EventRecord, error) {
+func (a *commandAPI) listEventsForRead(ctx context.Context, threadID int64, query listQuery) ([]threadstore.EventRecord, error) {
 	options := threadstore.ListOptions{
 		Limit:  query.Limit,
 		After:  query.After,
@@ -767,7 +767,7 @@ func (a *commandAPI) listEventsForRead(ctx context.Context, threadID string, que
 	return a.history.ListEvents(ctx, threadID, options)
 }
 
-func (a *commandAPI) threadHasResponseForRead(ctx context.Context, threadID, responseID string) (bool, error) {
+func (a *commandAPI) threadHasResponseForRead(ctx context.Context, threadID int64, responseID string) (bool, error) {
 	return a.store.ThreadHasResponse(ctx, threadID, responseID)
 }
 
@@ -775,11 +775,11 @@ func (a *commandAPI) loadResponseRawForRead(ctx context.Context, responseID stri
 	return a.store.LoadResponseRaw(ctx, responseID)
 }
 
-func (a *commandAPI) listSpawnGroupsByParentForRead(ctx context.Context, parentThreadID string) ([]threadstore.SpawnGroupMeta, error) {
+func (a *commandAPI) listSpawnGroupsByParentForRead(ctx context.Context, parentThreadID int64) ([]threadstore.SpawnGroupMeta, error) {
 	return a.store.ListSpawnGroupsByParent(ctx, parentThreadID)
 }
 
-func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID string) ([]string, error) {
+func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID string) ([]int64, error) {
 	return a.store.LoadSpawnGroupChildThreadIDs(ctx, spawnGroupID)
 }
 
@@ -787,7 +787,7 @@ func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID s
 	return a.store.ListSpawnResults(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID string, kind agentcmd.Kind) (string, bool, threadstore.OwnerRecord, error) {
+func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID int64, kind agentcmd.Kind) (string, bool, threadstore.OwnerRecord, error) {
 	switch kind {
 	case agentcmd.KindThreadStart, agentcmd.KindThreadAdopt:
 		return agentcmd.DispatchSubject(kind), false, threadstore.OwnerRecord{}, nil
@@ -874,7 +874,12 @@ func parseThreadRoute(path string) (threadRoute, bool) {
 		return threadRoute{}, false
 	}
 
-	route := threadRoute{ThreadID: parts[0]}
+	threadID, err := parsePositiveInt64(parts[0])
+	if err != nil {
+		return threadRoute{}, false
+	}
+
+	route := threadRoute{ThreadID: threadID}
 	if len(parts) == 2 {
 		route.Resource = parts[1]
 	}

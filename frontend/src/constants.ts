@@ -43,7 +43,7 @@ export const EXPLORER_TOOLS = [
             type: "object",
             additionalProperties: false,
             properties: {
-              thread_id: { type: "string" },
+              thread_id: { type: "integer" },
               input: {
                 description:
                   "Responses API input items for the child thread.",

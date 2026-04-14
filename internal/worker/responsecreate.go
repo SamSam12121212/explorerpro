@@ -77,7 +77,7 @@ func (a *threadActor) buildThreadResponseCreatePayload(meta threadstore.ThreadMe
 	return payload, nil
 }
 
-func (a *threadActor) finalizeThreadResponseCreatePayload(threadID string, payload map[string]any) error {
+func (a *threadActor) finalizeThreadResponseCreatePayload(threadID int64, payload map[string]any) error {
 	if err := a.applyDocumentRuntimeContext(threadID, payload); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,13 +56,13 @@ type Service struct {
 	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
 
 	actorsMu sync.Mutex
-	actors   map[string]*threadActor
+	actors   map[int64]*threadActor
 }
 
 type serviceSweepStore interface {
-	ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]string, error)
-	LoadThread(ctx context.Context, threadID string) (threadstore.ThreadMeta, error)
-	LoadOwner(ctx context.Context, threadID string) (threadstore.OwnerRecord, error)
+	ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]int64, error)
+	LoadThread(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error)
+	LoadOwner(ctx context.Context, threadID int64) (threadstore.OwnerRecord, error)
 	DisconnectExpiredOpenAISocketSessions(ctx context.Context, disconnectedAt, expiresAt time.Time, limit int) (int64, error)
 	PruneExpiredOpenAISocketSessions(ctx context.Context, now time.Time, limit int) (int64, error)
 }
@@ -100,7 +101,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		docClient:    docClient,
 		docStore:     docs,
 		sweepStore:   store,
-		actors:       map[string]*threadActor{},
+		actors:       map[int64]*threadActor{},
 	}, nil
 }
 
@@ -229,13 +230,13 @@ func (s *Service) dispatchMessage(ctx context.Context, msg *nats.Msg) error {
 		msg: msg,
 		cmd: cmd,
 	}); !ok {
-		return fmt.Errorf("actor queue closed for thread %s", cmd.ThreadID)
+		return fmt.Errorf("actor queue closed for thread %d", cmd.ThreadID)
 	}
 
 	return nil
 }
 
-func (s *Service) getActor(ctx context.Context, threadID string) *threadActor {
+func (s *Service) getActor(ctx context.Context, threadID int64) *threadActor {
 	s.actorsMu.Lock()
 	defer s.actorsMu.Unlock()
 
@@ -317,7 +318,7 @@ func rawJSONToAny(raw json.RawMessage) (any, error) {
 	return decoded, nil
 }
 
-func (s *Service) publishThreadEvent(ctx context.Context, threadID string, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error {
+func (s *Service) publishThreadEvent(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error {
 	env := threadevents.EventEnvelope{
 		ThreadID:         threadID,
 		EventType:        eventType,
@@ -328,7 +329,7 @@ func (s *Service) publishThreadEvent(ctx context.Context, threadID string, socke
 
 	data, err := threadevents.Encode(env)
 	if err != nil {
-		return fmt.Errorf("encode thread event for %s: %w", threadID, err)
+		return fmt.Errorf("encode thread event for %d: %w", threadID, err)
 	}
 
 	msg := &nats.Msg{
@@ -339,7 +340,7 @@ func (s *Service) publishThreadEvent(ctx context.Context, threadID string, socke
 	msg.Header.Set("Nats-Msg-Id", threadevents.MsgID(threadID, socketGeneration, key))
 
 	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg, nats.Context(ctx)); err != nil {
-		return fmt.Errorf("publish thread event for %s (%s): %w", threadID, eventType, err)
+		return fmt.Errorf("publish thread event for %d (%s): %w", threadID, eventType, err)
 	}
 
 	return nil
@@ -456,7 +457,7 @@ func recoverySweepStatuses() []threadstore.ThreadStatus {
 	}
 }
 
-func (s *Service) recoverThread(ctx context.Context, threadID string) error {
+func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 	meta, err := s.sweepStore.LoadThread(ctx, threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
@@ -499,7 +500,7 @@ func (s *Service) recoverThread(ctx context.Context, threadID string) error {
 	return s.publishCommand(ctx, subject, cmd)
 }
 
-func (s *Service) hasLiveActor(threadID string) bool {
+func (s *Service) hasLiveActor(threadID int64) bool {
 	s.actorsMu.Lock()
 	defer s.actorsMu.Unlock()
 
@@ -528,7 +529,7 @@ func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRe
 
 	cmdID := fmt.Sprintf("recovery_%s_%s_%d_%s",
 		strings.ReplaceAll(string(kind), ".", "_"),
-		meta.ID,
+		strconv.FormatInt(meta.ID, 10),
 		maxUint64(meta.SocketGeneration, owner.SocketGeneration),
 		strings.ReplaceAll(string(meta.Status), ".", "_"),
 	)
@@ -588,8 +589,8 @@ func (s *Service) scheduleSocketRotations(ctx context.Context) {
 	}
 }
 
-func defaultRootThreadID(meta threadstore.ThreadMeta) string {
-	if strings.TrimSpace(meta.RootThreadID) != "" {
+func defaultRootThreadID(meta threadstore.ThreadMeta) int64 {
+	if meta.RootThreadID > 0 {
 		return meta.RootThreadID
 	}
 	return meta.ID
@@ -625,7 +626,7 @@ func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (agentcmd.Co
 	}
 
 	return agentcmd.Command{
-		CmdID:                    fmt.Sprintf("rotate_%s_%d", meta.ID, meta.SocketGeneration),
+		CmdID:                    fmt.Sprintf("rotate_%d_%d", meta.ID, meta.SocketGeneration),
 		Kind:                     agentcmd.KindThreadRotateSocket,
 		ThreadID:                 meta.ID,
 		RootThreadID:             defaultRootThreadID(meta),

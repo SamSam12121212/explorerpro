@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiGet, apiPost, buildStreamWebSocketUrl, checkHealthApi, uploadImage } from "./api";
+import {
+  apiGet,
+  apiPost,
+  buildStreamWebSocketUrl,
+  checkHealthApi,
+  sendKeepaliveApiPost,
+  uploadImage,
+} from "./api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "./constants";
 import type {
   AttachedDocument,
@@ -190,6 +197,50 @@ const stopThinkingEventTypes = new Set([
   "response.refusal.done",
 ]);
 
+const ACTIVE_THREAD_STORAGE_KEY = "explorer.activeThreadId";
+
+function parseStoredThreadId(raw: string | null | undefined) {
+  const normalized = raw?.trim() ?? "";
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function readPersistedActiveThreadId() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return parseStoredThreadId(window.localStorage.getItem(ACTIVE_THREAD_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedActiveThreadId(threadId: number | null) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (threadId !== null) {
+      window.localStorage.setItem(ACTIVE_THREAD_STORAGE_KEY, String(threadId));
+    } else {
+      window.localStorage.removeItem(ACTIVE_THREAD_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore storage write failures */
+  }
+}
+
 function isReasoningItemEvent(event: Record<string, unknown>): boolean {
   const item = event.item;
   return typeof item === "object" && item !== null && (item as Record<string, unknown>).type === "reasoning";
@@ -245,7 +296,7 @@ export function useChat() {
   const [busy, setBusy] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [uploadCount, setUploadCount] = useState(0);
-  const [threadId, setThreadId] = useState<string | null>(null);
+  const [threadId, setThreadId] = useState<number | null>(null);
   const [lastItemCursor, setLastItemCursor] = useState<string | null>(null);
   const [attachedDocuments, setAttachedDocuments] = useState<AttachedDocument[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<AttachedDocument[]>([]);
@@ -259,7 +310,7 @@ export function useChat() {
   const closingThreadStreamRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectDelayRef = useRef(1000);
-  const activeThreadIdRef = useRef<string | null>(null);
+  const activeThreadIdRef = useRef<number | null>(null);
   const lastItemCursorRef = useRef<string | null>(null);
   const lastThreadStatusRef = useRef<string | null>(null);
   const debugLoggedCreateRef = useRef(false);
@@ -312,6 +363,34 @@ export function useChat() {
     lastItemCursorRef.current = lastItemCursor;
   }, [lastItemCursor]);
 
+  useEffect(() => {
+    const persistedThreadId = readPersistedActiveThreadId();
+    if (!persistedThreadId) {
+      return;
+    }
+
+    void loadThread(persistedThreadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      const currentThreadId = activeThreadIdRef.current;
+      if (!currentThreadId) {
+        return;
+      }
+
+      sendKeepaliveApiPost(`/threads/${currentThreadId}/commands`, {
+        kind: "thread.disconnect_socket",
+      });
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, []);
+
   function appendMessage(
     role: MessageRole,
     text: string,
@@ -342,7 +421,7 @@ export function useChat() {
     setMessages((current) => current.filter((message) => message.id !== messageId));
   }
 
-  function disconnectSocket(targetThreadId: string) {
+  function disconnectSocket(targetThreadId: number) {
     void apiPost(`/threads/${targetThreadId}/commands`, {
       kind: "thread.disconnect_socket",
     }).catch(() => undefined);
@@ -442,7 +521,7 @@ export function useChat() {
     socket.close();
   }, []);
 
-  const connectThreadStream = useCallback((nextThreadId: string, afterCursor: string | null) => {
+  const connectThreadStream = useCallback((nextThreadId: number, afterCursor: string | null) => {
     disconnectThreadStream();
 
     const query = new URLSearchParams();
@@ -499,7 +578,7 @@ export function useChat() {
     };
   }, [disconnectThreadStream, handleThreadStreamMessage, logThreadStreamMessage]);
 
-  async function loadThread(nextThreadId: string) {
+  async function loadThread(nextThreadId: number) {
     setBusy(true);
     setThinking(false);
     resetDebugStreamLogging();
@@ -519,6 +598,7 @@ export function useChat() {
       ]);
       const cursor = payload.page?.last_cursor ?? null;
       setThreadId(nextThreadId);
+      writePersistedActiveThreadId(nextThreadId);
       setModel(threadInfo.thread?.model ?? DEFAULT_MODEL);
       setAttachedDocuments(normalizeAttachedDocuments(threadInfo.attached_documents));
       setLastItemCursor(cursor);
@@ -530,8 +610,12 @@ export function useChat() {
       setBusy(statusMeansBusy(threadInfo.thread?.status));
       connectThreadStream(nextThreadId, cursor);
     } catch (error) {
+      activeThreadIdRef.current = null;
       setMessages([]);
+      setThreadId(null);
+      setLastItemCursor(null);
       setAttachedDocuments([]);
+      lastThreadStatusRef.current = null;
       appendMessage(
         "error",
         error instanceof Error ? error.message : "Failed to load thread",
@@ -599,6 +683,7 @@ export function useChat() {
 
         activeThreadIdRef.current = currentThreadId;
         setThreadId(currentThreadId);
+        writePersistedActiveThreadId(currentThreadId);
         setAttachedDocuments(normalizeAttachedDocuments(documents));
         setPendingDocuments([]);
         setLastItemCursor(null);
@@ -641,12 +726,14 @@ export function useChat() {
     setMessages([]);
     setDraft("");
     setThreadId(null);
+    writePersistedActiveThreadId(null);
     setLastItemCursor(null);
     setAttachedDocuments([]);
     setPendingDocuments([]);
     setPendingImages([]);
     setModel(DEFAULT_MODEL);
     setReasoningEffort("medium");
+    setBusy(false);
     setThinking(false);
     resetDebugStreamLogging();
     lastThreadStatusRef.current = null;

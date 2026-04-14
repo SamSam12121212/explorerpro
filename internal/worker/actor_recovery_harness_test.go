@@ -21,17 +21,18 @@ import (
 type fakeActorStore struct {
 	t *testing.T
 
-	threads                map[string]threadstore.ThreadMeta
-	latestClientCreateByID map[string]json.RawMessage
+	threads                map[int64]threadstore.ThreadMeta
+	latestClientCreateByID map[int64]json.RawMessage
 	spawnGroups            map[string]threadstore.SpawnGroupMeta
 	spawnResults           map[string][]threadstore.SpawnChildResult
+	nextReservedThreadID   int64
 
 	savedThreads        []threadstore.ThreadMeta
 	savedSpawnGroups    []threadstore.SpawnGroupMeta
 	appendedItems       []threadstore.ItemLogEntry
 	historyEvents       []threadstore.EventLogEntry
 	savedResponses      map[string]json.RawMessage
-	releasedThreads     []string
+	releasedThreads     []int64
 	createdSockets      []threadstore.OpenAISocketSession
 	touchedSockets      []threadstore.OpenAISocketTouch
 	disconnectedSockets []string
@@ -41,12 +42,19 @@ func newFakeActorStore(t *testing.T) *fakeActorStore {
 	t.Helper()
 	return &fakeActorStore{
 		t:                      t,
-		threads:                map[string]threadstore.ThreadMeta{},
-		latestClientCreateByID: map[string]json.RawMessage{},
+		threads:                map[int64]threadstore.ThreadMeta{},
+		latestClientCreateByID: map[int64]json.RawMessage{},
 		spawnGroups:            map[string]threadstore.SpawnGroupMeta{},
 		spawnResults:           map[string][]threadstore.SpawnChildResult{},
+		nextReservedThreadID:   10000,
 		savedResponses:         map[string]json.RawMessage{},
 	}
+}
+
+func (s *fakeActorStore) ReserveThreadID(_ context.Context) (int64, error) {
+	threadID := s.nextReservedThreadID
+	s.nextReservedThreadID++
+	return threadID, nil
 }
 
 func (s *fakeActorStore) CreateThreadIfAbsent(_ context.Context, meta threadstore.ThreadMeta) error {
@@ -56,7 +64,7 @@ func (s *fakeActorStore) CreateThreadIfAbsent(_ context.Context, meta threadstor
 	return nil
 }
 
-func (s *fakeActorStore) LoadThread(_ context.Context, threadID string) (threadstore.ThreadMeta, error) {
+func (s *fakeActorStore) LoadThread(_ context.Context, threadID int64) (threadstore.ThreadMeta, error) {
 	meta, ok := s.threads[threadID]
 	if !ok {
 		return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -64,13 +72,30 @@ func (s *fakeActorStore) LoadThread(_ context.Context, threadID string) (threads
 	return meta, nil
 }
 
-func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Context, parentThreadID string, documentID int64) (threadstore.DocumentQueryLineage, error) {
+func (s *fakeActorStore) LoadReusableDocumentChildThread(_ context.Context, parentThreadID, documentID int64) (threadstore.ThreadMeta, error) {
+	for _, meta := range s.threads {
+		if meta.ParentThreadID == parentThreadID && meta.ChildKind == "document" && meta.DocumentID == documentID {
+			return meta, nil
+		}
+	}
+	return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
+}
+
+func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Context, parentThreadID int64, documentID int64) (threadstore.DocumentQueryLineage, error) {
 	documentIDText := strconv.FormatInt(documentID, 10)
 	var latest threadstore.ThreadMeta
 	found := false
 
 	for _, meta := range s.threads {
 		if meta.ParentThreadID != parentThreadID || strings.TrimSpace(meta.LastResponseID) == "" {
+			continue
+		}
+		if meta.ChildKind == "document" && meta.DocumentID == documentID && meta.DocumentPhase == "query" &&
+			(meta.Status == threadstore.ThreadStatusCompleted || meta.Status == threadstore.ThreadStatusReady) {
+			if !found || meta.UpdatedAt.After(latest.UpdatedAt) || (meta.UpdatedAt.Equal(latest.UpdatedAt) && meta.CreatedAt.After(latest.CreatedAt)) || (meta.UpdatedAt.Equal(latest.UpdatedAt) && meta.CreatedAt.Equal(latest.CreatedAt) && meta.ID > latest.ID) {
+				latest = meta
+				found = true
+			}
 			continue
 		}
 
@@ -111,27 +136,27 @@ func (s *fakeActorStore) SaveThread(_ context.Context, meta threadstore.ThreadMe
 	return nil
 }
 
-func (s *fakeActorStore) CommandProcessed(_ context.Context, _, _ string) (bool, error) {
+func (s *fakeActorStore) CommandProcessed(_ context.Context, _ int64, _ string) (bool, error) {
 	return false, nil
 }
 
-func (s *fakeActorStore) MarkCommandProcessed(_ context.Context, _, _ string) (bool, error) {
+func (s *fakeActorStore) MarkCommandProcessed(_ context.Context, _ int64, _ string) (bool, error) {
 	return true, nil
 }
 
-func (s *fakeActorStore) ClaimOwnership(_ context.Context, _, _ string, _ time.Time) (threadstore.ClaimResult, error) {
+func (s *fakeActorStore) ClaimOwnership(_ context.Context, _ int64, _ string, _ time.Time) (threadstore.ClaimResult, error) {
 	return threadstore.ClaimResult{Claimed: true, SocketGeneration: 1}, nil
 }
 
-func (s *fakeActorStore) RenewOwnership(_ context.Context, _, _ string, _ uint64, _ time.Time) (bool, error) {
+func (s *fakeActorStore) RenewOwnership(_ context.Context, _ int64, _ string, _ uint64, _ time.Time) (bool, error) {
 	return true, nil
 }
 
-func (s *fakeActorStore) RotateOwnership(_ context.Context, _, _ string, currentGeneration uint64, _, _ time.Time) (uint64, bool, error) {
+func (s *fakeActorStore) RotateOwnership(_ context.Context, _ int64, _ string, currentGeneration uint64, _, _ time.Time) (uint64, bool, error) {
 	return currentGeneration + 1, true, nil
 }
 
-func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID, _ string, _ uint64) error {
+func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID int64, _ string, _ uint64) error {
 	s.releasedThreads = append(s.releasedThreads, threadID)
 	return nil
 }
@@ -163,17 +188,17 @@ func (s *fakeActorStore) AppendItem(_ context.Context, entry threadstore.ItemLog
 	}, nil
 }
 
-func (s *fakeActorStore) SaveResponseRaw(_ context.Context, _ string, responseID string, payload json.RawMessage) error {
+func (s *fakeActorStore) SaveResponseRaw(_ context.Context, _ int64, responseID string, payload json.RawMessage) error {
 	s.savedResponses[responseID] = append(json.RawMessage(nil), payload...)
 	return nil
 }
 
-func (s *fakeActorStore) SaveResponseCreateCheckpoint(_ context.Context, threadID, _ string, payload json.RawMessage) error {
+func (s *fakeActorStore) SaveResponseCreateCheckpoint(_ context.Context, threadID int64, _ string, payload json.RawMessage) error {
 	s.latestClientCreateByID[threadID] = append(json.RawMessage(nil), payload...)
 	return nil
 }
 
-func (s *fakeActorStore) LoadLatestResponseCreateCheckpoint(_ context.Context, threadID string) (json.RawMessage, error) {
+func (s *fakeActorStore) LoadLatestResponseCreateCheckpoint(_ context.Context, threadID int64) (json.RawMessage, error) {
 	raw, ok := s.latestClientCreateByID[threadID]
 	if !ok {
 		return nil, threadhistory.ErrCheckpointNotFound
@@ -186,7 +211,7 @@ func (s *fakeActorStore) AppendEvent(_ context.Context, entry threadstore.EventL
 	return nil
 }
 
-func (s *fakeActorStore) ListItems(_ context.Context, threadID string, _ threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
+func (s *fakeActorStore) ListItems(_ context.Context, threadID int64, _ threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
 	var items []threadstore.ItemRecord
 	for _, entry := range s.appendedItems {
 		if entry.ThreadID != threadID {
@@ -204,7 +229,7 @@ func (s *fakeActorStore) ListItems(_ context.Context, threadID string, _ threads
 	return items, nil
 }
 
-func (s *fakeActorStore) CreateSpawnGroup(_ context.Context, meta threadstore.SpawnGroupMeta, _ []string) error {
+func (s *fakeActorStore) CreateSpawnGroup(_ context.Context, meta threadstore.SpawnGroupMeta, _ []int64) error {
 	s.spawnGroups[meta.ID] = meta
 	return nil
 }
@@ -243,7 +268,7 @@ func newActorRecoveryHarness(t *testing.T, store *fakeActorStore, conn *actorTes
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	actor := &threadActor{
-		threadID: "thread_parent",
+		threadID: 100,
 		workerID: "worker-local-1",
 		logger:   logger,
 		store:    store,
@@ -277,13 +302,13 @@ func TestActorRecoveryHarnessReconcileFromCheckpointReplaysLatestCreate(t *testi
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
+	store.threads[100] = threadstore.ThreadMeta{
+		ID:               100,
 		Status:           threadstore.ThreadStatusReconciling,
 		Model:            "gpt-5.4",
 		ActiveResponseID: "resp_active",
 	}
-	store.latestClientCreateByID["thread_parent"] = json.RawMessage(`{
+	store.latestClientCreateByID[100] = json.RawMessage(`{
 		"type":"response.create",
 		"model":"gpt-5.4",
 		"previous_response_id":"resp_prev",
@@ -299,7 +324,7 @@ func TestActorRecoveryHarnessReconcileFromCheckpointReplaysLatestCreate(t *testi
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	err := actor.reconcileFromCheckpoint(store.threads["thread_parent"], "cmd_reconcile")
+	err := actor.reconcileFromCheckpoint(store.threads[100], "cmd_reconcile")
 	if err != nil {
 		t.Fatalf("reconcileFromCheckpoint() error = %v", err)
 	}
@@ -323,7 +348,7 @@ func TestActorRecoveryHarnessReconcileFromCheckpointReplaysLatestCreate(t *testi
 		t.Fatalf("first saved ActiveResponseID = %q, want empty", store.savedThreads[0].ActiveResponseID)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[100]
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final status = %q, want ready", final.Status)
 	}
@@ -339,8 +364,8 @@ func TestActorRecoveryHarnessReconcileFromPreparedInputRefCheckpoint(t *testing.
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
+	store.threads[100] = threadstore.ThreadMeta{
+		ID:               100,
 		Status:           threadstore.ThreadStatusReconciling,
 		Model:            "gpt-5.4",
 		ActiveResponseID: "resp_active",
@@ -362,7 +387,7 @@ func TestActorRecoveryHarnessReconcileFromPreparedInputRefCheckpoint(t *testing.
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	store.latestClientCreateByID["thread_parent"] = json.RawMessage(`{
+	store.latestClientCreateByID[100] = json.RawMessage(`{
 		"type":"response.create",
 		"model":"gpt-5.4",
 		"prepared_input_ref":"` + ref + `",
@@ -379,7 +404,7 @@ func TestActorRecoveryHarnessReconcileFromPreparedInputRefCheckpoint(t *testing.
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.blob = blob
 
-	if err := actor.reconcileFromCheckpoint(store.threads["thread_parent"], "cmd_reconcile"); err != nil {
+	if err := actor.reconcileFromCheckpoint(store.threads[100], "cmd_reconcile"); err != nil {
 		t.Fatalf("reconcileFromCheckpoint() error = %v", err)
 	}
 
@@ -419,8 +444,8 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:               "thread_parent",
+	store.threads[100] = threadstore.ThreadMeta{
+		ID:               100,
 		Status:           threadstore.ThreadStatusReconciling,
 		Model:            "gpt-5.4",
 		OwnerWorkerID:    "worker-local-1",
@@ -432,12 +457,12 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 
 	actor := newActorRecoveryHarness(t, store, nil)
 
-	err := actor.recoverThread(store.threads["thread_parent"], "cmd_reconcile", true)
+	err := actor.recoverThread(store.threads[100], "cmd_reconcile", true)
 	if err != nil {
 		t.Fatalf("recoverThread() error = %v", err)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[100]
 	if final.Status != threadstore.ThreadStatusIncomplete {
 		t.Fatalf("final status = %q, want incomplete", final.Status)
 	}
@@ -453,8 +478,8 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 	if final.LastResponseID != "resp_prev" {
 		t.Fatalf("LastResponseID = %q, want resp_prev", final.LastResponseID)
 	}
-	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_parent" {
-		t.Fatalf("releasedThreads = %#v, want [thread_parent]", store.releasedThreads)
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != 100 {
+		t.Fatalf("releasedThreads = %#v, want [100]", store.releasedThreads)
 	}
 }
 
@@ -462,25 +487,25 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenKeepsBarrierOpen(t *testing.T
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
+	store.threads[100] = threadstore.ThreadMeta{
+		ID:                 100,
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		ActiveSpawnGroupID: "sg_waiting",
 		LastResponseID:     "resp_parent",
 	}
 	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
 		ID:             "sg_waiting",
-		ParentThreadID: "thread_parent",
+		ParentThreadID: 100,
 		Expected:       2,
 		Status:         threadstore.SpawnGroupStatusWaiting,
 	}
 	store.spawnResults["sg_waiting"] = []threadstore.SpawnChildResult{
-		{ChildThreadID: "thread_child_1", Status: "completed"},
+		{ChildThreadID: 101, Status: "completed"},
 	}
 
 	actor := newActorRecoveryHarness(t, store, nil)
 
-	err := actor.recoverWaitingChildren(store.threads["thread_parent"], "cmd_recover")
+	err := actor.recoverWaitingChildren(store.threads[100], "cmd_recover")
 	if err != nil {
 		t.Fatalf("recoverWaitingChildren() error = %v", err)
 	}
@@ -496,7 +521,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenKeepsBarrierOpen(t *testing.T
 		t.Fatalf("spawn counts = completed:%d failed:%d cancelled:%d, want 1/0/0", spawn.Completed, spawn.Failed, spawn.Cancelled)
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[100]
 	if final.Status != threadstore.ThreadStatusWaitingChildren {
 		t.Fatalf("final status = %q, want waiting_children", final.Status)
 	}
@@ -509,8 +534,8 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads["thread_parent"] = threadstore.ThreadMeta{
-		ID:                 "thread_parent",
+	store.threads[100] = threadstore.ThreadMeta{
+		ID:                 100,
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		ActiveSpawnGroupID: "sg_closed",
 		LastResponseID:     "resp_parent",
@@ -518,14 +543,14 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	}
 	store.spawnGroups["sg_closed"] = threadstore.SpawnGroupMeta{
 		ID:             "sg_closed",
-		ParentThreadID: "thread_parent",
+		ParentThreadID: 100,
 		ParentCallID:   "call_parent",
 		Expected:       2,
 		Status:         threadstore.SpawnGroupStatusWaiting,
 	}
 	store.spawnResults["sg_closed"] = []threadstore.SpawnChildResult{
-		{ChildThreadID: "thread_child_1", Status: "completed", ChildResponseID: "resp_child_1", AssistantText: "One"},
-		{ChildThreadID: "thread_child_2", Status: "completed", ChildResponseID: "resp_child_2", AssistantText: "Two"},
+		{ChildThreadID: 101, Status: "completed", ChildResponseID: "resp_child_1", AssistantText: "One"},
+		{ChildThreadID: 102, Status: "completed", ChildResponseID: "resp_child_2", AssistantText: "Two"},
 	}
 
 	conn := &actorTestConn{
@@ -536,7 +561,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	err := actor.recoverWaitingChildren(store.threads["thread_parent"], "cmd_recover_waiting")
+	err := actor.recoverWaitingChildren(store.threads[100], "cmd_recover_waiting")
 	if err != nil {
 		t.Fatalf("recoverWaitingChildren() error = %v", err)
 	}
@@ -571,7 +596,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 		t.Fatalf("previous_response_id = %v, want resp_parent", sent["previous_response_id"])
 	}
 
-	final := store.threads["thread_parent"]
+	final := store.threads[100]
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final status = %q, want ready", final.Status)
 	}

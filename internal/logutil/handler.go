@@ -8,9 +8,11 @@ import (
 	"sync"
 )
 
-// NewHandler returns a text-based slog handler that omits timestamps
-// (Docker/container runtimes add their own), renders msg/cmd_id without
-// keys, and keeps thread ids explicit for troubleshooting.
+const logTimestampFormat = "2006-01-02 15:04:05"
+
+// NewHandler returns a text-based slog handler that renders a bare timestamp
+// prefix, omits level noise, renders msg/cmd_id without keys, and keeps
+// thread ids explicit for troubleshooting.
 func NewHandler(w io.Writer, level slog.Leveler) slog.Handler {
 	return slog.NewTextHandler(&bareIDLogWriter{dst: w}, &slog.HandlerOptions{
 		Level:       level,
@@ -19,7 +21,11 @@ func NewHandler(w io.Writer, level slog.Leveler) slog.Handler {
 }
 
 func replaceAttr(_ []string, a slog.Attr) slog.Attr {
-	if a.Key == slog.TimeKey || a.Key == slog.LevelKey {
+	if a.Key == slog.TimeKey {
+		return slog.String(slog.TimeKey, a.Value.Time().UTC().Format(logTimestampFormat))
+	}
+
+	if a.Key == slog.LevelKey {
 		return slog.Attr{}
 	}
 
@@ -54,8 +60,25 @@ func (w *bareIDLogWriter) Write(p []byte) (int, error) {
 }
 
 func rewriteBareIDTokens(line string) string {
+	line = stripLeadingQuotedTime(line)
+	line = strings.ReplaceAll(line, " time=", " ")
 	line = strings.ReplaceAll(line, " msg=", " ")
 	line = strings.ReplaceAll(line, " cmd_id=", " ")
+	line = strings.TrimPrefix(line, "time=")
 	line = strings.TrimPrefix(line, "msg=")
 	return strings.TrimPrefix(line, "cmd_id=")
+}
+
+func stripLeadingQuotedTime(line string) string {
+	if !strings.HasPrefix(line, `time="`) {
+		return line
+	}
+
+	rest := strings.TrimPrefix(line, `time="`)
+	closingIdx := strings.IndexByte(rest, '"')
+	if closingIdx == -1 {
+		return line
+	}
+
+	return rest[:closingIdx] + rest[closingIdx+1:]
 }

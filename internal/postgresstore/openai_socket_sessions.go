@@ -13,10 +13,10 @@ func (s *Store) CreateOpenAISocketSession(ctx context.Context, session threadsto
 	if strings.TrimSpace(session.ID) == "" {
 		return fmt.Errorf("openai socket session id is required")
 	}
-	if strings.TrimSpace(session.ThreadID) == "" {
+	if session.ThreadID <= 0 {
 		return fmt.Errorf("openai socket session thread_id is required")
 	}
-	if strings.TrimSpace(session.RootThreadID) == "" {
+	if session.RootThreadID <= 0 {
 		return fmt.Errorf("openai socket session root_thread_id is required")
 	}
 	if strings.TrimSpace(session.WorkerID) == "" {
@@ -83,7 +83,7 @@ INSERT INTO openai_socket_sessions (
 		session.ID,
 		session.ThreadID,
 		session.RootThreadID,
-		nullIfBlank(session.ParentThreadID),
+		nullIfZeroInt64(session.ParentThreadID),
 		session.WorkerID,
 		int64(session.ThreadSocketGeneration),
 		string(session.State),

@@ -31,32 +31,32 @@ func New(js nats.JetStreamContext) *Store {
 	return &Store{js: js}
 }
 
-func CheckpointSubject(threadID string) string {
-	return CheckpointSubjectPrefix + threadID
+func CheckpointSubject(threadID int64) string {
+	return CheckpointSubjectPrefix + strconv.FormatInt(threadID, 10)
 }
 
-func EventSubject(threadID string) string {
-	return EventSubjectPrefix + threadID
+func EventSubject(threadID int64) string {
+	return EventSubjectPrefix + strconv.FormatInt(threadID, 10)
 }
 
-func CheckpointMsgID(threadID, checkpointID string) string {
+func CheckpointMsgID(threadID int64, checkpointID string) string {
 	checkpointID = strings.TrimSpace(checkpointID)
 	if checkpointID == "" {
-		return "checkpoint-" + threadID
+		return "checkpoint-" + strconv.FormatInt(threadID, 10)
 	}
-	return fmt.Sprintf("checkpoint-%s-%s", threadID, checkpointID)
+	return fmt.Sprintf("checkpoint-%d-%s", threadID, checkpointID)
 }
 
-func EventMsgID(threadID, eventID string) string {
+func EventMsgID(threadID int64, eventID string) string {
 	eventID = strings.TrimSpace(eventID)
-	return fmt.Sprintf("event-%s-%s", threadID, eventID)
+	return fmt.Sprintf("event-%d-%s", threadID, eventID)
 }
 
-func (s *Store) SaveResponseCreateCheckpoint(ctx context.Context, threadID, checkpointID string, payload json.RawMessage) error {
+func (s *Store) SaveResponseCreateCheckpoint(ctx context.Context, threadID int64, checkpointID string, payload json.RawMessage) error {
 	if s == nil || s.js == nil {
 		return fmt.Errorf("thread history store is not configured")
 	}
-	if strings.TrimSpace(threadID) == "" {
+	if threadID <= 0 {
 		return fmt.Errorf("response.create checkpoint missing thread id")
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
@@ -71,17 +71,17 @@ func (s *Store) SaveResponseCreateCheckpoint(ctx context.Context, threadID, chec
 	msg.Header.Set("Nats-Msg-Id", CheckpointMsgID(threadID, checkpointID))
 
 	if _, err := s.js.PublishMsg(msg, nats.Context(ctx)); err != nil {
-		return fmt.Errorf("publish response.create checkpoint for thread %s: %w", threadID, err)
+		return fmt.Errorf("publish response.create checkpoint for thread %d: %w", threadID, err)
 	}
 
 	return nil
 }
 
-func (s *Store) LoadLatestResponseCreateCheckpoint(ctx context.Context, threadID string) (json.RawMessage, error) {
+func (s *Store) LoadLatestResponseCreateCheckpoint(ctx context.Context, threadID int64) (json.RawMessage, error) {
 	if s == nil || s.js == nil {
 		return nil, fmt.Errorf("thread history store is not configured")
 	}
-	if strings.TrimSpace(threadID) == "" {
+	if threadID <= 0 {
 		return nil, fmt.Errorf("response.create checkpoint missing thread id")
 	}
 
@@ -90,7 +90,7 @@ func (s *Store) LoadLatestResponseCreateCheckpoint(ctx context.Context, threadID
 		if errors.Is(err, nats.ErrMsgNotFound) || errors.Is(err, nats.ErrNoResponders) {
 			return nil, ErrCheckpointNotFound
 		}
-		return nil, fmt.Errorf("load latest response.create checkpoint for thread %s: %w", threadID, err)
+		return nil, fmt.Errorf("load latest response.create checkpoint for thread %d: %w", threadID, err)
 	}
 	if len(bytes.TrimSpace(msg.Data)) == 0 {
 		return nil, ErrCheckpointNotFound
@@ -111,7 +111,7 @@ func (s *Store) AppendEvent(ctx context.Context, entry threadstore.EventLogEntry
 	if s == nil || s.js == nil {
 		return fmt.Errorf("thread history store is not configured")
 	}
-	if strings.TrimSpace(entry.ThreadID) == "" {
+	if entry.ThreadID <= 0 {
 		return fmt.Errorf("thread history event missing thread id")
 	}
 	if strings.TrimSpace(entry.EventType) == "" {
@@ -132,7 +132,7 @@ func (s *Store) AppendEvent(ctx context.Context, entry threadstore.EventLogEntry
 		CreatedAt:        entry.CreatedAt.UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal thread history event for thread %s: %w", entry.ThreadID, err)
+		return fmt.Errorf("marshal thread history event for thread %d: %w", entry.ThreadID, err)
 	}
 
 	msg := &nats.Msg{
@@ -145,17 +145,17 @@ func (s *Store) AppendEvent(ctx context.Context, entry threadstore.EventLogEntry
 	}
 
 	if _, err := s.js.PublishMsg(msg, nats.Context(ctx)); err != nil {
-		return fmt.Errorf("publish thread history event for thread %s: %w", entry.ThreadID, err)
+		return fmt.Errorf("publish thread history event for thread %d: %w", entry.ThreadID, err)
 	}
 
 	return nil
 }
 
-func (s *Store) ListEvents(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
+func (s *Store) ListEvents(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
 	if s == nil || s.js == nil {
 		return nil, fmt.Errorf("thread history store is not configured")
 	}
-	if strings.TrimSpace(threadID) == "" {
+	if threadID <= 0 {
 		return nil, fmt.Errorf("thread history events missing thread id")
 	}
 
@@ -175,7 +175,7 @@ func (s *Store) ListEvents(ctx context.Context, threadID string, options threads
 		if errors.Is(err, nats.ErrMsgNotFound) || errors.Is(err, nats.ErrNoResponders) {
 			return []threadstore.EventRecord{}, nil
 		}
-		return nil, fmt.Errorf("load latest thread history event for thread %s: %w", threadID, err)
+		return nil, fmt.Errorf("load latest thread history event for thread %d: %w", threadID, err)
 	}
 
 	maxSeq := last.Sequence

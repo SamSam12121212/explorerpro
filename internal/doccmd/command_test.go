@@ -11,7 +11,7 @@ func TestPrepareInputRequestRoundTrip(t *testing.T) {
 	req := PrepareInputRequest{
 		RequestID:  "prep_123",
 		Kind:       PrepareKindWarmup,
-		ThreadID:   "thread_123",
+		ThreadID:   123,
 		DocumentID: 123,
 		Task:       "warm document pages",
 		InputItems: json.RawMessage(`[{"type":"message","role":"user"}]`),
@@ -98,7 +98,7 @@ func TestRuntimeContextRequestRoundTrip(t *testing.T) {
 
 	req := RuntimeContextRequest{
 		RequestID:    "docctx_123",
-		ThreadID:     "thread_123",
+		ThreadID:     123,
 		Instructions: "Be concise.",
 		Tools:        json.RawMessage(`[{"type":"function","name":"lookup"}]`),
 	}
@@ -117,7 +117,7 @@ func TestRuntimeContextRequestRoundTrip(t *testing.T) {
 		t.Fatalf("RequestID = %q, want %q", decoded.RequestID, req.RequestID)
 	}
 	if decoded.ThreadID != req.ThreadID {
-		t.Fatalf("ThreadID = %q, want %q", decoded.ThreadID, req.ThreadID)
+		t.Fatalf("ThreadID = %d, want %d", decoded.ThreadID, req.ThreadID)
 	}
 	if string(decoded.Tools) != string(req.Tools) {
 		t.Fatalf("Tools = %s, want %s", string(decoded.Tools), string(req.Tools))
@@ -128,7 +128,7 @@ func TestRuntimeContextRequestValidation(t *testing.T) {
 	t.Parallel()
 
 	tests := []RuntimeContextRequest{
-		{ThreadID: "thread_123"},
+		{ThreadID: 123},
 		{RequestID: "docctx_123"},
 	}
 

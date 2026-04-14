@@ -38,7 +38,7 @@ type clientConfig struct {
 	logger    *slog.Logger
 	store     *postgresstore.Store
 	docs      *threaddocstore.Store
-	threadID  string
+	threadID  int64
 	afterItem string
 }
 
@@ -234,7 +234,7 @@ type streamItemPayload struct {
 }
 
 type streamSnapshotPayload struct {
-	ID                 string `json:"id"`
+	ID                 int64  `json:"id"`
 	Status             string `json:"status,omitempty"`
 	Model              string `json:"model,omitempty"`
 	LastResponseID     string `json:"last_response_id,omitempty"`
@@ -282,8 +282,8 @@ func (c *client) writeStreamSnapshotLocked(raw json.RawMessage) error {
 		return clientPayloadError{err: err}
 	}
 
-	threadID := strings.TrimSpace(snapshot.ID)
-	if threadID == "" {
+	threadID := snapshot.ID
+	if threadID <= 0 {
 		threadID = c.cfg.threadID
 	}
 
@@ -300,7 +300,7 @@ func (c *client) writeStreamSnapshotLocked(raw json.RawMessage) error {
 	})
 }
 
-func (c *client) loadAttachedDocuments(ctx context.Context, threadID string) ([]map[string]any, error) {
+func (c *client) loadAttachedDocuments(ctx context.Context, threadID int64) ([]map[string]any, error) {
 	if c.cfg.docs == nil {
 		return []map[string]any{}, nil
 	}

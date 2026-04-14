@@ -46,6 +46,16 @@ func formatDocumentMetadataID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
+func (s *Store) ReserveThreadID(ctx context.Context) (int64, error) {
+	var threadID int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT nextval(pg_get_serial_sequence('threads', 'id'))
+`).Scan(&threadID); err != nil {
+		return 0, fmt.Errorf("reserve thread id: %w", err)
+	}
+	return threadID, nil
+}
+
 func (s *Store) CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO threads (
@@ -68,6 +78,9 @@ INSERT INTO threads (
     last_response_id,
     active_response_id,
     active_spawn_group_id,
+    child_kind,
+    document_id,
+    document_phase,
     created_at,
     updated_at
 ) VALUES (
@@ -91,13 +104,16 @@ INSERT INTO threads (
     $18,
     $19,
     $20,
-    $21
+    $21,
+    $22,
+    $23,
+    $24
 )
 ON CONFLICT (id) DO NOTHING
 `,
 		meta.ID,
 		meta.RootThreadID,
-		nullIfBlank(meta.ParentThreadID),
+		nullIfZeroInt64(meta.ParentThreadID),
 		nullIfBlank(meta.ParentCallID),
 		meta.Depth,
 		string(meta.Status),
@@ -114,11 +130,14 @@ ON CONFLICT (id) DO NOTHING
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
 		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfBlank(meta.ChildKind),
+		nullIfZeroInt64(meta.DocumentID),
+		nullIfBlank(meta.DocumentPhase),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("persist thread create %s: %w", meta.ID, err)
+		return fmt.Errorf("persist thread create %d: %w", meta.ID, err)
 	}
 
 	return nil
@@ -146,6 +165,9 @@ INSERT INTO threads (
     last_response_id,
     active_response_id,
     active_spawn_group_id,
+    child_kind,
+    document_id,
+    document_phase,
     created_at,
     updated_at
 ) VALUES (
@@ -169,7 +191,10 @@ INSERT INTO threads (
     $18,
     $19,
     $20,
-    $21
+    $21,
+    $22,
+    $23,
+    $24
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -190,12 +215,15 @@ ON CONFLICT (id) DO UPDATE SET
     last_response_id = EXCLUDED.last_response_id,
     active_response_id = EXCLUDED.active_response_id,
     active_spawn_group_id = EXCLUDED.active_spawn_group_id,
+    child_kind = EXCLUDED.child_kind,
+    document_id = EXCLUDED.document_id,
+    document_phase = EXCLUDED.document_phase,
     created_at = EXCLUDED.created_at,
     updated_at = EXCLUDED.updated_at
 `,
 		meta.ID,
 		meta.RootThreadID,
-		nullIfBlank(meta.ParentThreadID),
+		nullIfZeroInt64(meta.ParentThreadID),
 		nullIfBlank(meta.ParentCallID),
 		meta.Depth,
 		string(meta.Status),
@@ -212,17 +240,20 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
 		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfBlank(meta.ChildKind),
+		nullIfZeroInt64(meta.DocumentID),
+		nullIfBlank(meta.DocumentPhase),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("persist thread snapshot %s: %w", meta.ID, err)
+		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
 	}
 
 	return nil
 }
 
-func (s *Store) CommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error) {
+func (s *Store) CommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
@@ -231,12 +262,12 @@ SELECT EXISTS (
     WHERE thread_id = $1 AND cmd_id = $2
 )
 `, threadID, cmdID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check processed command %s/%s: %w", threadID, cmdID, err)
+		return false, fmt.Errorf("check processed command %d/%s: %w", threadID, cmdID, err)
 	}
 	return exists, nil
 }
 
-func (s *Store) MarkCommandProcessed(ctx context.Context, threadID, cmdID string) (bool, error) {
+func (s *Store) MarkCommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 INSERT INTO thread_processed_commands (
     thread_id,
@@ -250,12 +281,12 @@ INSERT INTO thread_processed_commands (
 ON CONFLICT (thread_id, cmd_id) DO NOTHING
 `, threadID, cmdID)
 	if err != nil {
-		return false, fmt.Errorf("mark processed command %s/%s: %w", threadID, cmdID, err)
+		return false, fmt.Errorf("mark processed command %d/%s: %w", threadID, cmdID, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *Store) ClaimOwnership(ctx context.Context, threadID, workerID string, leaseUntil time.Time) (threadstore.ClaimResult, error) {
+func (s *Store) ClaimOwnership(ctx context.Context, threadID int64, workerID string, leaseUntil time.Time) (threadstore.ClaimResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return threadstore.ClaimResult{}, fmt.Errorf("begin claim ownership tx: %w", err)
@@ -330,7 +361,7 @@ ON CONFLICT (thread_id) DO UPDATE SET
     claimed_at = EXCLUDED.claimed_at,
     updated_at = EXCLUDED.updated_at
 `, threadID, workerID, nonZeroTime(leaseUntil), int64(newGeneration), claimedAt, now); err != nil {
-		return threadstore.ClaimResult{}, fmt.Errorf("upsert thread owner %s: %w", threadID, err)
+		return threadstore.ClaimResult{}, fmt.Errorf("upsert thread owner %d: %w", threadID, err)
 	}
 
 	meta.OwnerWorkerID = workerID
@@ -351,7 +382,7 @@ ON CONFLICT (thread_id) DO UPDATE SET
 	}, nil
 }
 
-func (s *Store) RenewOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error) {
+func (s *Store) RenewOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 UPDATE thread_owners
 SET lease_until = $4,
@@ -361,12 +392,12 @@ WHERE thread_id = $1
   AND socket_generation = $3
 `, threadID, workerID, int64(socketGeneration), nonZeroTime(leaseUntil))
 	if err != nil {
-		return false, fmt.Errorf("renew thread owner %s: %w", threadID, err)
+		return false, fmt.Errorf("renew thread owner %d: %w", threadID, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *Store) LoadOwner(ctx context.Context, threadID string) (threadstore.OwnerRecord, error) {
+func (s *Store) LoadOwner(ctx context.Context, threadID int64) (threadstore.OwnerRecord, error) {
 	row := s.pool.QueryRow(ctx, `
 SELECT
     worker_id,
@@ -390,7 +421,7 @@ WHERE thread_id = $1
 		if isNoRows(err) {
 			return threadstore.OwnerRecord{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.OwnerRecord{}, fmt.Errorf("load thread owner %s: %w", threadID, err)
+		return threadstore.OwnerRecord{}, fmt.Errorf("load thread owner %d: %w", threadID, err)
 	}
 
 	owner.SocketGeneration = uint64(maxInt64(socketGeneration))
@@ -400,7 +431,7 @@ WHERE thread_id = $1
 	return owner, nil
 }
 
-func (s *Store) ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]string, error) {
+func (s *Store) ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]int64, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT id
 FROM threads
@@ -412,9 +443,9 @@ ORDER BY id ASC
 	}
 	defer rows.Close()
 
-	var ids []string
+	var ids []int64
 	for rows.Next() {
-		var id string
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan thread id by status: %w", err)
 		}
@@ -426,7 +457,7 @@ ORDER BY id ASC
 	return ids, nil
 }
 
-func (s *Store) RotateOwnership(ctx context.Context, threadID, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error) {
+func (s *Store) RotateOwnership(ctx context.Context, threadID int64, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("begin rotate ownership tx: %w", err)
@@ -461,7 +492,7 @@ SET worker_id = $2,
     updated_at = $5
 WHERE thread_id = $1
 `, threadID, workerID, nonZeroTime(leaseUntil), int64(newGeneration), now); err != nil {
-		return 0, false, fmt.Errorf("update rotated owner %s: %w", threadID, err)
+		return 0, false, fmt.Errorf("update rotated owner %d: %w", threadID, err)
 	}
 
 	meta.OwnerWorkerID = workerID
@@ -479,7 +510,7 @@ WHERE thread_id = $1
 	return newGeneration, true, nil
 }
 
-func (s *Store) ReleaseOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64) error {
+func (s *Store) ReleaseOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin release ownership tx: %w", err)
@@ -508,7 +539,7 @@ func (s *Store) ReleaseOwnership(ctx context.Context, threadID, workerID string,
 DELETE FROM thread_owners
 WHERE thread_id = $1
 `, threadID); err != nil {
-		return fmt.Errorf("delete thread owner %s: %w", threadID, err)
+		return fmt.Errorf("delete thread owner %d: %w", threadID, err)
 	}
 
 	meta.OwnerWorkerID = ""
@@ -637,7 +668,7 @@ ON CONFLICT (thread_id, event_seq) DO NOTHING
 	return nil
 }
 
-func (s *Store) SaveResponseRaw(ctx context.Context, threadID, responseID string, payload json.RawMessage) error {
+func (s *Store) SaveResponseRaw(ctx context.Context, threadID int64, responseID string, payload json.RawMessage) error {
 	if strings.TrimSpace(responseID) == "" || len(payload) == 0 {
 		return nil
 	}
@@ -690,7 +721,7 @@ ON CONFLICT (id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) CreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta, childThreadIDs []string) error {
+func (s *Store) CreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta, childThreadIDs []int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin spawn group tx: %w", err)
@@ -773,7 +804,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 			nonZeroTime(meta.UpdatedAt),
 		)
 		if err != nil {
-			return fmt.Errorf("insert spawn child %s: %w", childThreadID, err)
+			return fmt.Errorf("insert spawn child %d: %w", childThreadID, err)
 		}
 	}
 
@@ -863,7 +894,7 @@ WHERE spawn_group_id = $1 AND child_thread_id = $2
 FOR UPDATE
 `, spawnGroupID, result.ChildThreadID).Scan(&existingStatus)
 	if err != nil && !isNoRows(err) {
-		return false, nil, fmt.Errorf("load spawn result %s/%s: %w", spawnGroupID, result.ChildThreadID, err)
+		return false, nil, fmt.Errorf("load spawn result %s/%d: %w", spawnGroupID, result.ChildThreadID, err)
 	}
 	if existingStatus != "" && existingStatus != "pending" {
 		results, listErr := listSpawnResultsTx(ctx, tx, spawnGroupID)
@@ -925,7 +956,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 		nonZeroTime(result.UpdatedAt),
 	)
 	if err != nil {
-		return false, nil, fmt.Errorf("upsert spawn result %s/%s: %w", spawnGroupID, result.ChildThreadID, err)
+		return false, nil, fmt.Errorf("upsert spawn result %s/%d: %w", spawnGroupID, result.ChildThreadID, err)
 	}
 
 	results, err := listSpawnResultsTx(ctx, tx, spawnGroupID)
@@ -940,12 +971,12 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 	return true, results, nil
 }
 
-func (s *Store) LoadThread(ctx context.Context, threadID string) (threadstore.ThreadMeta, error) {
+func (s *Store) LoadThread(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error) {
 	row := s.pool.QueryRow(ctx, `
 SELECT
     id,
     root_thread_id,
-    COALESCE(parent_thread_id, ''),
+    COALESCE(parent_thread_id, 0),
     COALESCE(parent_call_id, ''),
     depth,
     status,
@@ -962,6 +993,9 @@ SELECT
     COALESCE(last_response_id, ''),
     COALESCE(active_response_id, ''),
     COALESCE(active_spawn_group_id, ''),
+    COALESCE(child_kind, ''),
+    COALESCE(document_id, 0),
+    COALESCE(document_phase, ''),
     created_at,
     updated_at
 FROM threads
@@ -992,13 +1026,16 @@ WHERE id = $1
 		&meta.LastResponseID,
 		&meta.ActiveResponseID,
 		&meta.ActiveSpawnGroupID,
+		&meta.ChildKind,
+		&meta.DocumentID,
+		&meta.DocumentPhase,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.ThreadMeta{}, fmt.Errorf("load thread %s: %w", threadID, err)
+		return threadstore.ThreadMeta{}, fmt.Errorf("load thread %d: %w", threadID, err)
 	}
 
 	meta.Status = threadstore.ThreadStatus(status)
@@ -1009,8 +1046,85 @@ WHERE id = $1
 	return meta, nil
 }
 
-func (s *Store) LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID string, documentID int64) (threadstore.DocumentQueryLineage, error) {
-	documentIDText := formatDocumentMetadataID(documentID)
+func (s *Store) LoadReusableDocumentChildThread(ctx context.Context, parentThreadID, documentID int64) (threadstore.ThreadMeta, error) {
+	row := s.pool.QueryRow(ctx, `
+SELECT
+    id,
+    root_thread_id,
+    COALESCE(parent_thread_id, 0),
+    COALESCE(parent_call_id, ''),
+    depth,
+    status,
+    model,
+    instructions,
+    COALESCE(metadata_json::text, ''),
+    COALESCE(include_json::text, ''),
+    COALESCE(tools_json::text, ''),
+    COALESCE(tool_choice_json::text, ''),
+    COALESCE(reasoning_json::text, ''),
+    COALESCE(owner_worker_id, ''),
+    socket_generation,
+    socket_expires_at,
+    COALESCE(last_response_id, ''),
+    COALESCE(active_response_id, ''),
+    COALESCE(active_spawn_group_id, ''),
+    COALESCE(child_kind, ''),
+    COALESCE(document_id, 0),
+    COALESCE(document_phase, ''),
+    created_at,
+    updated_at
+FROM threads
+WHERE parent_thread_id = $1
+  AND child_kind = 'document'
+  AND document_id = $2
+LIMIT 1
+`, parentThreadID, documentID)
+
+	var meta threadstore.ThreadMeta
+	var status string
+	var socketGeneration int64
+	var socketExpiresAt *time.Time
+	if err := row.Scan(
+		&meta.ID,
+		&meta.RootThreadID,
+		&meta.ParentThreadID,
+		&meta.ParentCallID,
+		&meta.Depth,
+		&status,
+		&meta.Model,
+		&meta.Instructions,
+		&meta.MetadataJSON,
+		&meta.IncludeJSON,
+		&meta.ToolsJSON,
+		&meta.ToolChoiceJSON,
+		&meta.ReasoningJSON,
+		&meta.OwnerWorkerID,
+		&socketGeneration,
+		&socketExpiresAt,
+		&meta.LastResponseID,
+		&meta.ActiveResponseID,
+		&meta.ActiveSpawnGroupID,
+		&meta.ChildKind,
+		&meta.DocumentID,
+		&meta.DocumentPhase,
+		&meta.CreatedAt,
+		&meta.UpdatedAt,
+	); err != nil {
+		if isNoRows(err) {
+			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
+		}
+		return threadstore.ThreadMeta{}, fmt.Errorf("load reusable document child thread for %d/%d: %w", parentThreadID, documentID, err)
+	}
+
+	meta.Status = threadstore.ThreadStatus(status)
+	meta.SocketGeneration = uint64(maxInt64(socketGeneration))
+	if socketExpiresAt != nil {
+		meta.SocketExpiresAt = socketExpiresAt.UTC()
+	}
+	return meta, nil
+}
+
+func (s *Store) LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID int64, documentID int64) (threadstore.DocumentQueryLineage, error) {
 	row := s.pool.QueryRow(ctx, `
 SELECT
     id,
@@ -1018,20 +1132,21 @@ SELECT
     model
 FROM threads
 WHERE parent_thread_id = $1
+  AND child_kind = 'document'
+  AND document_id = $2
+  AND document_phase = 'query'
   AND status IN ('completed', 'ready')
   AND last_response_id IS NOT NULL
-  AND metadata_json ->> 'spawn_mode' = 'document_query'
-  AND metadata_json ->> 'document_id' = $2
 ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT 1
-`, parentThreadID, documentIDText)
+`, parentThreadID, documentID)
 
 	var lineage threadstore.DocumentQueryLineage
 	if err := row.Scan(&lineage.ChildThreadID, &lineage.ResponseID, &lineage.Model); err != nil {
 		if isNoRows(err) {
 			return threadstore.DocumentQueryLineage{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.DocumentQueryLineage{}, fmt.Errorf("load latest completed document query lineage for %s/%d: %w", parentThreadID, documentID, err)
+		return threadstore.DocumentQueryLineage{}, fmt.Errorf("load latest completed document query lineage for %d/%d: %w", parentThreadID, documentID, err)
 	}
 
 	return lineage, nil
@@ -1049,7 +1164,7 @@ func (s *Store) ListRootThreads(ctx context.Context, limit int64) ([]ThreadListE
 SELECT
     t.id,
     t.root_thread_id,
-    COALESCE(t.parent_thread_id, ''),
+    COALESCE(t.parent_thread_id, 0),
     COALESCE(t.parent_call_id, ''),
     t.depth,
     t.status,
@@ -1066,6 +1181,9 @@ SELECT
     COALESCE(t.last_response_id, ''),
     COALESCE(t.active_response_id, ''),
     COALESCE(t.active_spawn_group_id, ''),
+    COALESCE(t.child_kind, ''),
+    COALESCE(t.document_id, 0),
+    COALESCE(t.document_phase, ''),
     t.created_at,
     t.updated_at,
     COALESCE(first_item.payload_json, '{}'::jsonb)::text,
@@ -1131,6 +1249,9 @@ LIMIT $1
 			&meta.LastResponseID,
 			&meta.ActiveResponseID,
 			&meta.ActiveSpawnGroupID,
+			&meta.ChildKind,
+			&meta.DocumentID,
+			&meta.DocumentPhase,
 			&meta.CreatedAt,
 			&meta.UpdatedAt,
 			&firstPayloadText,
@@ -1166,7 +1287,7 @@ LIMIT $1
 	return entries, nil
 }
 
-func (s *Store) ListItems(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
+func (s *Store) ListItems(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
 	limit := normalizeLimit(options.Limit)
 	if options.After != "" {
 		afterSeq, err := parseSequenceCursor(options.After)
@@ -1256,7 +1377,7 @@ func extractMessageText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func (s *Store) ListEvents(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
+func (s *Store) ListEvents(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.EventRecord, error) {
 	limit := normalizeLimit(options.Limit)
 	if options.After != "" {
 		afterSeq, err := parseSequenceCursor(options.After)
@@ -1318,7 +1439,7 @@ ORDER BY event_seq ASC
 	return scanEventRows(rows)
 }
 
-func (s *Store) ThreadHasResponse(ctx context.Context, threadID, responseID string) (bool, error) {
+func (s *Store) ThreadHasResponse(ctx context.Context, threadID int64, responseID string) (bool, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
@@ -1327,7 +1448,7 @@ SELECT EXISTS (
     WHERE thread_id = $1 AND response_id = $2
 )
 `, threadID, responseID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check thread response link %s/%s: %w", threadID, responseID, err)
+		return false, fmt.Errorf("check thread response link %d/%s: %w", threadID, responseID, err)
 	}
 
 	return exists, nil
@@ -1398,7 +1519,7 @@ WHERE id = $1
 	return meta, nil
 }
 
-func (s *Store) ListSpawnGroupsByParent(ctx context.Context, parentThreadID string) ([]threadstore.SpawnGroupMeta, error) {
+func (s *Store) ListSpawnGroupsByParent(ctx context.Context, parentThreadID int64) ([]threadstore.SpawnGroupMeta, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT
     id,
@@ -1418,7 +1539,7 @@ WHERE parent_thread_id = $1
 ORDER BY created_at ASC, id ASC
 `, parentThreadID)
 	if err != nil {
-		return nil, fmt.Errorf("list spawn groups by parent %s: %w", parentThreadID, err)
+		return nil, fmt.Errorf("list spawn groups by parent %d: %w", parentThreadID, err)
 	}
 	defer rows.Close()
 
@@ -1457,7 +1578,7 @@ ORDER BY created_at ASC, id ASC
 	return groups, nil
 }
 
-func (s *Store) LoadSpawnGroupChildThreadIDs(ctx context.Context, spawnGroupID string) ([]string, error) {
+func (s *Store) LoadSpawnGroupChildThreadIDs(ctx context.Context, spawnGroupID string) ([]int64, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT child_thread_id
 FROM spawn_group_children
@@ -1469,9 +1590,9 @@ ORDER BY child_index ASC NULLS LAST, child_thread_id ASC
 	}
 	defer rows.Close()
 
-	var ids []string
+	var ids []int64
 	for rows.Next() {
-		var id string
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan spawn child id: %w", err)
 		}
@@ -1487,17 +1608,19 @@ ORDER BY child_index ASC NULLS LAST, child_thread_id ASC
 func (s *Store) ListSpawnResults(ctx context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT
-    child_thread_id,
-    status,
-    COALESCE(child_response_id, ''),
-    COALESCE(assistant_text, ''),
-    COALESCE(result_ref, ''),
-    COALESCE(summary_ref, ''),
-    COALESCE(error_ref, ''),
-    updated_at
-FROM spawn_group_children
-WHERE spawn_group_id = $1 AND status <> 'pending'
-ORDER BY updated_at ASC, child_thread_id ASC
+    sgc.child_thread_id,
+    COALESCE(t.document_id, 0),
+    sgc.status,
+    COALESCE(sgc.child_response_id, ''),
+    COALESCE(sgc.assistant_text, ''),
+    COALESCE(sgc.result_ref, ''),
+    COALESCE(sgc.summary_ref, ''),
+    COALESCE(sgc.error_ref, ''),
+    sgc.updated_at
+FROM spawn_group_children AS sgc
+LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
+WHERE sgc.spawn_group_id = $1 AND sgc.status <> 'pending'
+ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 `, spawnGroupID)
 	if err != nil {
 		return nil, fmt.Errorf("list spawn results %s: %w", spawnGroupID, err)
@@ -1509,6 +1632,7 @@ ORDER BY updated_at ASC, child_thread_id ASC
 		var result threadstore.SpawnChildResult
 		if err := rows.Scan(
 			&result.ChildThreadID,
+			&result.DocumentID,
 			&result.Status,
 			&result.ChildResponseID,
 			&result.AssistantText,
@@ -1537,7 +1661,7 @@ type pgxQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func upsertThreadResponseLink(ctx context.Context, db pgxExec, threadID, responseID, linkKind string) error {
+func upsertThreadResponseLink(ctx context.Context, db pgxExec, threadID int64, responseID, linkKind string) error {
 	_, err := db.Exec(ctx, `
 INSERT INTO thread_response_links (
     thread_id,
@@ -1558,7 +1682,7 @@ ON CONFLICT (thread_id, response_id) DO UPDATE SET
 		linkKind,
 	)
 	if err != nil {
-		return fmt.Errorf("upsert thread response link %s/%s: %w", threadID, responseID, err)
+		return fmt.Errorf("upsert thread response link %d/%s: %w", threadID, responseID, err)
 	}
 
 	return nil
@@ -1592,6 +1716,13 @@ func requiredJSON(raw, fallback string) string {
 
 func nullIfBlank(value string) any {
 	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func nullIfZeroInt64(value int64) any {
+	if value <= 0 {
 		return nil
 	}
 	return value
@@ -1691,6 +1822,9 @@ INSERT INTO threads (
     last_response_id,
     active_response_id,
     active_spawn_group_id,
+    child_kind,
+    document_id,
+    document_phase,
     created_at,
     updated_at
 ) VALUES (
@@ -1714,7 +1848,10 @@ INSERT INTO threads (
     $18,
     $19,
     $20,
-    $21
+    $21,
+    $22,
+    $23,
+    $24
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -1735,12 +1872,15 @@ ON CONFLICT (id) DO UPDATE SET
     last_response_id = EXCLUDED.last_response_id,
     active_response_id = EXCLUDED.active_response_id,
     active_spawn_group_id = EXCLUDED.active_spawn_group_id,
+    child_kind = EXCLUDED.child_kind,
+    document_id = EXCLUDED.document_id,
+    document_phase = EXCLUDED.document_phase,
     created_at = EXCLUDED.created_at,
     updated_at = EXCLUDED.updated_at
 `,
 		meta.ID,
 		meta.RootThreadID,
-		nullIfBlank(meta.ParentThreadID),
+		nullIfZeroInt64(meta.ParentThreadID),
 		nullIfBlank(meta.ParentCallID),
 		meta.Depth,
 		string(meta.Status),
@@ -1757,21 +1897,24 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
 		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfBlank(meta.ChildKind),
+		nullIfZeroInt64(meta.DocumentID),
+		nullIfBlank(meta.DocumentPhase),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("persist thread snapshot %s: %w", meta.ID, err)
+		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
 	}
 	return nil
 }
 
-func (s *Store) loadThreadForUpdate(ctx context.Context, tx pgx.Tx, threadID string) (threadstore.ThreadMeta, error) {
+func (s *Store) loadThreadForUpdate(ctx context.Context, tx pgx.Tx, threadID int64) (threadstore.ThreadMeta, error) {
 	row := tx.QueryRow(ctx, `
 SELECT
     id,
     root_thread_id,
-    COALESCE(parent_thread_id, ''),
+    COALESCE(parent_thread_id, 0),
     COALESCE(parent_call_id, ''),
     depth,
     status,
@@ -1788,6 +1931,9 @@ SELECT
     COALESCE(last_response_id, ''),
     COALESCE(active_response_id, ''),
     COALESCE(active_spawn_group_id, ''),
+    COALESCE(child_kind, ''),
+    COALESCE(document_id, 0),
+    COALESCE(document_phase, ''),
     created_at,
     updated_at
 FROM threads
@@ -1819,13 +1965,16 @@ FOR UPDATE
 		&meta.LastResponseID,
 		&meta.ActiveResponseID,
 		&meta.ActiveSpawnGroupID,
+		&meta.ChildKind,
+		&meta.DocumentID,
+		&meta.DocumentPhase,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.ThreadMeta{}, fmt.Errorf("load thread %s for update: %w", threadID, err)
+		return threadstore.ThreadMeta{}, fmt.Errorf("load thread %d for update: %w", threadID, err)
 	}
 
 	meta.Status = threadstore.ThreadStatus(status)
@@ -1836,7 +1985,7 @@ FOR UPDATE
 	return meta, nil
 }
 
-func (s *Store) loadOwnerForUpdate(ctx context.Context, tx pgx.Tx, threadID string) (threadstore.OwnerRecord, bool, error) {
+func (s *Store) loadOwnerForUpdate(ctx context.Context, tx pgx.Tx, threadID int64) (threadstore.OwnerRecord, bool, error) {
 	row := tx.QueryRow(ctx, `
 SELECT
     worker_id,
@@ -1861,7 +2010,7 @@ FOR UPDATE
 		if isNoRows(err) {
 			return threadstore.OwnerRecord{}, false, nil
 		}
-		return threadstore.OwnerRecord{}, false, fmt.Errorf("load thread owner %s for update: %w", threadID, err)
+		return threadstore.OwnerRecord{}, false, fmt.Errorf("load thread owner %d for update: %w", threadID, err)
 	}
 
 	owner.SocketGeneration = uint64(maxInt64(socketGeneration))
@@ -1871,7 +2020,7 @@ FOR UPDATE
 	return owner, true, nil
 }
 
-func (s *Store) nextThreadItemSeq(ctx context.Context, tx pgx.Tx, threadID string) (int64, error) {
+func (s *Store) nextThreadItemSeq(ctx context.Context, tx pgx.Tx, threadID int64) (int64, error) {
 	if _, err := s.loadThreadForUpdate(ctx, tx, threadID); err != nil {
 		return 0, err
 	}
@@ -1882,7 +2031,7 @@ SELECT COALESCE(MAX(seq), 0)
 FROM thread_items
 WHERE thread_id = $1
 `, threadID).Scan(&current); err != nil {
-		return 0, fmt.Errorf("load next item seq for thread %s: %w", threadID, err)
+		return 0, fmt.Errorf("load next item seq for thread %d: %w", threadID, err)
 	}
 
 	return current + 1, nil
@@ -1891,17 +2040,19 @@ WHERE thread_id = $1
 func listSpawnResultsTx(ctx context.Context, db pgxQueryer, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
 	rows, err := db.Query(ctx, `
 SELECT
-    child_thread_id,
-    status,
-    COALESCE(child_response_id, ''),
-    COALESCE(assistant_text, ''),
-    COALESCE(result_ref, ''),
-    COALESCE(summary_ref, ''),
-    COALESCE(error_ref, ''),
-    updated_at
-FROM spawn_group_children
-WHERE spawn_group_id = $1 AND status <> 'pending'
-ORDER BY updated_at ASC, child_thread_id ASC
+    sgc.child_thread_id,
+    COALESCE(t.document_id, 0),
+    sgc.status,
+    COALESCE(sgc.child_response_id, ''),
+    COALESCE(sgc.assistant_text, ''),
+    COALESCE(sgc.result_ref, ''),
+    COALESCE(sgc.summary_ref, ''),
+    COALESCE(sgc.error_ref, ''),
+    sgc.updated_at
+FROM spawn_group_children AS sgc
+LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
+WHERE sgc.spawn_group_id = $1 AND sgc.status <> 'pending'
+ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 `, spawnGroupID)
 	if err != nil {
 		return nil, fmt.Errorf("list spawn results %s: %w", spawnGroupID, err)
@@ -1913,6 +2064,7 @@ ORDER BY updated_at ASC, child_thread_id ASC
 		var result threadstore.SpawnChildResult
 		if err := rows.Scan(
 			&result.ChildThreadID,
+			&result.DocumentID,
 			&result.Status,
 			&result.ChildResponseID,
 			&result.AssistantText,

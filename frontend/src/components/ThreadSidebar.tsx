@@ -1,5 +1,5 @@
 export interface ThreadEntry {
-  id: string;
+  id: number;
   label: string;
   previewText: string;
   updatedAt: string;
@@ -7,8 +7,8 @@ export interface ThreadEntry {
 
 interface ThreadSidebarProps {
   threads: ThreadEntry[];
-  activeThreadId: string | null;
-  onSelectThread: (id: string) => void;
+  activeThreadId: number | null;
+  onSelectThread: (id: number) => void;
   onNewChat: () => void;
 }
 

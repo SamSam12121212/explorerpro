@@ -34,7 +34,7 @@ type SplitCommand struct {
 type PrepareInputRequest struct {
 	RequestID  string          `json:"request_id"`
 	Kind       string          `json:"kind"`
-	ThreadID   string          `json:"thread_id,omitempty"`
+	ThreadID   int64           `json:"thread_id,omitempty"`
 	DocumentID int64           `json:"document_id"`
 	Task       string          `json:"task,omitempty"`
 	InputItems json.RawMessage `json:"input_items,omitempty"`
@@ -49,7 +49,7 @@ type PrepareInputResponse struct {
 
 type RuntimeContextRequest struct {
 	RequestID    string          `json:"request_id"`
-	ThreadID     string          `json:"thread_id"`
+	ThreadID     int64           `json:"thread_id"`
 	Instructions string          `json:"instructions,omitempty"`
 	Tools        json.RawMessage `json:"tools,omitempty"`
 }
@@ -210,7 +210,7 @@ func validateRuntimeContextRequest(req RuntimeContextRequest) error {
 	if strings.TrimSpace(req.RequestID) == "" {
 		return fmt.Errorf("runtime context request missing request_id")
 	}
-	if strings.TrimSpace(req.ThreadID) == "" {
+	if req.ThreadID <= 0 {
 		return fmt.Errorf("runtime context request missing thread_id")
 	}
 	return nil
