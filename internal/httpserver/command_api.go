@@ -802,7 +802,7 @@ func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID int64, 
 		return "", false, threadstore.OwnerRecord{}, err
 	}
 
-	if strings.TrimSpace(owner.WorkerID) == "" || !owner.LeaseUntil.After(time.Now().UTC()) {
+	if owner.WorkerID <= 0 || !owner.LeaseUntil.After(time.Now().UTC()) {
 		return threadcmd.DispatchSubject(kind), false, owner, nil
 	}
 

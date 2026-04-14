@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -83,12 +84,12 @@ type CancelBody struct {
 }
 
 type AdoptBody struct {
-	PreviousWorkerID   string `json:"previous_worker_id,omitempty"`
+	PreviousWorkerID   int64  `json:"previous_worker_id,omitempty"`
 	RequiredGeneration uint64 `json:"required_generation,omitempty"`
 }
 
 type ReconcileBody struct {
-	PreviousWorkerID   string `json:"previous_worker_id,omitempty"`
+	PreviousWorkerID   int64  `json:"previous_worker_id,omitempty"`
 	RequiredGeneration uint64 `json:"required_generation,omitempty"`
 }
 
@@ -362,20 +363,20 @@ func (c Command) ChildResultBody() (ChildResultBody, error) {
 	return body, nil
 }
 
-func WorkerCommandSubject(workerID string, kind Kind) string {
-	return fmt.Sprintf(WorkerSubjectTemplate, workerID, kindSubjectSuffix(kind))
+func WorkerCommandSubject(workerID int64, kind Kind) string {
+	return fmt.Sprintf(WorkerSubjectTemplate, strconv.FormatInt(workerID, 10), kindSubjectSuffix(kind))
 }
 
 func DispatchSubject(kind Kind) string {
 	return "thread.dispatch." + kindSubjectSuffix(kind)
 }
 
-func WorkerCommandWildcard(workerID string) string {
-	return fmt.Sprintf("thread.worker.%s.cmd.>", workerID)
+func WorkerCommandWildcard(workerID int64) string {
+	return fmt.Sprintf("thread.worker.%s.cmd.>", strconv.FormatInt(workerID, 10))
 }
 
-func DurableWorkerName(workerID string) string {
-	return "worker-" + sanitizeToken(workerID)
+func DurableWorkerName(workerID int64) string {
+	return "worker-" + sanitizeToken(strconv.FormatInt(workerID, 10))
 }
 
 func DurableDispatchName() string {

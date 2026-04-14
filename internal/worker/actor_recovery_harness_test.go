@@ -152,19 +152,19 @@ func (s *fakeActorStore) MarkCommandProcessed(_ context.Context, _ int64, _ stri
 	return true, nil
 }
 
-func (s *fakeActorStore) ClaimOwnership(_ context.Context, _ int64, _ string, _ time.Time) (threadstore.ClaimResult, error) {
+func (s *fakeActorStore) ClaimOwnership(_ context.Context, _ int64, _ int64, _ time.Time) (threadstore.ClaimResult, error) {
 	return threadstore.ClaimResult{Claimed: true, SocketGeneration: 1}, nil
 }
 
-func (s *fakeActorStore) RenewOwnership(_ context.Context, _ int64, _ string, _ uint64, _ time.Time) (bool, error) {
+func (s *fakeActorStore) RenewOwnership(_ context.Context, _ int64, _ int64, _ uint64, _ time.Time) (bool, error) {
 	return true, nil
 }
 
-func (s *fakeActorStore) RotateOwnership(_ context.Context, _ int64, _ string, currentGeneration uint64, _, _ time.Time) (uint64, bool, error) {
+func (s *fakeActorStore) RotateOwnership(_ context.Context, _ int64, _ int64, currentGeneration uint64, _, _ time.Time) (uint64, bool, error) {
 	return currentGeneration + 1, true, nil
 }
 
-func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID int64, _ string, _ uint64) error {
+func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID int64, _ int64, _ uint64) error {
 	s.releasedThreads = append(s.releasedThreads, threadID)
 	return nil
 }
@@ -290,7 +290,7 @@ func newActorRecoveryHarness(t *testing.T, store *fakeActorStore, conn *actorTes
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	actor := &threadActor{
 		threadID: 100,
-		workerID: "worker-local-1",
+		workerID: tid("worker-local-1"),
 		logger:   logger,
 		store:    store,
 		history:  store,
@@ -469,7 +469,7 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 		ID:               100,
 		Status:           threadstore.ThreadStatusReconciling,
 		Model:            "gpt-5.4",
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 6,
 		SocketExpiresAt:  time.Now().UTC().Add(time.Minute),
 		ActiveResponseID: "resp_active",
@@ -490,8 +490,8 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 	if final.ActiveResponseID != "" {
 		t.Fatalf("ActiveResponseID = %q, want empty", final.ActiveResponseID)
 	}
-	if final.OwnerWorkerID != "" {
-		t.Fatalf("OwnerWorkerID = %q, want empty", final.OwnerWorkerID)
+	if final.OwnerWorkerID != 0 {
+		t.Fatalf("OwnerWorkerID = %d, want empty", final.OwnerWorkerID)
 	}
 	if !final.SocketExpiresAt.IsZero() {
 		t.Fatalf("SocketExpiresAt = %s, want zero", final.SocketExpiresAt)

@@ -127,7 +127,7 @@ func TestResumeBodyAcceptsPreparedInputRef(t *testing.T) {
 }
 
 func TestWorkerCommandWildcard(t *testing.T) {
-	if got := WorkerCommandWildcard("worker-a"); got != "thread.worker.worker-a.cmd.>" {
+	if got := WorkerCommandWildcard(17); got != "thread.worker.17.cmd.>" {
 		t.Fatalf("WorkerCommandWildcard() = %q", got)
 	}
 }
@@ -335,7 +335,7 @@ func TestReconcileBody(t *testing.T) {
 		"kind":"thread.reconcile",
 		"thread_id":123,
 		"body":{
-			"previous_worker_id":"worker_old",
+			"previous_worker_id":42,
 			"required_generation":7
 		}
 	}`))
@@ -350,6 +350,9 @@ func TestReconcileBody(t *testing.T) {
 
 	if body.RequiredGeneration != 7 {
 		t.Fatalf("RequiredGeneration = %d, want 7", body.RequiredGeneration)
+	}
+	if body.PreviousWorkerID != 42 {
+		t.Fatalf("PreviousWorkerID = %d, want 42", body.PreviousWorkerID)
 	}
 }
 

@@ -38,7 +38,7 @@ type ThreadMeta struct {
 	ToolsJSON          string
 	ToolChoiceJSON     string
 	ReasoningJSON      string
-	OwnerWorkerID      string
+	OwnerWorkerID      int64
 	SocketGeneration   uint64
 	SocketExpiresAt    time.Time
 	LastResponseID     string
@@ -96,7 +96,7 @@ type EventRecord struct {
 type ClaimResult struct {
 	Claimed          bool
 	SocketGeneration uint64
-	PreviousWorkerID string
+	PreviousWorkerID int64
 }
 
 type SpawnGroupStatus string
@@ -137,11 +137,25 @@ type SpawnChildResult struct {
 }
 
 type OwnerRecord struct {
-	WorkerID         string
+	WorkerID         int64
 	SocketGeneration uint64
 	LeaseUntil       time.Time
 	ClaimedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type WorkerRecord struct {
+	ID              int64
+	ServiceName     string
+	NATSClientName  string
+	ResponsesWSURL  string
+	LeaseUntil      time.Time
+	StartedAt       time.Time
+	LastHeartbeatAt time.Time
+	StoppedAt       time.Time
+	StopReason      string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type DocumentQueryLineage struct {
@@ -162,7 +176,7 @@ type OpenAISocketSession struct {
 	ThreadID               int64
 	RootThreadID           int64
 	ParentThreadID         int64
-	WorkerID               string
+	WorkerID               int64
 	ThreadSocketGeneration uint64
 	State                  OpenAISocketState
 	ConnectedAt            time.Time

@@ -19,7 +19,7 @@ func (s *Store) CreateOpenAISocketSession(ctx context.Context, session threadsto
 	if session.RootThreadID <= 0 {
 		return fmt.Errorf("openai socket session root_thread_id is required")
 	}
-	if strings.TrimSpace(session.WorkerID) == "" {
+	if session.WorkerID <= 0 {
 		return fmt.Errorf("openai socket session worker_id is required")
 	}
 	if session.ThreadSocketGeneration == 0 {

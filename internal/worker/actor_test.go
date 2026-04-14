@@ -1312,7 +1312,7 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 		ID:               tid("thread_test"),
 		RootThreadID:     tid("thread_test"),
 		Status:           threadstore.ThreadStatusReady,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 4,
 	}
 
@@ -1326,7 +1326,7 @@ func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
 
 	actor := &threadActor{
 		threadID:       tid("thread_test"),
-		workerID:       "worker-local-1",
+		workerID:       tid("worker-local-1"),
 		logger:         testActorLogger(),
 		cfg:            cfg,
 		ctx:            context.Background(),
@@ -1817,7 +1817,7 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 	store.threads[tid("thread_retry")] = threadstore.ThreadMeta{
 		ID:               tid("thread_retry"),
 		Status:           threadstore.ThreadStatusRunning,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 3,
 		SocketExpiresAt:  time.Now().UTC().Add(time.Minute),
 		ActiveResponseID: "resp_active",
@@ -1839,8 +1839,8 @@ func TestFailThreadAfterRetryExhaustionMarksThreadFailed(t *testing.T) {
 	if meta.ActiveResponseID != "" {
 		t.Fatalf("active response id = %q, want empty", meta.ActiveResponseID)
 	}
-	if meta.OwnerWorkerID != "" {
-		t.Fatalf("owner worker id = %q, want empty", meta.OwnerWorkerID)
+	if meta.OwnerWorkerID != 0 {
+		t.Fatalf("owner worker id = %d, want empty", meta.OwnerWorkerID)
 	}
 	if !meta.SocketExpiresAt.IsZero() {
 		t.Fatalf("socket expires at = %s, want zero", meta.SocketExpiresAt)
@@ -1860,7 +1860,7 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	store.threads[tid("thread_idle")] = threadstore.ThreadMeta{
 		ID:               tid("thread_idle"),
 		Status:           threadstore.ThreadStatusReady,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 5,
 		SocketExpiresAt:  time.Now().UTC().Add(time.Minute),
 	}
@@ -1904,7 +1904,7 @@ func TestHandleDisconnectSocketRejectsNonIdleThread(t *testing.T) {
 	store.threads[tid("thread_running")] = threadstore.ThreadMeta{
 		ID:               tid("thread_running"),
 		Status:           threadstore.ThreadStatusRunning,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 3,
 	}
 
@@ -1934,7 +1934,7 @@ func TestHandleDisconnectSocketNoopsWithoutSession(t *testing.T) {
 	store.threads[tid("thread_nosess")] = threadstore.ThreadMeta{
 		ID:               tid("thread_nosess"),
 		Status:           threadstore.ThreadStatusReady,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 2,
 	}
 
@@ -2007,7 +2007,7 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
 		ID:            tid("thread_parent"),
 		RootThreadID:  tid("thread_root"),
-		OwnerWorkerID: "worker-parent",
+		OwnerWorkerID: tid("worker-parent"),
 	}
 	store.appendedItems = append(store.appendedItems, threadstore.ItemLogEntry{
 		ThreadID:   tid("thread_child"),
@@ -2047,7 +2047,7 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 		t.Fatalf("publishChildInvocationResult() error = %v", err)
 	}
 
-	if publishedSubject != threadcmd.WorkerCommandSubject("worker-parent", threadcmd.KindThreadChildCompleted) {
+	if publishedSubject != threadcmd.WorkerCommandSubject(tid("worker-parent"), threadcmd.KindThreadChildCompleted) {
 		t.Fatalf("subject = %q, want worker child_completed subject", publishedSubject)
 	}
 
@@ -2068,7 +2068,7 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
 		ID:            tid("thread_parent"),
 		RootThreadID:  tid("thread_parent"),
-		OwnerWorkerID: "worker-parent",
+		OwnerWorkerID: tid("worker-parent"),
 	}
 
 	var (
@@ -2099,7 +2099,7 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 		t.Fatalf("publishChildInvocationResult() error = %v", err)
 	}
 
-	if publishedSubject != threadcmd.WorkerCommandSubject("worker-parent", threadcmd.KindThreadChildFailed) {
+	if publishedSubject != threadcmd.WorkerCommandSubject(tid("worker-parent"), threadcmd.KindThreadChildFailed) {
 		t.Fatalf("subject = %q, want worker child_failed subject", publishedSubject)
 	}
 
@@ -3004,7 +3004,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 		RootThreadID:     tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
 		Model:            "gpt-5.4",
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 1,
 	}
 
@@ -3070,7 +3070,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 		RootThreadID:     tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
 		Model:            "gpt-5.4",
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 1,
 	}
 
@@ -3167,7 +3167,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		Depth:              1,
 		Status:             threadstore.ThreadStatusRunning,
 		Model:              "gpt-5.4-mini",
-		OwnerWorkerID:      "worker-child",
+		OwnerWorkerID:      tid("worker-child"),
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: spawnGroupID,
 		MetadataJSON:       `{"document_id":"1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
@@ -3203,7 +3203,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 	}
 	childActor := newActorRecoveryHarness(t, store, childConn)
 	childActor.threadID = warmupThreadID
-	childActor.workerID = "worker-child"
+	childActor.workerID = tid("worker-child")
 	childActor.publish = func(_ context.Context, _ string, cmd threadcmd.Command) error {
 		return parentActor.handleChildResult(cmd, "completed")
 	}
@@ -3242,7 +3242,7 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 		ParentCallID:       "call_parent",
 		Status:             threadstore.ThreadStatusRunning,
 		Model:              "gpt-5.4-mini",
-		OwnerWorkerID:      "worker-local-1",
+		OwnerWorkerID:      tid("worker-local-1"),
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: tid("sg_waiting"),
 	}
@@ -3284,7 +3284,7 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		RootThreadID:  tid("thread_parent"),
 		Status:        threadstore.ThreadStatusWaitingChildren,
 		Model:         "gpt-5.4",
-		OwnerWorkerID: "worker-parent",
+		OwnerWorkerID: tid("worker-parent"),
 	}
 	store.threads[tid("thread_doc_query")] = threadstore.ThreadMeta{
 		ID:                 tid("thread_doc_query"),
@@ -3293,7 +3293,7 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		ParentCallID:       "call_parent",
 		Status:             threadstore.ThreadStatusRunning,
 		Model:              "gpt-5.4-mini",
-		OwnerWorkerID:      "worker-local-1",
+		OwnerWorkerID:      tid("worker-local-1"),
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: tid("sg_waiting"),
 		MetadataJSON:       `{"document_id":"1","spawn_mode":"document_query"}`,
@@ -3340,7 +3340,7 @@ func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
 	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
 		ID:               tid("thread_parent"),
 		Status:           threadstore.ThreadStatusRunning,
-		OwnerWorkerID:    "worker-local-1",
+		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 1,
 	}
 

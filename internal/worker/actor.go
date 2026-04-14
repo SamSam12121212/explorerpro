@@ -43,7 +43,7 @@ const (
 
 type threadActorConfig struct {
 	ThreadID       int64
-	WorkerID       string
+	WorkerID       int64
 	Logger         *slog.Logger
 	Store          actorStore
 	History        threadHistoryStore
@@ -68,10 +68,10 @@ type actorStore interface {
 	SaveThread(ctx context.Context, meta threadstore.ThreadMeta) error
 	CommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error)
 	MarkCommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error)
-	ClaimOwnership(ctx context.Context, threadID int64, workerID string, leaseUntil time.Time) (threadstore.ClaimResult, error)
-	RenewOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error)
-	RotateOwnership(ctx context.Context, threadID int64, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
-	ReleaseOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64) error
+	ClaimOwnership(ctx context.Context, threadID int64, workerID int64, leaseUntil time.Time) (threadstore.ClaimResult, error)
+	RenewOwnership(ctx context.Context, threadID int64, workerID int64, socketGeneration uint64, leaseUntil time.Time) (bool, error)
+	RotateOwnership(ctx context.Context, threadID int64, workerID int64, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
+	ReleaseOwnership(ctx context.Context, threadID int64, workerID int64, socketGeneration uint64) error
 	CreateOpenAISocketSession(ctx context.Context, session threadstore.OpenAISocketSession) error
 	TouchOpenAISocketSession(ctx context.Context, touch threadstore.OpenAISocketTouch) error
 	DisconnectOpenAISocketSession(ctx context.Context, socketID, reason string, disconnectedAt, expiresAt time.Time) error
@@ -108,7 +108,7 @@ type docActorPreparedInputClient interface {
 
 type threadActor struct {
 	threadID       int64
-	workerID       string
+	workerID       int64
 	logger         *slog.Logger
 	store          actorStore
 	history        threadHistoryStore
@@ -428,7 +428,7 @@ func (a *threadActor) failThreadAfterRetryExhaustion(threadID int64) error {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
 			return err
 		}
-		meta.OwnerWorkerID = ""
+		meta.OwnerWorkerID = 0
 		meta.SocketExpiresAt = time.Time{}
 	}
 
@@ -1428,7 +1428,7 @@ func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMet
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
 			return err
 		}
-		meta.OwnerWorkerID = ""
+		meta.OwnerWorkerID = 0
 		meta.SocketExpiresAt = time.Time{}
 	}
 
@@ -2683,7 +2683,7 @@ func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta
 		}
 	}
 
-	meta.OwnerWorkerID = ""
+	meta.OwnerWorkerID = 0
 	meta.SocketExpiresAt = time.Time{}
 	a.setMeta(*meta)
 
@@ -3983,7 +3983,7 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 	}
 
 	subject := threadcmd.DispatchAdoptSubject
-	if parentMeta.OwnerWorkerID != "" {
+	if parentMeta.OwnerWorkerID > 0 {
 		subject = threadcmd.WorkerCommandSubject(parentMeta.OwnerWorkerID, kind)
 	} else {
 		switch kind {

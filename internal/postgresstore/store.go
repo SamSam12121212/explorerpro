@@ -134,7 +134,7 @@ ON CONFLICT (id) DO NOTHING
 		optionalJSON(meta.ToolsJSON),
 		optionalJSON(meta.ToolChoiceJSON),
 		optionalJSON(meta.ReasoningJSON),
-		nullIfBlank(meta.OwnerWorkerID),
+		nullIfZeroInt64(meta.OwnerWorkerID),
 		int64(meta.SocketGeneration),
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
@@ -244,7 +244,7 @@ ON CONFLICT (id) DO UPDATE SET
 		optionalJSON(meta.ToolsJSON),
 		optionalJSON(meta.ToolChoiceJSON),
 		optionalJSON(meta.ReasoningJSON),
-		nullIfBlank(meta.OwnerWorkerID),
+		nullIfZeroInt64(meta.OwnerWorkerID),
 		int64(meta.SocketGeneration),
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
@@ -296,7 +296,7 @@ ON CONFLICT (thread_id, cmd_id) DO NOTHING
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *Store) ClaimOwnership(ctx context.Context, threadID int64, workerID string, leaseUntil time.Time) (threadstore.ClaimResult, error) {
+func (s *Store) ClaimOwnership(ctx context.Context, threadID int64, workerID int64, leaseUntil time.Time) (threadstore.ClaimResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return threadstore.ClaimResult{}, fmt.Errorf("begin claim ownership tx: %w", err)
@@ -316,10 +316,10 @@ func (s *Store) ClaimOwnership(ctx context.Context, threadID int64, workerID str
 	}
 
 	now := time.Now().UTC()
-	currentWorkerID := strings.TrimSpace(meta.OwnerWorkerID)
+	currentWorkerID := meta.OwnerWorkerID
 	currentGeneration := meta.SocketGeneration
 	if found {
-		if strings.TrimSpace(owner.WorkerID) != "" {
+		if owner.WorkerID > 0 {
 			currentWorkerID = owner.WorkerID
 		}
 		if owner.SocketGeneration > 0 {
@@ -327,7 +327,7 @@ func (s *Store) ClaimOwnership(ctx context.Context, threadID int64, workerID str
 		}
 	}
 
-	if currentWorkerID != "" && currentWorkerID != workerID && found && owner.LeaseUntil.After(now) {
+	if currentWorkerID > 0 && currentWorkerID != workerID && found && owner.LeaseUntil.After(now) {
 		return threadstore.ClaimResult{
 			Claimed:          false,
 			SocketGeneration: currentGeneration,
@@ -392,7 +392,7 @@ ON CONFLICT (thread_id) DO UPDATE SET
 	}, nil
 }
 
-func (s *Store) RenewOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error) {
+func (s *Store) RenewOwnership(ctx context.Context, threadID int64, workerID int64, socketGeneration uint64, leaseUntil time.Time) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 UPDATE thread_owners
 SET lease_until = $4,
@@ -467,7 +467,7 @@ ORDER BY id ASC
 	return ids, nil
 }
 
-func (s *Store) RotateOwnership(ctx context.Context, threadID int64, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error) {
+func (s *Store) RotateOwnership(ctx context.Context, threadID int64, workerID int64, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("begin rotate ownership tx: %w", err)
@@ -520,7 +520,7 @@ WHERE thread_id = $1
 	return newGeneration, true, nil
 }
 
-func (s *Store) ReleaseOwnership(ctx context.Context, threadID int64, workerID string, socketGeneration uint64) error {
+func (s *Store) ReleaseOwnership(ctx context.Context, threadID int64, workerID int64, socketGeneration uint64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin release ownership tx: %w", err)
@@ -552,7 +552,7 @@ WHERE thread_id = $1
 		return fmt.Errorf("delete thread owner %d: %w", threadID, err)
 	}
 
-	meta.OwnerWorkerID = ""
+	meta.OwnerWorkerID = 0
 	meta.ActiveResponseID = ""
 	meta.SocketExpiresAt = time.Time{}
 	meta.UpdatedAt = time.Now().UTC()
@@ -1100,7 +1100,7 @@ SELECT
     COALESCE(tools_json::text, ''),
     COALESCE(tool_choice_json::text, ''),
     COALESCE(reasoning_json::text, ''),
-    COALESCE(owner_worker_id, ''),
+    COALESCE(owner_worker_id, 0),
     socket_generation,
     socket_expires_at,
     COALESCE(last_response_id, ''),
@@ -1175,7 +1175,7 @@ SELECT
     COALESCE(tools_json::text, ''),
     COALESCE(tool_choice_json::text, ''),
     COALESCE(reasoning_json::text, ''),
-    COALESCE(owner_worker_id, ''),
+    COALESCE(owner_worker_id, 0),
     socket_generation,
     socket_expires_at,
     COALESCE(last_response_id, ''),
@@ -1288,7 +1288,7 @@ SELECT
     COALESCE(t.tools_json::text, ''),
     COALESCE(t.tool_choice_json::text, ''),
     COALESCE(t.reasoning_json::text, ''),
-    COALESCE(t.owner_worker_id, ''),
+    COALESCE(t.owner_worker_id, 0),
     t.socket_generation,
     t.socket_expires_at,
     COALESCE(t.last_response_id, ''),
@@ -2037,7 +2037,7 @@ ON CONFLICT (id) DO UPDATE SET
 		optionalJSON(meta.ToolsJSON),
 		optionalJSON(meta.ToolChoiceJSON),
 		optionalJSON(meta.ReasoningJSON),
-		nullIfBlank(meta.OwnerWorkerID),
+		nullIfZeroInt64(meta.OwnerWorkerID),
 		int64(meta.SocketGeneration),
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
@@ -2071,7 +2071,7 @@ SELECT
     COALESCE(tools_json::text, ''),
     COALESCE(tool_choice_json::text, ''),
     COALESCE(reasoning_json::text, ''),
-    COALESCE(owner_worker_id, ''),
+    COALESCE(owner_worker_id, 0),
     socket_generation,
     socket_expires_at,
     COALESCE(last_response_id, ''),

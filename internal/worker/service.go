@@ -14,7 +14,6 @@ import (
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
-	"explorer/internal/idgen"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
@@ -46,7 +45,7 @@ type Service struct {
 	runtime      *platform.Runtime
 	dialer       openaiws.Dialer
 	openAIConfig openaiws.Config
-	workerID     string
+	workerID     int64
 	store        *postgresstore.Store
 	history      threadHistoryStore
 	threadDocs   *threaddocstore.Store
@@ -83,18 +82,12 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	docs := docstore.New(runtime.Postgres().Pool())
 	docClient := documenthandler.NewClient(runtime.NATS().Conn())
 
-	workerID, err := newWorkerID()
-	if err != nil {
-		return nil, err
-	}
-
 	return &Service{
 		cfg:          cfg,
 		logger:       logger,
 		runtime:      runtime,
 		dialer:       dialer,
 		openAIConfig: openAIConfig,
-		workerID:     workerID,
 		store:        store,
 		history:      history,
 		threadDocs:   threadDocs,
@@ -105,7 +98,19 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	}, nil
 }
 
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (runErr error) {
+	if err := s.registerWorker(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		if s.workerID <= 0 {
+			return
+		}
+		if err := s.releaseWorker("service_stopped"); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
+
 	if err := natsbootstrap.EnsureThreadCommandStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
@@ -158,6 +163,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	go s.consumeChannel(ctx, "dispatch", dispatchCh)
 	go s.consumeChannel(ctx, "worker", workerCh)
+	go s.runWorkerRegistryLoop(ctx)
 	go s.runRecoveryLoop(ctx)
 
 	<-ctx.Done()
@@ -178,7 +184,7 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) WorkerID() string {
+func (s *Service) WorkerID() int64 {
 	return s.workerID
 }
 
@@ -283,13 +289,55 @@ func (s *Service) closeActors() {
 	}
 }
 
-func newWorkerID() (string, error) {
-	workerID, err := idgen.New("worker")
+func (s *Service) registerWorker(ctx context.Context) error {
+	now := time.Now().UTC()
+	record, err := s.store.RegisterWorker(ctx, threadstore.WorkerRecord{
+		ServiceName:     s.cfg.ServiceName,
+		NATSClientName:  s.cfg.NATS.ClientName,
+		ResponsesWSURL:  s.openAIConfig.ResponsesSocketURL,
+		LeaseUntil:      now.Add(workerLeaseTTL),
+		StartedAt:       now,
+		LastHeartbeatAt: now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	})
 	if err != nil {
-		return "", fmt.Errorf("generate worker id: %w", err)
+		return fmt.Errorf("register worker: %w", err)
 	}
+	s.workerID = record.ID
+	return nil
+}
 
-	return workerID, nil
+func (s *Service) releaseWorker(reason string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	defer cancel()
+	return s.store.ReleaseWorker(ctx, s.workerID, reason, time.Now().UTC())
+}
+
+func (s *Service) runWorkerRegistryLoop(ctx context.Context) {
+	interval := workerLeaseTTL / 2
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewCtx, cancel := context.WithTimeout(context.Background(), interval)
+			err := s.store.RenewWorker(renewCtx, s.workerID, time.Now().UTC().Add(workerLeaseTTL))
+			cancel()
+			if err != nil {
+				s.logger.Warn("failed to renew worker registry lease",
+					"worker_id", s.workerID,
+					"error", err,
+				)
+			}
+		}
+	}
 }
 
 type queuedCommand struct {
@@ -475,7 +523,7 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 	}
 
 	now := time.Now().UTC()
-	ownerLive := ownerKnown && strings.TrimSpace(owner.WorkerID) != "" && owner.LeaseUntil.After(now)
+	ownerLive := ownerKnown && owner.WorkerID > 0 && owner.LeaseUntil.After(now)
 
 	subject := threadcmd.DispatchSubject(kind)
 	if kind == threadcmd.KindThreadAdopt {
@@ -603,7 +651,7 @@ func maxUint64(left, right uint64) uint64 {
 	return right
 }
 
-func shouldRotateSocket(meta threadstore.ThreadMeta, workerID string, now time.Time) bool {
+func shouldRotateSocket(meta threadstore.ThreadMeta, workerID int64, now time.Time) bool {
 	if meta.OwnerWorkerID != workerID {
 		return false
 	}
