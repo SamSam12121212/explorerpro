@@ -143,3 +143,38 @@ type DocumentQueryLineage struct {
 	ResponseID    string
 	Model         string
 }
+
+type OpenAISocketState string
+
+const (
+	OpenAISocketStateConnected    OpenAISocketState = "connected"
+	OpenAISocketStateDisconnected OpenAISocketState = "disconnected"
+)
+
+type OpenAISocketSession struct {
+	ID                     string
+	ThreadID               string
+	RootThreadID           string
+	ParentThreadID         string
+	WorkerID               string
+	ThreadSocketGeneration uint64
+	State                  OpenAISocketState
+	ConnectedAt            time.Time
+	LastReadAt             time.Time
+	LastWriteAt            time.Time
+	LastHeartbeatAt        time.Time
+	HeartbeatExpiresAt     time.Time
+	DisconnectedAt         time.Time
+	DisconnectReason       string
+	ExpiresAt              time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+}
+
+type OpenAISocketTouch struct {
+	ID                 string
+	LastReadAt         time.Time
+	LastWriteAt        time.Time
+	LastHeartbeatAt    time.Time
+	HeartbeatExpiresAt time.Time
+}

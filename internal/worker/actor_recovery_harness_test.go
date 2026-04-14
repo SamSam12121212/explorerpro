@@ -25,12 +25,15 @@ type fakeActorStore struct {
 	spawnGroups            map[string]threadstore.SpawnGroupMeta
 	spawnResults           map[string][]threadstore.SpawnChildResult
 
-	savedThreads     []threadstore.ThreadMeta
-	savedSpawnGroups []threadstore.SpawnGroupMeta
-	appendedItems    []threadstore.ItemLogEntry
-	historyEvents    []threadstore.EventLogEntry
-	savedResponses   map[string]json.RawMessage
-	releasedThreads  []string
+	savedThreads        []threadstore.ThreadMeta
+	savedSpawnGroups    []threadstore.SpawnGroupMeta
+	appendedItems       []threadstore.ItemLogEntry
+	historyEvents       []threadstore.EventLogEntry
+	savedResponses      map[string]json.RawMessage
+	releasedThreads     []string
+	createdSockets      []threadstore.OpenAISocketSession
+	touchedSockets      []threadstore.OpenAISocketTouch
+	disconnectedSockets []string
 }
 
 func newFakeActorStore(t *testing.T) *fakeActorStore {
@@ -125,6 +128,21 @@ func (s *fakeActorStore) RotateOwnership(_ context.Context, _, _ string, current
 
 func (s *fakeActorStore) ReleaseOwnership(_ context.Context, threadID, _ string, _ uint64) error {
 	s.releasedThreads = append(s.releasedThreads, threadID)
+	return nil
+}
+
+func (s *fakeActorStore) CreateOpenAISocketSession(_ context.Context, session threadstore.OpenAISocketSession) error {
+	s.createdSockets = append(s.createdSockets, session)
+	return nil
+}
+
+func (s *fakeActorStore) TouchOpenAISocketSession(_ context.Context, touch threadstore.OpenAISocketTouch) error {
+	s.touchedSockets = append(s.touchedSockets, touch)
+	return nil
+}
+
+func (s *fakeActorStore) DisconnectOpenAISocketSession(_ context.Context, socketID, _ string, _, _ time.Time) error {
+	s.disconnectedSockets = append(s.disconnectedSockets, socketID)
 	return nil
 }
 

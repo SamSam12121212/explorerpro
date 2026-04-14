@@ -1193,6 +1193,61 @@ func TestSendResponseCreateReconnectsAfterStaleSocket(t *testing.T) {
 	}
 }
 
+func TestSendResponseCreateReconnectsSocketRegistry(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_test"] = threadstore.ThreadMeta{
+		ID:               "thread_test",
+		RootThreadID:     "thread_test",
+		Status:           threadstore.ThreadStatusReady,
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 4,
+	}
+
+	cfg := testOpenAIConfig()
+	staleConn := &actorTestConn{writeErr: errors.New("broken pipe")}
+	freshConn := &actorTestConn{}
+	staleSession := openaiws.NewSession(cfg, &actorTestDialer{conn: staleConn})
+	if err := staleSession.Connect(context.Background()); err != nil {
+		t.Fatalf("staleSession.Connect() error = %v", err)
+	}
+
+	actor := &threadActor{
+		threadID:       "thread_test",
+		workerID:       "worker-local-1",
+		logger:         testActorLogger(),
+		cfg:            cfg,
+		ctx:            context.Background(),
+		store:          store,
+		session:        staleSession,
+		openAISocketID: "socket_old",
+		meta:           store.threads["thread_test"],
+		sessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(cfg, &actorTestDialer{conn: freshConn})
+		},
+	}
+
+	event, err := openaiws.NewResponseCreateEvent("evt_retry", json.RawMessage(`{"model":"gpt-5.4"}`))
+	if err != nil {
+		t.Fatalf("NewResponseCreateEvent() error = %v", err)
+	}
+
+	if err := actor.sendResponseCreate(event); err != nil {
+		t.Fatalf("sendResponseCreate() error = %v", err)
+	}
+
+	if len(store.createdSockets) != 1 {
+		t.Fatalf("createdSockets = %d, want 1", len(store.createdSockets))
+	}
+	if store.createdSockets[0].ThreadID != "thread_test" {
+		t.Fatalf("created socket thread_id = %q, want thread_test", store.createdSockets[0].ThreadID)
+	}
+	if len(store.disconnectedSockets) != 1 || store.disconnectedSockets[0] != "socket_old" {
+		t.Fatalf("disconnectedSockets = %#v, want [socket_old]", store.disconnectedSockets)
+	}
+}
+
 func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	t.Parallel()
 
@@ -1703,6 +1758,7 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadID = "thread_idle"
 	actor.setMeta(store.threads["thread_idle"])
+	actor.openAISocketID = "socket_live_1"
 
 	cmd := agentcmd.Command{
 		CmdID:    "cmd_disconnect_1",
@@ -1719,6 +1775,9 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	}
 	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_idle" {
 		t.Fatalf("releasedThreads = %#v, want [thread_idle]", store.releasedThreads)
+	}
+	if len(store.disconnectedSockets) != 1 || store.disconnectedSockets[0] != "socket_live_1" {
+		t.Fatalf("disconnectedSockets = %#v, want [socket_live_1]", store.disconnectedSockets)
 	}
 
 	meta := store.threads["thread_idle"]

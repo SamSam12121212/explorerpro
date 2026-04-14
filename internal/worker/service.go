@@ -33,6 +33,8 @@ const (
 	workerConsumerTTL = 10 * time.Minute
 	socketExpiryTTL   = 55 * time.Minute
 	socketRotateLead  = 5 * time.Minute
+	socketPruneTTL    = 1 * time.Hour
+	socketSweepBatch  = 256
 	commandQueueSize  = 128
 	recoverySweepTTL  = 15 * time.Second
 )
@@ -60,6 +62,8 @@ type serviceSweepStore interface {
 	ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]string, error)
 	LoadThread(ctx context.Context, threadID string) (threadstore.ThreadMeta, error)
 	LoadOwner(ctx context.Context, threadID string) (threadstore.OwnerRecord, error)
+	DisconnectExpiredOpenAISocketSessions(ctx context.Context, disconnectedAt, expiresAt time.Time, limit int) (int64, error)
+	PruneExpiredOpenAISocketSessions(ctx context.Context, now time.Time, limit int) (int64, error)
 }
 
 func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dialer openaiws.Dialer) (*Service, error) {
@@ -397,6 +401,51 @@ func (s *Service) recoverThreads(ctx context.Context) {
 	}
 
 	s.scheduleSocketRotations(ctx)
+	s.sweepOpenAISocketSessions(ctx)
+}
+
+func (s *Service) sweepOpenAISocketSessions(ctx context.Context) {
+	now := time.Now().UTC()
+	disconnectUntilExhausted := func() (int64, error) {
+		var total int64
+		for {
+			count, err := s.sweepStore.DisconnectExpiredOpenAISocketSessions(ctx, now, now.Add(socketPruneTTL), socketSweepBatch)
+			if err != nil {
+				return total, err
+			}
+			total += count
+			if count < socketSweepBatch {
+				return total, nil
+			}
+		}
+	}
+	pruneUntilExhausted := func() (int64, error) {
+		var total int64
+		for {
+			count, err := s.sweepStore.PruneExpiredOpenAISocketSessions(ctx, now, socketSweepBatch)
+			if err != nil {
+				return total, err
+			}
+			total += count
+			if count < socketSweepBatch {
+				return total, nil
+			}
+		}
+	}
+
+	disconnected, err := disconnectUntilExhausted()
+	if err != nil {
+		s.logger.Warn("failed to disconnect stale openai socket sessions", "error", err)
+	} else if disconnected > 0 {
+		s.logger.Info("disconnected stale openai socket sessions", "count", disconnected)
+	}
+
+	pruned, err := pruneUntilExhausted()
+	if err != nil {
+		s.logger.Warn("failed to prune expired openai socket sessions", "error", err)
+	} else if pruned > 0 {
+		s.logger.Info("pruned expired openai socket sessions", "count", pruned)
+	}
 }
 
 func recoverySweepStatuses() []threadstore.ThreadStatus {

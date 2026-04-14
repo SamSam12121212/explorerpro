@@ -69,6 +69,9 @@ type actorStore interface {
 	RenewOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64, leaseUntil time.Time) (bool, error)
 	RotateOwnership(ctx context.Context, threadID, workerID string, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
 	ReleaseOwnership(ctx context.Context, threadID, workerID string, socketGeneration uint64) error
+	CreateOpenAISocketSession(ctx context.Context, session threadstore.OpenAISocketSession) error
+	TouchOpenAISocketSession(ctx context.Context, touch threadstore.OpenAISocketTouch) error
+	DisconnectOpenAISocketSession(ctx context.Context, socketID, reason string, disconnectedAt, expiresAt time.Time) error
 	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error)
 	SaveResponseRaw(ctx context.Context, threadID, responseID string, payload json.RawMessage) error
 	ListItems(ctx context.Context, threadID string, options threadstore.ListOptions) ([]threadstore.ItemRecord, error)
@@ -122,12 +125,13 @@ type threadActor struct {
 	commands chan queuedCommand
 	done     chan struct{}
 
-	mu          sync.Mutex
-	session     *openaiws.Session
-	leaseCancel context.CancelFunc
-	idleCancel  context.CancelFunc
-	idleDone    chan struct{}
-	meta        threadstore.ThreadMeta
+	mu             sync.Mutex
+	session        *openaiws.Session
+	openAISocketID string
+	leaseCancel    context.CancelFunc
+	idleCancel     context.CancelFunc
+	idleDone       chan struct{}
+	meta           threadstore.ThreadMeta
 }
 
 type payloadLoweringStats struct {
@@ -210,8 +214,10 @@ func (a *threadActor) Close() error {
 	}
 	idleDone := a.idleDone
 	session := a.session
+	socketID := a.openAISocketID
 	meta := a.meta
 	a.session = nil
+	a.openAISocketID = ""
 	a.mu.Unlock()
 
 	if idleDone != nil {
@@ -221,6 +227,7 @@ func (a *threadActor) Close() error {
 	if session != nil {
 		errs = append(errs, session.Close())
 	}
+	a.disconnectOpenAISocket(socketID, "actor_close")
 
 	if meta.ID != "" && meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		errs = append(errs, a.store.ReleaseOwnership(context.Background(), meta.ID, a.workerID, meta.SocketGeneration))
@@ -411,7 +418,7 @@ func (a *threadActor) failThreadAfterRetryExhaustion(threadID string) error {
 
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
-	a.resetSession()
+	a.resetSession("retry_exhausted")
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -1099,18 +1106,20 @@ func (a *threadActor) handleRotateSocket(cmd agentcmd.Command) error {
 		return errOwnershipConflict
 	}
 
-	oldSession := a.swapSession(freshSession)
-	if oldSession != nil {
-		if err := oldSession.Close(); err != nil {
-			a.logger.Warn("failed to close rotated socket", "error", err)
-		}
-	}
-
 	meta.OwnerWorkerID = a.workerID
 	meta.SocketGeneration = newGeneration
 	meta.SocketExpiresAt = now.Add(socketExpiryTTL)
 	meta.UpdatedAt = now
 	a.setMeta(meta)
+
+	socketID := a.registerOpenAISocket(meta, freshSession, now.Add(workerLeaseTTL))
+	oldSession, oldSocketID := a.swapSessionState(freshSession, socketID)
+	if oldSession != nil {
+		if err := oldSession.Close(); err != nil {
+			a.logger.Warn("failed to close rotated socket", "error", err)
+		}
+	}
+	a.disconnectOpenAISocket(oldSocketID, "rotated")
 	a.startLeaseLoop(meta)
 	a.startIdleLoop(meta)
 
@@ -1265,7 +1274,7 @@ func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
 
 	a.stopIdleLoop()
 	a.stopLeaseLoop()
-	a.resetSession()
+	a.resetSession("idle_disconnect")
 
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
@@ -1404,7 +1413,7 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 func (a *threadActor) handleMissingRecoveryCheckpoint(meta threadstore.ThreadMeta) error {
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
-	a.resetSession()
+	a.resetSession("missing_recovery_checkpoint")
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -1449,6 +1458,7 @@ func (a *threadActor) ensureSession() error {
 				"session_connect_count", snapshot.SocketGeneration,
 			}, a.currentMeta())...,
 		)
+		a.disconnectOpenAISocket(a.currentOpenAISocketID(), "session_not_connected")
 	}
 
 	return a.reconnectSession()
@@ -1467,6 +1477,10 @@ func (a *threadActor) reconnectSession() error {
 		return err
 	}
 
+	meta := a.currentMeta()
+	leaseUntil := time.Now().UTC().Add(workerLeaseTTL)
+	socketID := a.registerOpenAISocket(meta, newSession, leaseUntil)
+
 	a.logger.Info("openai websocket session connected",
 		appendThreadGraphAttrs([]any{
 			"socket_generation", a.currentSocketGeneration(),
@@ -1474,12 +1488,13 @@ func (a *threadActor) reconnectSession() error {
 		}, a.currentMeta())...,
 	)
 
-	oldSession := a.swapSession(newSession)
+	oldSession, oldSocketID := a.swapSessionState(newSession, socketID)
 	if oldSession != nil {
 		if err := oldSession.Close(); err != nil {
 			a.logger.Warn("failed to close previous socket", "error", err)
 		}
 	}
+	a.disconnectOpenAISocket(oldSocketID, "reconnect")
 	return nil
 }
 
@@ -1491,13 +1506,15 @@ func (a *threadActor) openFreshSession() (*openaiws.Session, error) {
 	return session, nil
 }
 
-func (a *threadActor) swapSession(next *openaiws.Session) *openaiws.Session {
+func (a *threadActor) swapSessionState(next *openaiws.Session, nextSocketID string) (*openaiws.Session, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	prev := a.session
+	prevSocketID := a.openAISocketID
 	a.session = next
-	return prev
+	a.openAISocketID = nextSocketID
+	return prev, prevSocketID
 }
 
 func (a *threadActor) startLeaseLoop(meta threadstore.ThreadMeta) {
@@ -1538,8 +1555,9 @@ func (a *threadActor) runLeaseLoop(ctx context.Context, meta threadstore.ThreadM
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			leaseUntil := time.Now().UTC().Add(workerLeaseTTL)
 			renewCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			renewed, err := a.store.RenewOwnership(renewCtx, meta.ID, a.workerID, meta.SocketGeneration, time.Now().UTC().Add(workerLeaseTTL))
+			renewed, err := a.store.RenewOwnership(renewCtx, meta.ID, a.workerID, meta.SocketGeneration, leaseUntil)
 			cancel()
 			if err != nil {
 				a.logger.Warn("failed to renew thread lease", "socket_generation", meta.SocketGeneration, "error", err)
@@ -1550,6 +1568,14 @@ func (a *threadActor) runLeaseLoop(ctx context.Context, meta threadstore.ThreadM
 				a.handleLeaseLoss(meta.SocketGeneration)
 				return
 			}
+
+			a.mu.Lock()
+			session := a.session
+			a.mu.Unlock()
+			a.touchOpenAISocket(session, threadstore.OpenAISocketTouch{
+				LastHeartbeatAt:    time.Now().UTC(),
+				HeartbeatExpiresAt: leaseUntil,
+			})
 		}
 	}
 }
@@ -1571,7 +1597,9 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	}
 
 	session := a.session
+	socketID := a.openAISocketID
 	a.session = nil
+	a.openAISocketID = ""
 	idleDone := a.idleDone
 	a.mu.Unlock()
 
@@ -1582,6 +1610,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	if session != nil {
 		_ = session.Close()
 	}
+	a.disconnectOpenAISocket(socketID, "lease_lost")
 
 	a.cancel()
 }
@@ -2047,6 +2076,8 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	for {
 		event, err := session.Receive(a.ctx)
 		if err != nil {
+			socketID := a.currentOpenAISocketID()
+			a.disconnectOpenAISocket(socketID, "stream_receive_error")
 			a.logger.Error("stream receive error",
 				"events_received", eventCount,
 				"error", err,
@@ -2081,6 +2112,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		} else {
 			a.flushDeltaLogForDoneEvent(deltaLogs, meta, responseID, event.Type)
 			a.logOpenAIEvent(meta, responseID, "event_type", event.Type)
+		}
+		if !strings.HasSuffix(string(event.Type), ".delta") {
+			a.touchOpenAISocket(session, threadstore.OpenAISocketTouch{})
 		}
 		if !strings.HasSuffix(string(event.Type), ".delta") {
 			if a.history == nil {
@@ -2225,7 +2259,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		if event.Type == openaiws.EventTypeError {
-			a.resetSession()
+			a.resetSession("remote_error_event")
 			if event.Error != nil && event.Error.Message != "" {
 				return fmt.Errorf("%w: %s", errRemotePermanent, event.Error.Message)
 			}
@@ -2380,6 +2414,7 @@ func (a *threadActor) sendResponseCreate(event openaiws.ClientEvent) error {
 	}
 
 	if err := session.Send(a.ctx, event); err == nil {
+		a.touchOpenAISocket(session, threadstore.OpenAISocketTouch{})
 		return nil
 	} else {
 		a.logger.Warn("response.create send failed, reconnecting",
@@ -2608,7 +2643,7 @@ func (a *threadActor) currentMeta() threadstore.ThreadMeta {
 func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta) error {
 	a.stopLeaseLoop()
 	a.stopIdleLoop()
-	a.resetSession()
+	a.resetSession("terminal_release")
 
 	if meta.OwnerWorkerID == a.workerID && meta.SocketGeneration > 0 {
 		if err := a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration); err != nil {
@@ -2636,15 +2671,128 @@ func (a *threadActor) currentSocketGeneration() uint64 {
 	return a.meta.SocketGeneration
 }
 
-func (a *threadActor) resetSession() {
+func (a *threadActor) currentOpenAISocketID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.openAISocketID
+}
+
+func socketObservationContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+func (a *threadActor) registerOpenAISocket(meta threadstore.ThreadMeta, session *openaiws.Session, heartbeatExpiresAt time.Time) string {
+	if a.store == nil || session == nil {
+		return ""
+	}
+
+	socketID, err := idgen.New("socket")
+	if err != nil {
+		a.logger.Warn("failed to generate openai socket session id", "error", err)
+		return ""
+	}
+
+	snapshot := session.Snapshot()
+	connectedAt := snapshot.ConnectedAt.UTC()
+	if connectedAt.IsZero() {
+		connectedAt = time.Now().UTC()
+	}
+
+	record := threadstore.OpenAISocketSession{
+		ID:                     socketID,
+		ThreadID:               meta.ID,
+		RootThreadID:           defaultRootThreadID(meta),
+		ParentThreadID:         meta.ParentThreadID,
+		WorkerID:               a.workerID,
+		ThreadSocketGeneration: meta.SocketGeneration,
+		State:                  threadstore.OpenAISocketStateConnected,
+		ConnectedAt:            connectedAt,
+		LastReadAt:             snapshot.LastReadAt.UTC(),
+		LastWriteAt:            snapshot.LastWriteAt.UTC(),
+		LastHeartbeatAt:        connectedAt,
+		HeartbeatExpiresAt:     heartbeatExpiresAt.UTC(),
+		CreatedAt:              connectedAt,
+		UpdatedAt:              connectedAt,
+	}
+
+	ctx, cancel := socketObservationContext()
+	defer cancel()
+	if err := a.store.CreateOpenAISocketSession(ctx, record); err != nil {
+		a.logger.Warn("failed to persist openai socket session",
+			appendThreadGraphAttrs([]any{
+				"socket_id", socketID,
+				"socket_generation", meta.SocketGeneration,
+				"error", err,
+			}, meta)...,
+		)
+		return ""
+	}
+
+	return socketID
+}
+
+func (a *threadActor) touchOpenAISocket(session *openaiws.Session, touch threadstore.OpenAISocketTouch) {
+	if a.store == nil || session == nil {
+		return
+	}
+
+	socketID := strings.TrimSpace(a.currentOpenAISocketID())
+	if socketID == "" {
+		return
+	}
+
+	snapshot := session.Snapshot()
+	touch.ID = socketID
+	if touch.LastReadAt.IsZero() {
+		touch.LastReadAt = snapshot.LastReadAt.UTC()
+	}
+	if touch.LastWriteAt.IsZero() {
+		touch.LastWriteAt = snapshot.LastWriteAt.UTC()
+	}
+	if touch.LastReadAt.IsZero() && touch.LastWriteAt.IsZero() && touch.LastHeartbeatAt.IsZero() && touch.HeartbeatExpiresAt.IsZero() {
+		return
+	}
+
+	ctx, cancel := socketObservationContext()
+	defer cancel()
+	if err := a.store.TouchOpenAISocketSession(ctx, touch); err != nil {
+		a.logger.Warn("failed to touch openai socket session",
+			"socket_id", socketID,
+			"error", err,
+		)
+	}
+}
+
+func (a *threadActor) disconnectOpenAISocket(socketID, reason string) {
+	if a.store == nil || strings.TrimSpace(socketID) == "" {
+		return
+	}
+
+	now := time.Now().UTC()
+	ctx, cancel := socketObservationContext()
+	defer cancel()
+	if err := a.store.DisconnectOpenAISocketSession(ctx, socketID, reason, now, now.Add(socketPruneTTL)); err != nil {
+		a.logger.Warn("failed to disconnect openai socket session",
+			"socket_id", socketID,
+			"reason", reason,
+			"error", err,
+		)
+	}
+}
+
+func (a *threadActor) resetSession(reason string) {
 	a.mu.Lock()
 	session := a.session
+	socketID := a.openAISocketID
 	a.session = nil
+	a.openAISocketID = ""
 	a.mu.Unlock()
 
 	if session != nil {
 		_ = session.Close()
 	}
+	a.disconnectOpenAISocket(socketID, reason)
 }
 
 func decodeJSONArray(raw json.RawMessage) ([]json.RawMessage, error) {

@@ -12,8 +12,12 @@ import (
 )
 
 type fakeSweepStore struct {
-	threads map[string]threadstore.ThreadMeta
-	owners  map[string]threadstore.OwnerRecord
+	threads                map[string]threadstore.ThreadMeta
+	owners                 map[string]threadstore.OwnerRecord
+	disconnectBatchResults []int64
+	pruneBatchResults      []int64
+	disconnectCalls        int
+	pruneCalls             int
 }
 
 func newFakeSweepStore() *fakeSweepStore {
@@ -47,6 +51,26 @@ func (s *fakeSweepStore) LoadOwner(_ context.Context, threadID string) (threadst
 		return threadstore.OwnerRecord{}, threadstore.ErrThreadNotFound
 	}
 	return owner, nil
+}
+
+func (s *fakeSweepStore) DisconnectExpiredOpenAISocketSessions(_ context.Context, _, _ time.Time, _ int) (int64, error) {
+	s.disconnectCalls++
+	if len(s.disconnectBatchResults) == 0 {
+		return 0, nil
+	}
+	result := s.disconnectBatchResults[0]
+	s.disconnectBatchResults = s.disconnectBatchResults[1:]
+	return result, nil
+}
+
+func (s *fakeSweepStore) PruneExpiredOpenAISocketSessions(_ context.Context, _ time.Time, _ int) (int64, error) {
+	s.pruneCalls++
+	if len(s.pruneBatchResults) == 0 {
+		return 0, nil
+	}
+	result := s.pruneBatchResults[0]
+	s.pruneBatchResults = s.pruneBatchResults[1:]
+	return result, nil
 }
 
 type publishedCommand struct {
@@ -228,6 +252,23 @@ func TestRecoveryHarnessSkipsForeignLiveOwner(t *testing.T) {
 
 	if len(h.published) != 0 {
 		t.Fatalf("published count = %d, want 0", len(h.published))
+	}
+}
+
+func TestRecoveryHarnessSweepsOpenAISocketSessionsUntilBatchDrains(t *testing.T) {
+	t.Parallel()
+
+	h := newRecoveryHarness(t, "worker-local-1")
+	h.store.disconnectBatchResults = []int64{socketSweepBatch, 3}
+	h.store.pruneBatchResults = []int64{socketSweepBatch, 2}
+
+	h.service.sweepOpenAISocketSessions(h.ctx)
+
+	if h.store.disconnectCalls != 2 {
+		t.Fatalf("disconnectCalls = %d, want 2", h.store.disconnectCalls)
+	}
+	if h.store.pruneCalls != 2 {
+		t.Fatalf("pruneCalls = %d, want 2", h.store.pruneCalls)
 	}
 }
 
