@@ -230,7 +230,7 @@ func QueryAttachedDocumentsToolDefinition() map[string]any {
 	return map[string]any{
 		"type":        "function",
 		"name":        ToolNameQueryAttachedDocuments,
-		"description": "Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Describe what you need in the task field; mention specific page numbers there if needed.",
+		"description": "Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Prefer a single call per response: include every needed document ID in document_ids instead of making multiple query_attached_documents calls in the same turn. Describe what you need in the task field; mention specific page numbers there if needed.",
 		"strict":      true,
 		"parameters": map[string]any{
 			"type":                 "object",

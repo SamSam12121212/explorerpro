@@ -910,7 +910,7 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 			return err
 		}
 
-		inputItems, err := wrapRawItemAsArray(outputItem)
+		inputItems, err := normalizeRawItemsAsArray(outputItem)
 		if err != nil {
 			return err
 		}
@@ -1003,7 +1003,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 	}
 	parentCallID := strings.TrimSpace(childMeta.ParentCallID)
 	if parentCallID == "" {
-		parentCallID = spawn.ParentCallID
+		parentCallID = primaryDocQueryRoundCallID(spawn.ParentCallID)
 	}
 	model := defaultString(strings.TrimSpace(childMeta.Model), strings.TrimSpace(parentMeta.Model))
 
@@ -1334,7 +1334,7 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 		return err
 	}
 
-	inputItems, err := wrapRawItemAsArray(outputItem)
+	inputItems, err := normalizeRawItemsAsArray(outputItem)
 	if err != nil {
 		return err
 	}
@@ -2037,6 +2037,22 @@ type docQueryRequest struct {
 	Task        string   `json:"task"`
 }
 
+type docQueryCall struct {
+	CallID  string
+	Request docQueryRequest
+}
+
+type docQueryRoundCall struct {
+	CallID      string   `json:"call_id"`
+	DocumentIDs []string `json:"document_ids,omitempty"`
+	Task        string   `json:"task,omitempty"`
+}
+
+type docQueryDocWork struct {
+	DocumentID string
+	Calls      []docQueryRoundCall
+}
+
 func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 	var req docQueryRequest
 	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
@@ -2068,8 +2084,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	waitingTool := false
 	var pendingSpawn *spawnRequest
 	var pendingSpawnCallID string
-	var pendingDocQuery *docQueryRequest
-	var pendingDocQueryCallID string
+	var pendingDocQueries []docQueryCall
 	prevStatus := meta.Status
 	eventCount := 0
 	deltaLogs := map[openaiws.EventType]*deltaLogState{}
@@ -2173,8 +2188,10 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 							)
 							waitingTool = true
 						} else {
-							pendingDocQuery = &req
-							pendingDocQueryCallID = call.CallID
+							pendingDocQueries = append(pendingDocQueries, docQueryCall{
+								CallID:  call.CallID,
+								Request: req,
+							})
 						}
 					} else {
 						waitingTool = true
@@ -2209,8 +2226,8 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
-			} else if pendingDocQuery != nil && !waitingTool {
-				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueryCallID, *pendingDocQuery)
+			} else if len(pendingDocQueries) > 0 && !waitingTool {
+				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueries)
 				if err != nil {
 					return err
 				}
@@ -2670,6 +2687,7 @@ func (a *threadActor) clearCompletedInvocationState(meta *threadstore.ThreadMeta
 		return nil
 	}
 
+	meta.ParentCallID = ""
 	meta.ActiveSpawnGroupID = ""
 	meta.UpdatedAt = time.Now().UTC()
 	return a.saveThreadMeta(*meta)
@@ -2823,6 +2841,20 @@ func wrapRawItemAsArray(raw json.RawMessage) (json.RawMessage, error) {
 	}
 
 	return payload, nil
+}
+
+func normalizeRawItemsAsArray(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return wrapRawItemAsArray(trimmed)
+	}
+	if trimmed[0] == '[' {
+		if _, err := decodeJSONArray(trimmed); err != nil {
+			return nil, err
+		}
+		return trimmed, nil
+	}
+	return wrapRawItemAsArray(trimmed)
 }
 
 func itemTypeFromRaw(raw json.RawMessage) string {
@@ -3054,23 +3086,67 @@ func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []thread
 		children = append(children, child)
 	}
 
-	outputPayload, err := json.Marshal(map[string]any{
-		"spawn_group_id": spawn.ID,
-		"children":       children,
-	})
+	callBindings, err := decodeDocQueryRoundCalls(spawn.ParentCallID)
 	if err != nil {
-		return nil, fmt.Errorf("marshal aggregate spawn output payload: %w", err)
+		return nil, err
+	}
+	if len(callBindings) == 0 {
+		return nil, fmt.Errorf("spawn group %s has no parent call bindings", spawn.ID)
 	}
 
-	payload, err := json.Marshal(map[string]any{
-		"type":    "function_call_output",
-		"call_id": spawn.ParentCallID,
-		"output":  string(outputPayload),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal aggregate spawn output item: %w", err)
+	outputItems := make([]map[string]any, 0, len(callBindings))
+	for _, binding := range callBindings {
+		filteredChildren := children
+		if len(binding.DocumentIDs) > 0 {
+			allowedThreadIDs := make(map[string]struct{}, len(binding.DocumentIDs))
+			for _, documentID := range binding.DocumentIDs {
+				allowedThreadIDs[stableDocumentChildThreadID(spawn.ParentThreadID, binding.CallID, documentID, "query")] = struct{}{}
+			}
+
+			filteredChildren = make([]map[string]any, 0, len(children))
+			for _, child := range children {
+				threadID, _ := child["thread_id"].(string)
+				if _, ok := allowedThreadIDs[threadID]; ok {
+					filteredChildren = append(filteredChildren, child)
+				}
+			}
+		}
+
+		outputPayload := map[string]any{
+			"spawn_group_id": spawn.ID,
+			"children":       filteredChildren,
+		}
+		if len(binding.DocumentIDs) > 0 {
+			outputPayload["document_ids"] = binding.DocumentIDs
+		}
+		if strings.TrimSpace(binding.Task) != "" {
+			outputPayload["task"] = binding.Task
+		}
+
+		outputJSON, err := json.Marshal(outputPayload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal aggregate spawn output payload: %w", err)
+		}
+
+		outputItems = append(outputItems, map[string]any{
+			"type":    "function_call_output",
+			"call_id": binding.CallID,
+			"output":  string(outputJSON),
+		})
 	}
 
+	if len(outputItems) == 1 {
+		payload, err := json.Marshal(outputItems[0])
+		if err != nil {
+			return nil, fmt.Errorf("marshal aggregate spawn output item: %w", err)
+		}
+		return payload, nil
+	}
+
+	payload, err := json.Marshal(outputItems)
+	if err != nil {
+		return nil, fmt.Errorf("marshal aggregate spawn output items: %w", err)
+	}
 	return payload, nil
 }
 
@@ -3137,13 +3213,23 @@ func decodeSpawnRequest(arguments string, parentMeta threadstore.ThreadMeta) (sp
 	return request, nil
 }
 
-func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta, parentCallID string, req docQueryRequest) (string, error) {
+func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta, calls []docQueryCall) (string, error) {
 	if a.threadDocs == nil {
 		return "", fmt.Errorf("document store not available")
 	}
-	req.DocumentIDs = uniqueStringsPreserveOrder(req.DocumentIDs)
+	roundCalls := normalizeDocQueryRoundCalls(calls)
+	if len(roundCalls) == 0 {
+		return "", fmt.Errorf("document query round requires at least one tool call")
+	}
+	roundCallID := roundCalls[0].CallID
+	docWork := buildDocQueryDocWork(roundCalls)
 
-	attached, err := a.threadDocs.FilterAttached(a.ctx, parentMeta.ID, req.DocumentIDs)
+	allDocumentIDs := make([]string, 0, len(docWork))
+	for _, work := range docWork {
+		allDocumentIDs = append(allDocumentIDs, work.DocumentID)
+	}
+
+	attached, err := a.threadDocs.FilterAttached(a.ctx, parentMeta.ID, allDocumentIDs)
 	if err != nil {
 		return "", fmt.Errorf("validate attached documents: %w", err)
 	}
@@ -3153,7 +3239,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		attachedSet[id] = true
 	}
 	var missing []string
-	for _, id := range req.DocumentIDs {
+	for _, id := range allDocumentIDs {
 		if !attachedSet[id] {
 			missing = append(missing, id)
 		}
@@ -3162,14 +3248,18 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		return "", fmt.Errorf("documents not attached to thread: %v", missing)
 	}
 
-	spawnGroupID := stableDocumentSpawnGroupID(parentMeta.ID, parentCallID)
-	childThreadIDs := make([]string, 0, len(req.DocumentIDs))
-	childCommands := make([]agentcmd.Command, 0, len(req.DocumentIDs))
+	spawnGroupID := stableDocumentSpawnGroupID(parentMeta.ID, roundCallID)
+	childThreadIDs := make([]string, 0, len(docWork))
+	childCommands := make([]agentcmd.Command, 0, len(docWork))
+	encodedParentCallID, err := encodeDocQueryRoundCalls(roundCalls)
+	if err != nil {
+		return "", err
+	}
 
-	for _, docID := range req.DocumentIDs {
-		doc, err := a.docStore.Get(a.ctx, docID)
+	for _, work := range docWork {
+		doc, err := a.docStore.Get(a.ctx, work.DocumentID)
 		if err != nil {
-			return "", fmt.Errorf("load document %s: %w", docID, err)
+			return "", fmt.Errorf("load document %s: %w", work.DocumentID, err)
 		}
 
 		model := doc.QueryModel
@@ -3179,9 +3269,9 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 
 		previousResponseID := ""
 		lineageSource := "warmup"
-		lineage, err := a.store.LoadLatestCompletedDocumentQueryLineage(a.ctx, parentMeta.ID, docID)
+		lineage, err := a.store.LoadLatestCompletedDocumentQueryLineage(a.ctx, parentMeta.ID, work.DocumentID)
 		if err != nil && !errors.Is(err, threadstore.ErrThreadNotFound) {
-			return "", fmt.Errorf("get latest completed document child lineage for %s: %w", docID, err)
+			return "", fmt.Errorf("get latest completed document child lineage for %s: %w", work.DocumentID, err)
 		}
 		if err == nil {
 			previousResponseID = lineage.ResponseID
@@ -3195,26 +3285,27 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			lineageSource = "document_base"
 		}
 
+		task := buildDocQueryDocTask(work.Calls)
 		phase := "query"
 		var preparedInputRef string
 		if previousResponseID == "" {
 			phase = "warmup"
 			resp, err := a.preparedInputs.PrepareInput(a.ctx, doccmd.PrepareInputRequest{
-				RequestID:  stableDocumentPreparedInputID(parentMeta.ID, parentCallID, docID, phase),
+				RequestID:  stableDocumentPreparedInputID(parentMeta.ID, roundCallID, work.DocumentID, phase),
 				Kind:       doccmd.PrepareKindWarmup,
 				ThreadID:   parentMeta.ID,
-				DocumentID: docID,
+				DocumentID: work.DocumentID,
 			})
 			if err != nil {
-				return "", fmt.Errorf("prepare warmup input for document %s: %w", docID, err)
+				return "", fmt.Errorf("prepare warmup input for document %s: %w", work.DocumentID, err)
 			}
 			if resp.Status != doccmd.PrepareStatusOK {
-				return "", fmt.Errorf("prepare warmup input for document %s failed: %s", docID, resp.Error)
+				return "", fmt.Errorf("prepare warmup input for document %s failed: %s", work.DocumentID, resp.Error)
 			}
 			preparedInputRef = resp.PreparedInputRef
 		}
 
-		threadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, parentCallID, docID, doc.Filename, model, phase, previousResponseID, preparedInputRef, req.Task, "")
+		threadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, roundCallID, work.DocumentID, doc.Filename, model, phase, previousResponseID, preparedInputRef, task, "")
 		if err != nil {
 			return "", err
 		}
@@ -3226,16 +3317,16 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			childKind = "document_warmup"
 		}
 		a.logger.Info("spawning child thread",
-			appendThreadGraphAttrs([]any{
-				"spawn_group_id", spawnGroupID,
-				"child_thread_id", threadID,
-				"child_kind", childKind,
-				"document_id", docID,
-				"document_name", doc.Filename,
-				"phase", phase,
-				"model", model,
-				"lineage_source", lineageSource,
-				"has_previous_response_id", previousResponseID != "",
+				appendThreadGraphAttrs([]any{
+					"spawn_group_id", spawnGroupID,
+					"child_thread_id", threadID,
+					"child_kind", childKind,
+					"document_id", work.DocumentID,
+					"document_name", doc.Filename,
+					"phase", phase,
+					"model", model,
+					"lineage_source", lineageSource,
+					"has_previous_response_id", previousResponseID != "",
 				"reuse_existing_thread", reusedThread,
 			}, parentMeta)...,
 		)
@@ -3244,7 +3335,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	if err := a.store.CreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
 		ID:             spawnGroupID,
 		ParentThreadID: parentMeta.ID,
-		ParentCallID:   parentCallID,
+		ParentCallID:   encodedParentCallID,
 		Expected:       len(childCommands),
 		Status:         threadstore.SpawnGroupStatusWaiting,
 		CreatedAt:      time.Now().UTC(),
@@ -3258,6 +3349,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			"spawn_group_id", spawnGroupID,
 			"child_source", "document_query",
 			"expected_children", len(childCommands),
+			"function_call_count", len(roundCalls),
 		}, parentMeta)...,
 	)
 
@@ -3268,6 +3360,120 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	}
 
 	return spawnGroupID, nil
+}
+
+func normalizeDocQueryRoundCalls(calls []docQueryCall) []docQueryRoundCall {
+	normalized := make([]docQueryRoundCall, 0, len(calls))
+	for _, call := range calls {
+		callID := strings.TrimSpace(call.CallID)
+		if callID == "" {
+			continue
+		}
+		documentIDs := uniqueStringsPreserveOrder(call.Request.DocumentIDs)
+		if len(documentIDs) == 0 {
+			continue
+		}
+		normalized = append(normalized, docQueryRoundCall{
+			CallID:      callID,
+			DocumentIDs: documentIDs,
+			Task:        strings.TrimSpace(call.Request.Task),
+		})
+	}
+	return normalized
+}
+
+func buildDocQueryDocWork(calls []docQueryRoundCall) []docQueryDocWork {
+	byDocumentID := make(map[string]*docQueryDocWork, len(calls))
+	ordered := make([]docQueryDocWork, 0, len(calls))
+
+	for _, call := range calls {
+		for _, documentID := range call.DocumentIDs {
+			work, ok := byDocumentID[documentID]
+			if !ok {
+				ordered = append(ordered, docQueryDocWork{DocumentID: documentID})
+				work = &ordered[len(ordered)-1]
+				byDocumentID[documentID] = work
+			}
+			work.Calls = append(work.Calls, call)
+		}
+	}
+
+	return ordered
+}
+
+func buildDocQueryDocTask(calls []docQueryRoundCall) string {
+	if len(calls) == 1 {
+		return calls[0].Task
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Multiple query_attached_documents requests from the same parent response need answers for this document. Respond with clearly labeled sections for each parent call.\n\n")
+	builder.WriteString("<parent_calls>\n")
+	for _, call := range calls {
+		builder.WriteString(`<call id="`)
+		builder.WriteString(escapePromptAttributeLocal(call.CallID))
+		builder.WriteString(`">`)
+		builder.WriteByte('\n')
+		builder.WriteString(call.Task)
+		builder.WriteByte('\n')
+		builder.WriteString("</call>\n")
+	}
+	builder.WriteString("</parent_calls>")
+	return builder.String()
+}
+
+func encodeDocQueryRoundCalls(calls []docQueryRoundCall) (string, error) {
+	if len(calls) == 0 {
+		return "", fmt.Errorf("document query round requires at least one tool call")
+	}
+	if len(calls) == 1 {
+		return calls[0].CallID, nil
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"kind":  "document_query_round",
+		"calls": calls,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal document query round calls: %w", err)
+	}
+	return string(payload), nil
+}
+
+func decodeDocQueryRoundCalls(raw string) ([]docQueryRoundCall, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(raw, "{") {
+		return []docQueryRoundCall{{CallID: raw}}, nil
+	}
+
+	var payload struct {
+		Kind  string              `json:"kind"`
+		Calls []docQueryRoundCall `json:"calls"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, fmt.Errorf("decode document query round calls: %w", err)
+	}
+	if payload.Kind != "document_query_round" {
+		return []docQueryRoundCall{{CallID: raw}}, nil
+	}
+	return normalizeDocQueryRoundCalls(roundCallsToPendingCalls(payload.Calls)), nil
+}
+
+func roundCallsToPendingCalls(calls []docQueryRoundCall) []docQueryCall {
+	pending := make([]docQueryCall, 0, len(calls))
+	for _, call := range calls {
+		pending = append(pending, docQueryCall{
+			CallID: call.CallID,
+			Request: docQueryRequest{
+				DocumentIDs: append([]string(nil), call.DocumentIDs...),
+				Task:        call.Task,
+			},
+		})
+	}
+	return pending
 }
 
 func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID, documentID, documentName, model, phase, previousResponseID, preparedInputRef, task, bootstrapChildThreadID string) (string, agentcmd.Command, bool, error) {
@@ -3368,11 +3574,11 @@ func (a *threadActor) prepareDocumentChildThreadMeta(parentMeta threadstore.Thre
 			ActiveSpawnGroupID: spawnGroupID,
 			CreatedAt:          now,
 			UpdatedAt:          now,
-		}); err != nil {
-			return false, err
+			}); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
-		return false, nil
-	}
 
 	if !canReuseDocumentChildThread(existing.Status) {
 		return false, fmt.Errorf("document child thread %s is not reusable in status %s", threadID, existing.Status)
@@ -3393,6 +3599,14 @@ func (a *threadActor) prepareDocumentChildThreadMeta(parentMeta threadstore.Thre
 	}
 
 	return true, nil
+}
+
+func primaryDocQueryRoundCallID(raw string) string {
+	calls, err := decodeDocQueryRoundCalls(raw)
+	if err == nil && len(calls) > 0 {
+		return calls[0].CallID
+	}
+	return strings.TrimSpace(raw)
 }
 
 func canReuseDocumentChildThread(status threadstore.ThreadStatus) bool {

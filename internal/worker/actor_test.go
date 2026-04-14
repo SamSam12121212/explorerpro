@@ -158,6 +158,81 @@ func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
 	}
 }
 
+func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
+	t.Parallel()
+
+	parentCallID, err := encodeDocQueryRoundCalls([]docQueryRoundCall{
+		{CallID: "call_parent_1", DocumentIDs: []string{"doc_1"}, Task: "Summarize doc 1"},
+		{CallID: "call_parent_2", DocumentIDs: []string{"doc_2"}, Task: "Summarize doc 2"},
+	})
+	if err != nil {
+		t.Fatalf("encodeDocQueryRoundCalls() error = %v", err)
+	}
+
+	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
+		ID:             "sg_doc_round",
+		ParentThreadID: "thread_parent",
+		ParentCallID:   parentCallID,
+	}, []threadstore.SpawnChildResult{
+		{
+			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_1", "doc_1", "query"),
+			Status:          "completed",
+			ChildResponseID: "resp_doc_1",
+			AssistantText:   "Doc 1 summary",
+		},
+		{
+			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_2", "doc_2", "query"),
+			Status:          "failed",
+			ChildResponseID: "resp_doc_2",
+			ErrorRef:        "blob://errors/doc-2.json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("aggregateSpawnOutputItem() error = %v", err)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(decoded) != 2 {
+		t.Fatalf("len(decoded) = %d, want 2", len(decoded))
+	}
+	if decoded[0]["call_id"] != "call_parent_1" {
+		t.Fatalf("decoded[0].call_id = %v, want call_parent_1", decoded[0]["call_id"])
+	}
+	if decoded[1]["call_id"] != "call_parent_2" {
+		t.Fatalf("decoded[1].call_id = %v, want call_parent_2", decoded[1]["call_id"])
+	}
+
+	for i, wantThreadID := range []string{
+		stableDocumentChildThreadID("thread_parent", "call_parent_1", "doc_1", "query"),
+		stableDocumentChildThreadID("thread_parent", "call_parent_2", "doc_2", "query"),
+	} {
+		output, ok := decoded[i]["output"].(string)
+		if !ok {
+			t.Fatalf("decoded[%d].output = %#v, want string", i, decoded[i]["output"])
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(output), &payload); err != nil {
+			t.Fatalf("json.Unmarshal(output) error = %v", err)
+		}
+
+		children, ok := payload["children"].([]any)
+		if !ok || len(children) != 1 {
+			t.Fatalf("payload[%d].children = %#v, want 1 entry", i, payload["children"])
+		}
+		child, ok := children[0].(map[string]any)
+		if !ok {
+			t.Fatalf("payload[%d].children[0] = %#v, want object", i, children[0])
+		}
+		if child["thread_id"] != wantThreadID {
+			t.Fatalf("payload[%d].children[0].thread_id = %v, want %q", i, child["thread_id"], wantThreadID)
+		}
+	}
+}
+
 func TestResponseCreateInputKind(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2385,10 +2460,13 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	}
 
 	meta := threadstore.ThreadMeta{ID: "thread_123", RootThreadID: "thread_123"}
-	_, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
-		DocumentIDs: []string{"doc_1", "doc_missing"},
-		Task:        "summarize",
-	})
+	_, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
+		CallID: "call_1",
+		Request: docQueryRequest{
+			DocumentIDs: []string{"doc_1", "doc_missing"},
+			Task:        "summarize",
+		},
+	}})
 	if err == nil {
 		t.Fatal("expected error for unattached document")
 	}
@@ -2462,10 +2540,13 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	}
 
 	meta := store.threads["thread_parent"]
-	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
-		DocumentIDs: []string{"doc_1"},
-		Task:        "summarize",
-	}); err != nil {
+	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
+		CallID: "call_1",
+		Request: docQueryRequest{
+			DocumentIDs: []string{"doc_1"},
+			Task:        "summarize",
+		},
+	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
 	}
 
@@ -2536,10 +2617,13 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 	}
 
 	meta := store.threads["thread_parent"]
-	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
-		DocumentIDs: []string{"doc_1"},
-		Task:        "summarize",
-	}); err != nil {
+	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
+		CallID: "call_1",
+		Request: docQueryRequest{
+			DocumentIDs: []string{"doc_1"},
+			Task:        "summarize",
+		},
+	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
 	}
 
@@ -2603,10 +2687,13 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 	}
 
 	meta := store.threads["thread_parent"]
-	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
-		DocumentIDs: []string{"doc_1"},
-		Task:        "summarize",
-	}); err != nil {
+	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
+		CallID: "call_1",
+		Request: docQueryRequest{
+			DocumentIDs: []string{"doc_1"},
+			Task:        "summarize",
+		},
+	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
 	}
 
@@ -2679,10 +2766,13 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	}
 
 	meta := store.threads["thread_parent"]
-	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
-		DocumentIDs: []string{"doc_1", "doc_1"},
-		Task:        "summarize",
-	}); err != nil {
+	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
+		CallID: "call_1",
+		Request: docQueryRequest{
+			DocumentIDs: []string{"doc_1", "doc_1"},
+			Task:        "summarize",
+		},
+	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
 	}
 
@@ -2939,6 +3029,90 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	}
 }
 
+func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:               "thread_parent",
+		RootThreadID:     "thread_parent",
+		Status:           threadstore.ThreadStatusRunning,
+		Model:            "gpt-5.4",
+		OwnerWorkerID:    "worker-local-1",
+		SocketGeneration: 1,
+	}
+
+	funcCallItem1 := `{
+		"type":"function_call",
+		"call_id":"call_doc_1",
+		"name":"query_attached_documents",
+		"arguments":"{\"document_ids\":[\"doc_1\"],\"task\":\"summarize doc 1\"}"
+	}`
+	funcCallItem2 := `{
+		"type":"function_call",
+		"call_id":"call_doc_2",
+		"name":"query_attached_documents",
+		"arguments":"{\"document_ids\":[\"doc_2\"],\"task\":\"summarize doc 2\"}"
+	}`
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_1"}}`),
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":` + funcCallItem1 + `}`),
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":` + funcCallItem2 + `}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1"}}`),
+		},
+	}
+	var publishedCommands []agentcmd.Command
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadDocs = &fakeThreadDocumentStore{
+		documentsByThread: map[string][]docstore.Document{
+			"thread_parent": {
+				{ID: "doc_1", Filename: "report-1.pdf"},
+				{ID: "doc_2", Filename: "report-2.pdf"},
+			},
+		},
+	}
+	actor.docStore = &fakeDocActorDocStore{
+		docs: map[string]docstore.Document{
+			"doc_1": {ID: "doc_1", Filename: "report-1.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-1"},
+			"doc_2": {ID: "doc_2", Filename: "report-2.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-2"},
+		},
+	}
+	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
+	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publishedCommands = append(publishedCommands, cmd)
+		return nil
+	}
+
+	meta := store.threads["thread_parent"]
+	if err := actor.streamUntilTerminal(meta); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	final := store.threads["thread_parent"]
+	if final.Status != threadstore.ThreadStatusWaitingChildren {
+		t.Fatalf("final status = %q, want waiting_children", final.Status)
+	}
+	if final.ActiveSpawnGroupID == "" {
+		t.Fatal("expected active spawn group ID to be set")
+	}
+	if len(publishedCommands) != 2 {
+		t.Fatalf("publishedCommands = %d, want 2", len(publishedCommands))
+	}
+
+	spawn := store.spawnGroups[final.ActiveSpawnGroupID]
+	roundCalls, err := decodeDocQueryRoundCalls(spawn.ParentCallID)
+	if err != nil {
+		t.Fatalf("decodeDocQueryRoundCalls() error = %v", err)
+	}
+	if len(roundCalls) != 2 {
+		t.Fatalf("len(roundCalls) = %d, want 2", len(roundCalls))
+	}
+	if roundCalls[0].CallID != "call_doc_1" || roundCalls[1].CallID != "call_doc_2" {
+		t.Fatalf("roundCalls = %#v, want call_doc_1 and call_doc_2", roundCalls)
+	}
+}
+
 func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T) {
 	t.Parallel()
 
@@ -2977,6 +3151,9 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 	final := store.threads["thread_child"]
 	if final.Status != threadstore.ThreadStatusCompleted {
 		t.Fatalf("final.Status = %q, want completed", final.Status)
+	}
+	if final.ParentCallID != "" {
+		t.Fatalf("final.ParentCallID = %q, want empty", final.ParentCallID)
 	}
 	if final.ActiveSpawnGroupID != "" {
 		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
@@ -3026,6 +3203,9 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 	final := store.threads["thread_doc_query"]
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final.Status = %q, want ready", final.Status)
+	}
+	if final.ParentCallID != "" {
+		t.Fatalf("final.ParentCallID = %q, want empty", final.ParentCallID)
 	}
 	if final.ActiveSpawnGroupID != "" {
 		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
