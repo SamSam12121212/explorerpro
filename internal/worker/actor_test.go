@@ -46,6 +46,10 @@ func stableDocumentChildThreadID(parentThreadID, parentCallID string, documentID
 	return tid(fmt.Sprintf("%s_doc_%d", parentThreadID, documentID))
 }
 
+func stableDocumentSpawnGroupID(parentThreadID int64, parentCallID string) int64 {
+	return tid(fmt.Sprintf("sg_doc_%d_%s", parentThreadID, parentCallID))
+}
+
 func TestWrapRawItemAsArray(t *testing.T) {
 	raw, err := wrapRawItemAsArray([]byte(`{"type":"function_call_output","call_id":"call_123"}`))
 	if err != nil {
@@ -70,7 +74,7 @@ func TestStableDocumentChildThreadIDIgnoresInvocationAndPhase(t *testing.T) {
 
 func TestAggregateSpawnOutputItem(t *testing.T) {
 	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
-		ID:           "sg_123",
+		ID:           tid("sg_123"),
 		ParentCallID: "call_parent",
 	}, []threadstore.SpawnChildResult{
 		{
@@ -109,8 +113,8 @@ func TestAggregateSpawnOutputItem(t *testing.T) {
 		t.Fatalf("json.Unmarshal(output) error = %v", err)
 	}
 
-	if parsed["spawn_group_id"] != "sg_123" {
-		t.Fatalf("spawn_group_id = %v, want sg_123", parsed["spawn_group_id"])
+	if parsed["spawn_group_id"] != float64(tid("sg_123")) {
+		t.Fatalf("spawn_group_id = %v, want %d", parsed["spawn_group_id"], tid("sg_123"))
 	}
 
 	children, ok := parsed["children"].([]any)
@@ -131,7 +135,7 @@ func TestAggregateSpawnOutputItemSkipsPendingChildren(t *testing.T) {
 	t.Parallel()
 
 	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
-		ID:           "sg_123",
+		ID:           tid("sg_123"),
 		ParentCallID: "call_parent",
 	}, []threadstore.SpawnChildResult{
 		{
@@ -189,7 +193,7 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 	}
 
 	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
-		ID:             "sg_doc_round",
+		ID:             tid("sg_doc_round"),
 		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   parentCallID,
 	}, []threadstore.SpawnChildResult{
@@ -304,7 +308,7 @@ func TestAppendThreadGraphAttrs(t *testing.T) {
 		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              2,
-		ActiveSpawnGroupID: "sg_123",
+		ActiveSpawnGroupID: tid("sg_123"),
 	}
 
 	got := appendThreadGraphAttrs([]any{"event", "start"}, meta)
@@ -314,7 +318,7 @@ func TestAppendThreadGraphAttrs(t *testing.T) {
 		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
 		"depth", 2,
-		"spawn_group_id", "sg_123",
+		"spawn_group_id", tid("sg_123"),
 	}
 
 	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
@@ -329,16 +333,16 @@ func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
 		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              2,
-		ActiveSpawnGroupID: "sg_meta",
+		ActiveSpawnGroupID: tid("sg_meta"),
 	}
 
 	got := appendThreadGraphAttrs([]any{
-		"spawn_group_id", "sg_explicit",
+		"spawn_group_id", tid("sg_explicit"),
 		"depth", 9,
 		"root_thread_id", "thread_explicit_root",
 	}, meta)
 	want := []any{
-		"spawn_group_id", "sg_explicit",
+		"spawn_group_id", tid("sg_explicit"),
 		"depth", 9,
 		"root_thread_id", "thread_explicit_root",
 		"parent_thread_id", tid("thread_parent"),
@@ -358,7 +362,7 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 		ParentThreadID:     tid("thread_parent"),
 		ParentCallID:       "call_parent",
 		Depth:              1,
-		ActiveSpawnGroupID: "sg_123",
+		ActiveSpawnGroupID: tid("sg_123"),
 	}
 
 	actor := newActorRecoveryHarness(t, store, nil)
@@ -379,7 +383,7 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
 		"depth", 1,
-		"spawn_group_id", "sg_123",
+		"spawn_group_id", tid("sg_123"),
 	}
 
 	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
@@ -2035,7 +2039,7 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
 		ID:                 tid("thread_child"),
 		ParentThreadID:     tid("thread_parent"),
-		ActiveSpawnGroupID: "sg_123",
+		ActiveSpawnGroupID: tid("sg_123"),
 		LastResponseID:     "resp_child_1",
 		Status:             threadstore.ThreadStatusCompleted,
 	}, "completed")
@@ -2087,7 +2091,7 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
 		ID:                 tid("thread_child"),
 		ParentThreadID:     tid("thread_parent"),
-		ActiveSpawnGroupID: "sg_123",
+		ActiveSpawnGroupID: tid("sg_123"),
 		LastResponseID:     "resp_child_1",
 		Status:             threadstore.ThreadStatusIncomplete,
 	}, resultStatus)
@@ -2115,10 +2119,10 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
 		ID:                 tid("thread_parent"),
 		Status:             threadstore.ThreadStatusWaitingChildren,
-		ActiveSpawnGroupID: "sg_waiting",
+		ActiveSpawnGroupID: tid("sg_waiting"),
 	}
-	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
-		ID:             "sg_waiting",
+	store.spawnGroups[tid("sg_waiting")] = threadstore.SpawnGroupMeta{
+		ID:             tid("sg_waiting"),
 		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_parent",
 		Expected:       2,
@@ -2132,7 +2136,7 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
-			"spawn_group_id":"sg_waiting",
+			"spawn_group_id":` + strconv.FormatInt(tid("sg_waiting"), 10) + `,
 			"child_thread_id":1,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
@@ -2144,7 +2148,7 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 		t.Fatalf("handleChildResult() error = %v", err)
 	}
 
-	results := store.spawnResults["sg_waiting"]
+	results := store.spawnResults[tid("sg_waiting")]
 	if len(results) != 1 {
 		t.Fatalf("spawnResults = %d, want 1", len(results))
 	}
@@ -2163,10 +2167,10 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		Model:              "gpt-5.4",
 		LastResponseID:     "resp_parent_prev",
-		ActiveSpawnGroupID: "sg_waiting",
+		ActiveSpawnGroupID: tid("sg_waiting"),
 	}
-	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
-		ID:             "sg_waiting",
+	store.spawnGroups[tid("sg_waiting")] = threadstore.SpawnGroupMeta{
+		ID:             tid("sg_waiting"),
 		ParentThreadID: tid("thread_parent"),
 		ParentCallID:   "call_parent",
 		Expected:       1,
@@ -2186,7 +2190,7 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
-			"spawn_group_id":"sg_waiting",
+			"spawn_group_id":` + strconv.FormatInt(tid("sg_waiting"), 10) + `,
 			"child_thread_id":1,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
@@ -2202,8 +2206,8 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	if final.Status != threadstore.ThreadStatusReady {
 		t.Fatalf("final.Status = %q, want ready", final.Status)
 	}
-	if final.ActiveSpawnGroupID != "" {
-		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	if final.ActiveSpawnGroupID != 0 {
+		t.Fatalf("final.ActiveSpawnGroupID = %d, want empty", final.ActiveSpawnGroupID)
 	}
 	if final.LastResponseID != "resp_parent_resume" {
 		t.Fatalf("final.LastResponseID = %q, want resp_parent_resume", final.LastResponseID)
@@ -2901,7 +2905,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
-			"spawn_group_id":"` + spawnGroupID + `",
+			"spawn_group_id":` + strconv.FormatInt(spawnGroupID, 10) + `,
 			"child_thread_id":` + strconv.FormatInt(warmupThreadID, 10) + `,
 			"child_response_id":"resp_warmup",
 			"status":"completed"
@@ -2971,7 +2975,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		t.Fatalf("query thread %d was not created", queryThreadID)
 	}
 	if queryMeta.ActiveSpawnGroupID != spawnGroupID {
-		t.Fatalf("queryMeta.ActiveSpawnGroupID = %q, want %q", queryMeta.ActiveSpawnGroupID, spawnGroupID)
+		t.Fatalf("queryMeta.ActiveSpawnGroupID = %d, want %d", queryMeta.ActiveSpawnGroupID, spawnGroupID)
 	}
 	if len(store.spawnResults[spawnGroupID]) != 0 {
 		t.Fatalf("spawnResults = %#v, want no stored result after warmup completion", store.spawnResults[spawnGroupID])
@@ -3044,7 +3048,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	if final.Status != threadstore.ThreadStatusWaitingChildren {
 		t.Fatalf("final status = %q, want waiting_children", final.Status)
 	}
-	if final.ActiveSpawnGroupID == "" {
+	if final.ActiveSpawnGroupID == 0 {
 		t.Fatal("expected active spawn group ID to be set")
 	}
 
@@ -3121,7 +3125,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	if final.Status != threadstore.ThreadStatusWaitingChildren {
 		t.Fatalf("final status = %q, want waiting_children", final.Status)
 	}
-	if final.ActiveSpawnGroupID == "" {
+	if final.ActiveSpawnGroupID == 0 {
 		t.Fatal("expected active spawn group ID to be set")
 	}
 	if len(publishedCommands) != 2 {
@@ -3217,7 +3221,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		t.Fatalf("final.ParentCallID = %q, want call_1", final.ParentCallID)
 	}
 	if final.ActiveSpawnGroupID != spawnGroupID {
-		t.Fatalf("final.ActiveSpawnGroupID = %q, want %q", final.ActiveSpawnGroupID, spawnGroupID)
+		t.Fatalf("final.ActiveSpawnGroupID = %d, want %d", final.ActiveSpawnGroupID, spawnGroupID)
 	}
 }
 
@@ -3240,7 +3244,7 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 		Model:              "gpt-5.4-mini",
 		OwnerWorkerID:      "worker-local-1",
 		SocketGeneration:   1,
-		ActiveSpawnGroupID: "sg_waiting",
+		ActiveSpawnGroupID: tid("sg_waiting"),
 	}
 
 	conn := &actorTestConn{
@@ -3263,8 +3267,8 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 	if final.ParentCallID != "" {
 		t.Fatalf("final.ParentCallID = %q, want empty", final.ParentCallID)
 	}
-	if final.ActiveSpawnGroupID != "" {
-		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	if final.ActiveSpawnGroupID != 0 {
+		t.Fatalf("final.ActiveSpawnGroupID = %d, want empty", final.ActiveSpawnGroupID)
 	}
 	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != tid("thread_child") {
 		t.Fatalf("releasedThreads = %#v, want [%d]", store.releasedThreads, tid("thread_child"))
@@ -3291,7 +3295,7 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		Model:              "gpt-5.4-mini",
 		OwnerWorkerID:      "worker-local-1",
 		SocketGeneration:   1,
-		ActiveSpawnGroupID: "sg_waiting",
+		ActiveSpawnGroupID: tid("sg_waiting"),
 		MetadataJSON:       `{"document_id":"1","spawn_mode":"document_query"}`,
 		ChildKind:          "document",
 		DocumentID:         1,
@@ -3318,8 +3322,8 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 	if final.ParentCallID != "" {
 		t.Fatalf("final.ParentCallID = %q, want empty", final.ParentCallID)
 	}
-	if final.ActiveSpawnGroupID != "" {
-		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	if final.ActiveSpawnGroupID != 0 {
+		t.Fatalf("final.ActiveSpawnGroupID = %d, want empty", final.ActiveSpawnGroupID)
 	}
 	if final.LastResponseID != "resp_doc_done" {
 		t.Fatalf("final.LastResponseID = %q, want resp_doc_done", final.LastResponseID)

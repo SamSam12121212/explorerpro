@@ -43,7 +43,7 @@ type ThreadMeta struct {
 	SocketExpiresAt    time.Time
 	LastResponseID     string
 	ActiveResponseID   string
-	ActiveSpawnGroupID string
+	ActiveSpawnGroupID int64
 	ChildKind          string
 	DocumentID         int64
 	DocumentPhase      string
@@ -108,9 +108,11 @@ const (
 )
 
 type SpawnGroupMeta struct {
-	ID                   string
+	ID                   int64
 	ParentThreadID       int64
 	ParentCallID         string
+	GroupKind            string
+	StableKey            string
 	Expected             int
 	Completed            int
 	Failed               int

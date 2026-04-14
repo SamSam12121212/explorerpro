@@ -108,18 +108,18 @@ func TestParseThreadRoute(t *testing.T) {
 	if _, ok := parseThreadRoute("/threads/123/items/extra"); ok {
 		t.Fatal("expected invalid items path to fail")
 	}
-	route, ok = parseThreadRoute("/threads/123/spawn-groups/sg_123")
+	route, ok = parseThreadRoute("/threads/123/spawn-groups/123")
 	if !ok {
 		t.Fatal("expected spawn group path to parse")
 	}
-	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "" {
+	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.SpawnGroupID != 123 || route.Subresource != "" {
 		t.Fatalf("unexpected spawn group route: %+v", route)
 	}
-	route, ok = parseThreadRoute("/threads/123/spawn-groups/sg_123/results")
+	route, ok = parseThreadRoute("/threads/123/spawn-groups/123/results")
 	if !ok {
 		t.Fatal("expected spawn group results path to parse")
 	}
-	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.ResourceID != "sg_123" || route.Subresource != "results" {
+	if route.ThreadID != 123 || route.Resource != "spawn-groups" || route.SpawnGroupID != 123 || route.Subresource != "results" {
 		t.Fatalf("unexpected spawn group results route: %+v", route)
 	}
 }

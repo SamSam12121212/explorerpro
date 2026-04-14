@@ -205,7 +205,7 @@ func TestRecoveryHarnessAdoptsExpiredWaitingChildrenThread(t *testing.T) {
 		ID:                 200,
 		Status:             threadstore.ThreadStatusWaitingChildren,
 		SocketGeneration:   3,
-		ActiveSpawnGroupID: "sg_123",
+		ActiveSpawnGroupID: tid("sg_123"),
 	})
 	h.addOwner(200, threadstore.OwnerRecord{
 		WorkerID:         "worker-dead",

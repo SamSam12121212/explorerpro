@@ -190,7 +190,7 @@ func TestChildResultBody(t *testing.T) {
 		"kind":"thread.child_completed",
 		"thread_id":100,
 		"body":{
-			"spawn_group_id":"sg_123",
+			"spawn_group_id":123,
 			"child_thread_id":101,
 			"child_response_id":"resp_child_1",
 			"assistant_text":"Direct child summary",
@@ -206,8 +206,8 @@ func TestChildResultBody(t *testing.T) {
 		t.Fatalf("ChildResultBody() error = %v", err)
 	}
 
-	if body.SpawnGroupID != "sg_123" {
-		t.Fatalf("SpawnGroupID = %q, want %q", body.SpawnGroupID, "sg_123")
+	if body.SpawnGroupID != 123 {
+		t.Fatalf("SpawnGroupID = %d, want %d", body.SpawnGroupID, 123)
 	}
 	if body.AssistantText != "Direct child summary" {
 		t.Fatalf("AssistantText = %q, want %q", body.AssistantText, "Direct child summary")
@@ -291,7 +291,7 @@ func TestLogAttrs(t *testing.T) {
 			"root_thread_id":999,
 			"causation_id":"resp_child",
 			"body":{
-				"spawn_group_id":"sg_123",
+				"spawn_group_id":123,
 				"child_thread_id":101,
 				"child_response_id":"resp_child",
 				"status":"completed"
@@ -302,8 +302,8 @@ func TestLogAttrs(t *testing.T) {
 		}
 
 		attrs := attrsToMap(LogAttrs(cmd))
-		if attrs["spawn_group_id"] != "sg_123" {
-			t.Fatalf("spawn_group_id = %v, want sg_123", attrs["spawn_group_id"])
+		if attrs["spawn_group_id"] != int64(123) {
+			t.Fatalf("spawn_group_id = %v, want 123", attrs["spawn_group_id"])
 		}
 		if attrs["child_thread_id"] != int64(101) {
 			t.Fatalf("child_thread_id = %v, want 101", attrs["child_thread_id"])

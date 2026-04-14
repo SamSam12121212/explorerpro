@@ -23,9 +23,10 @@ type fakeActorStore struct {
 
 	threads                map[int64]threadstore.ThreadMeta
 	latestClientCreateByID map[int64]json.RawMessage
-	spawnGroups            map[string]threadstore.SpawnGroupMeta
-	spawnResults           map[string][]threadstore.SpawnChildResult
+	spawnGroups            map[int64]threadstore.SpawnGroupMeta
+	spawnResults           map[int64][]threadstore.SpawnChildResult
 	nextReservedThreadID   int64
+	nextReservedSpawnID    int64
 
 	savedThreads        []threadstore.ThreadMeta
 	savedSpawnGroups    []threadstore.SpawnGroupMeta
@@ -44,9 +45,10 @@ func newFakeActorStore(t *testing.T) *fakeActorStore {
 		t:                      t,
 		threads:                map[int64]threadstore.ThreadMeta{},
 		latestClientCreateByID: map[int64]json.RawMessage{},
-		spawnGroups:            map[string]threadstore.SpawnGroupMeta{},
-		spawnResults:           map[string][]threadstore.SpawnChildResult{},
+		spawnGroups:            map[int64]threadstore.SpawnGroupMeta{},
+		spawnResults:           map[int64][]threadstore.SpawnChildResult{},
 		nextReservedThreadID:   10000,
+		nextReservedSpawnID:    20000,
 		savedResponses:         map[string]json.RawMessage{},
 	}
 }
@@ -55,6 +57,12 @@ func (s *fakeActorStore) ReserveThreadID(_ context.Context) (int64, error) {
 	threadID := s.nextReservedThreadID
 	s.nextReservedThreadID++
 	return threadID, nil
+}
+
+func (s *fakeActorStore) ReserveSpawnGroupID(_ context.Context) (int64, error) {
+	spawnGroupID := s.nextReservedSpawnID
+	s.nextReservedSpawnID++
+	return spawnGroupID, nil
 }
 
 func (s *fakeActorStore) CreateThreadIfAbsent(_ context.Context, meta threadstore.ThreadMeta) error {
@@ -234,7 +242,20 @@ func (s *fakeActorStore) CreateSpawnGroup(_ context.Context, meta threadstore.Sp
 	return nil
 }
 
-func (s *fakeActorStore) LoadSpawnGroup(_ context.Context, spawnGroupID string) (threadstore.SpawnGroupMeta, error) {
+func (s *fakeActorStore) LoadOrCreateDocumentQuerySpawnGroup(_ context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
+	spawnGroupID := stableDocumentSpawnGroupID(meta.ParentThreadID, meta.StableKey)
+	if existing, ok := s.spawnGroups[spawnGroupID]; ok {
+		return existing, nil
+	}
+	meta.ID = spawnGroupID
+	if meta.GroupKind == "" {
+		meta.GroupKind = "document_query"
+	}
+	s.spawnGroups[meta.ID] = meta
+	return meta, nil
+}
+
+func (s *fakeActorStore) LoadSpawnGroup(_ context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error) {
 	meta, ok := s.spawnGroups[spawnGroupID]
 	if !ok {
 		return threadstore.SpawnGroupMeta{}, threadstore.ErrThreadNotFound
@@ -248,14 +269,14 @@ func (s *fakeActorStore) SaveSpawnGroup(_ context.Context, meta threadstore.Spaw
 	return nil
 }
 
-func (s *fakeActorStore) ListSpawnResults(_ context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
+func (s *fakeActorStore) ListSpawnResults(_ context.Context, spawnGroupID int64) ([]threadstore.SpawnChildResult, error) {
 	results := s.spawnResults[spawnGroupID]
 	cloned := make([]threadstore.SpawnChildResult, len(results))
 	copy(cloned, results)
 	return cloned, nil
 }
 
-func (s *fakeActorStore) UpsertSpawnResult(_ context.Context, spawnGroupID string, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error) {
+func (s *fakeActorStore) UpsertSpawnResult(_ context.Context, spawnGroupID int64, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error) {
 	results := append(s.spawnResults[spawnGroupID], result)
 	s.spawnResults[spawnGroupID] = results
 	cloned := make([]threadstore.SpawnChildResult, len(results))
@@ -490,16 +511,16 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenKeepsBarrierOpen(t *testing.T
 	store.threads[100] = threadstore.ThreadMeta{
 		ID:                 100,
 		Status:             threadstore.ThreadStatusWaitingChildren,
-		ActiveSpawnGroupID: "sg_waiting",
+		ActiveSpawnGroupID: tid("sg_waiting"),
 		LastResponseID:     "resp_parent",
 	}
-	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
-		ID:             "sg_waiting",
+	store.spawnGroups[tid("sg_waiting")] = threadstore.SpawnGroupMeta{
+		ID:             tid("sg_waiting"),
 		ParentThreadID: 100,
 		Expected:       2,
 		Status:         threadstore.SpawnGroupStatusWaiting,
 	}
-	store.spawnResults["sg_waiting"] = []threadstore.SpawnChildResult{
+	store.spawnResults[tid("sg_waiting")] = []threadstore.SpawnChildResult{
 		{ChildThreadID: 101, Status: "completed"},
 	}
 
@@ -513,7 +534,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenKeepsBarrierOpen(t *testing.T
 	if len(store.savedSpawnGroups) == 0 {
 		t.Fatal("expected spawn group to be resaved with updated counts")
 	}
-	spawn := store.spawnGroups["sg_waiting"]
+	spawn := store.spawnGroups[tid("sg_waiting")]
 	if spawn.Status != threadstore.SpawnGroupStatusWaiting {
 		t.Fatalf("spawn status = %q, want waiting", spawn.Status)
 	}
@@ -537,18 +558,18 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	store.threads[100] = threadstore.ThreadMeta{
 		ID:                 100,
 		Status:             threadstore.ThreadStatusWaitingChildren,
-		ActiveSpawnGroupID: "sg_closed",
+		ActiveSpawnGroupID: tid("sg_closed"),
 		LastResponseID:     "resp_parent",
 		Model:              "gpt-5.4",
 	}
-	store.spawnGroups["sg_closed"] = threadstore.SpawnGroupMeta{
-		ID:             "sg_closed",
+	store.spawnGroups[tid("sg_closed")] = threadstore.SpawnGroupMeta{
+		ID:             tid("sg_closed"),
 		ParentThreadID: 100,
 		ParentCallID:   "call_parent",
 		Expected:       2,
 		Status:         threadstore.SpawnGroupStatusWaiting,
 	}
-	store.spawnResults["sg_closed"] = []threadstore.SpawnChildResult{
+	store.spawnResults[tid("sg_closed")] = []threadstore.SpawnChildResult{
 		{ChildThreadID: 101, Status: "completed", ChildResponseID: "resp_child_1", AssistantText: "One"},
 		{ChildThreadID: 102, Status: "completed", ChildResponseID: "resp_child_2", AssistantText: "Two"},
 	}
@@ -577,7 +598,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 		t.Fatalf("input ItemType = %q, want function_call_output", inputItem.ItemType)
 	}
 
-	spawn := store.spawnGroups["sg_closed"]
+	spawn := store.spawnGroups[tid("sg_closed")]
 	if spawn.AggregateSubmittedAt.IsZero() {
 		t.Fatal("expected AggregateSubmittedAt to be set")
 	}

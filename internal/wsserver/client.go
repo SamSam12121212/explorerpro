@@ -170,7 +170,7 @@ func (c *client) writeSnapshot(ctx context.Context, meta threadstore.ThreadMeta)
 		msg["owner"] = presentOwner(owner)
 	}
 
-	if meta.ActiveSpawnGroupID != "" {
+	if meta.ActiveSpawnGroupID > 0 {
 		if spawn, err := c.loadSpawnGroup(ctx, meta.ActiveSpawnGroupID); err == nil {
 			msg["active_spawn_group"] = presentSpawnGroup(spawn)
 		}
@@ -179,7 +179,7 @@ func (c *client) writeSnapshot(ctx context.Context, meta threadstore.ThreadMeta)
 	return c.writeJSONLocked(msg)
 }
 
-func (c *client) loadSpawnGroup(ctx context.Context, id string) (threadstore.SpawnGroupMeta, error) {
+func (c *client) loadSpawnGroup(ctx context.Context, id int64) (threadstore.SpawnGroupMeta, error) {
 	return c.cfg.store.LoadSpawnGroup(ctx, id)
 }
 
@@ -239,7 +239,7 @@ type streamSnapshotPayload struct {
 	Model              string `json:"model,omitempty"`
 	LastResponseID     string `json:"last_response_id,omitempty"`
 	ActiveResponseID   string `json:"active_response_id,omitempty"`
-	ActiveSpawnGroupID string `json:"active_spawn_group_id,omitempty"`
+	ActiveSpawnGroupID int64  `json:"active_spawn_group_id,omitempty"`
 	UpdatedAt          string `json:"updated_at,omitempty"`
 }
 

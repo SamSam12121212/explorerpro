@@ -56,6 +56,16 @@ SELECT nextval(pg_get_serial_sequence('threads', 'id'))
 	return threadID, nil
 }
 
+func (s *Store) ReserveSpawnGroupID(ctx context.Context) (int64, error) {
+	var spawnGroupID int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT nextval(pg_get_serial_sequence('spawn_groups', 'id'))
+`).Scan(&spawnGroupID); err != nil {
+		return 0, fmt.Errorf("reserve spawn group id: %w", err)
+	}
+	return spawnGroupID, nil
+}
+
 func (s *Store) CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO threads (
@@ -129,7 +139,7 @@ ON CONFLICT (id) DO NOTHING
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
-		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfZeroInt64(meta.ActiveSpawnGroupID),
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
@@ -239,7 +249,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
-		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfZeroInt64(meta.ActiveSpawnGroupID),
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
@@ -735,6 +745,8 @@ INSERT INTO spawn_groups (
     id,
     parent_thread_id,
     parent_call_id,
+    group_kind,
+    stable_key,
     expected,
     completed,
     failed,
@@ -756,13 +768,17 @@ INSERT INTO spawn_groups (
     $9,
     $10,
     $11,
-    $12
+    $12,
+    $13,
+    $14
 )
 ON CONFLICT (id) DO NOTHING
 `,
 		meta.ID,
 		meta.ParentThreadID,
 		meta.ParentCallID,
+		meta.GroupKind,
+		nullIfBlank(meta.StableKey),
 		meta.Expected,
 		meta.Completed,
 		meta.Failed,
@@ -774,7 +790,7 @@ ON CONFLICT (id) DO NOTHING
 		nonZeroTime(meta.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("insert spawn group %s: %w", meta.ID, err)
+		return fmt.Errorf("insert spawn group %d: %w", meta.ID, err)
 	}
 
 	for index, childThreadID := range childThreadIDs {
@@ -815,12 +831,103 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 	return nil
 }
 
+func (s *Store) LoadOrCreateDocumentQuerySpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("begin document query spawn group tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	row := tx.QueryRow(ctx, `
+INSERT INTO spawn_groups (
+    parent_thread_id,
+    parent_call_id,
+    group_kind,
+    stable_key,
+    expected,
+    completed,
+    failed,
+    cancelled,
+    status,
+    aggregate_submitted_at,
+    aggregate_cmd_id,
+    created_at,
+    updated_at
+) VALUES (
+    $1,
+    $2,
+    'document_query',
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12
+)
+ON CONFLICT (parent_thread_id, group_kind, stable_key) WHERE stable_key IS NOT NULL DO NOTHING
+RETURNING
+    id,
+    parent_thread_id,
+    parent_call_id,
+    group_kind,
+    COALESCE(stable_key, ''),
+    expected,
+    completed,
+    failed,
+    cancelled,
+    status,
+    aggregate_submitted_at,
+    COALESCE(aggregate_cmd_id, ''),
+    created_at,
+    updated_at
+`,
+		meta.ParentThreadID,
+		meta.ParentCallID,
+		meta.StableKey,
+		meta.Expected,
+		meta.Completed,
+		meta.Failed,
+		meta.Cancelled,
+		string(meta.Status),
+		nullIfZeroTime(meta.AggregateSubmittedAt),
+		nullIfBlank(meta.AggregateCmdID),
+		nonZeroTime(meta.CreatedAt),
+		nonZeroTime(meta.UpdatedAt),
+	)
+
+	resolved, err := scanSpawnGroupScanner(row)
+	if err != nil {
+		if !isNoRows(err) {
+			return threadstore.SpawnGroupMeta{}, fmt.Errorf("insert document query spawn group for thread %d: %w", meta.ParentThreadID, err)
+		}
+
+		resolved, err = loadDocumentQuerySpawnGroupTx(ctx, tx, meta.ParentThreadID, meta.StableKey)
+		if err != nil {
+			return threadstore.SpawnGroupMeta{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("commit document query spawn group tx: %w", err)
+	}
+
+	return resolved, nil
+}
+
 func (s *Store) SaveSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO spawn_groups (
     id,
     parent_thread_id,
     parent_call_id,
+    group_kind,
+    stable_key,
     expected,
     completed,
     failed,
@@ -842,11 +949,15 @@ INSERT INTO spawn_groups (
     $9,
     $10,
     $11,
-    $12
+    $12,
+    $13,
+    $14
 )
 ON CONFLICT (id) DO UPDATE SET
     parent_thread_id = EXCLUDED.parent_thread_id,
     parent_call_id = EXCLUDED.parent_call_id,
+    group_kind = EXCLUDED.group_kind,
+    stable_key = EXCLUDED.stable_key,
     expected = EXCLUDED.expected,
     completed = EXCLUDED.completed,
     failed = EXCLUDED.failed,
@@ -860,6 +971,8 @@ ON CONFLICT (id) DO UPDATE SET
 		meta.ID,
 		meta.ParentThreadID,
 		meta.ParentCallID,
+		meta.GroupKind,
+		nullIfBlank(meta.StableKey),
 		meta.Expected,
 		meta.Completed,
 		meta.Failed,
@@ -871,13 +984,13 @@ ON CONFLICT (id) DO UPDATE SET
 		nonZeroTime(meta.UpdatedAt),
 	)
 	if err != nil {
-		return fmt.Errorf("persist spawn group %s: %w", meta.ID, err)
+		return fmt.Errorf("persist spawn group %d: %w", meta.ID, err)
 	}
 
 	return nil
 }
 
-func (s *Store) UpsertSpawnResult(ctx context.Context, spawnGroupID string, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error) {
+func (s *Store) UpsertSpawnResult(ctx context.Context, spawnGroupID int64, result threadstore.SpawnChildResult) (bool, []threadstore.SpawnChildResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, nil, fmt.Errorf("begin spawn result tx: %w", err)
@@ -894,7 +1007,7 @@ WHERE spawn_group_id = $1 AND child_thread_id = $2
 FOR UPDATE
 `, spawnGroupID, result.ChildThreadID).Scan(&existingStatus)
 	if err != nil && !isNoRows(err) {
-		return false, nil, fmt.Errorf("load spawn result %s/%d: %w", spawnGroupID, result.ChildThreadID, err)
+		return false, nil, fmt.Errorf("load spawn result %d/%d: %w", spawnGroupID, result.ChildThreadID, err)
 	}
 	if existingStatus != "" && existingStatus != "pending" {
 		results, listErr := listSpawnResultsTx(ctx, tx, spawnGroupID)
@@ -956,7 +1069,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 		nonZeroTime(result.UpdatedAt),
 	)
 	if err != nil {
-		return false, nil, fmt.Errorf("upsert spawn result %s/%d: %w", spawnGroupID, result.ChildThreadID, err)
+		return false, nil, fmt.Errorf("upsert spawn result %d/%d: %w", spawnGroupID, result.ChildThreadID, err)
 	}
 
 	results, err := listSpawnResultsTx(ctx, tx, spawnGroupID)
@@ -992,7 +1105,7 @@ SELECT
     socket_expires_at,
     COALESCE(last_response_id, ''),
     COALESCE(active_response_id, ''),
-    COALESCE(active_spawn_group_id, ''),
+    COALESCE(active_spawn_group_id, 0),
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
@@ -1067,7 +1180,7 @@ SELECT
     socket_expires_at,
     COALESCE(last_response_id, ''),
     COALESCE(active_response_id, ''),
-    COALESCE(active_spawn_group_id, ''),
+    COALESCE(active_spawn_group_id, 0),
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
@@ -1180,7 +1293,7 @@ SELECT
     t.socket_expires_at,
     COALESCE(t.last_response_id, ''),
     COALESCE(t.active_response_id, ''),
-    COALESCE(t.active_spawn_group_id, ''),
+    COALESCE(t.active_spawn_group_id, 0),
     COALESCE(t.child_kind, ''),
     COALESCE(t.document_id, 0),
     COALESCE(t.document_phase, ''),
@@ -1470,12 +1583,14 @@ WHERE id = $1
 	return json.RawMessage(raw), nil
 }
 
-func (s *Store) LoadSpawnGroup(ctx context.Context, spawnGroupID string) (threadstore.SpawnGroupMeta, error) {
+func (s *Store) LoadSpawnGroup(ctx context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error) {
 	row := s.pool.QueryRow(ctx, `
 SELECT
     id,
     parent_thread_id,
     parent_call_id,
+    group_kind,
+    COALESCE(stable_key, ''),
     expected,
     completed,
     failed,
@@ -1489,33 +1604,14 @@ FROM spawn_groups
 WHERE id = $1
 `, spawnGroupID)
 
-	var meta threadstore.SpawnGroupMeta
-	var status string
-	var aggregateSubmittedAt *time.Time
-	if err := row.Scan(
-		&meta.ID,
-		&meta.ParentThreadID,
-		&meta.ParentCallID,
-		&meta.Expected,
-		&meta.Completed,
-		&meta.Failed,
-		&meta.Cancelled,
-		&status,
-		&aggregateSubmittedAt,
-		&meta.AggregateCmdID,
-		&meta.CreatedAt,
-		&meta.UpdatedAt,
-	); err != nil {
+	meta, err := scanSpawnGroupScanner(row)
+	if err != nil {
 		if isNoRows(err) {
 			return threadstore.SpawnGroupMeta{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load spawn group %s: %w", spawnGroupID, err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load spawn group %d: %w", spawnGroupID, err)
 	}
 
-	meta.Status = threadstore.SpawnGroupStatus(status)
-	if aggregateSubmittedAt != nil {
-		meta.AggregateSubmittedAt = aggregateSubmittedAt.UTC()
-	}
 	return meta, nil
 }
 
@@ -1525,6 +1621,8 @@ SELECT
     id,
     parent_thread_id,
     parent_call_id,
+    group_kind,
+    COALESCE(stable_key, ''),
     expected,
     completed,
     failed,
@@ -1545,28 +1643,9 @@ ORDER BY created_at ASC, id ASC
 
 	var groups []threadstore.SpawnGroupMeta
 	for rows.Next() {
-		var meta threadstore.SpawnGroupMeta
-		var status string
-		var aggregateSubmittedAt *time.Time
-		if err := rows.Scan(
-			&meta.ID,
-			&meta.ParentThreadID,
-			&meta.ParentCallID,
-			&meta.Expected,
-			&meta.Completed,
-			&meta.Failed,
-			&meta.Cancelled,
-			&status,
-			&aggregateSubmittedAt,
-			&meta.AggregateCmdID,
-			&meta.CreatedAt,
-			&meta.UpdatedAt,
-		); err != nil {
+		meta, err := scanSpawnGroupScanner(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan spawn group row: %w", err)
-		}
-		meta.Status = threadstore.SpawnGroupStatus(status)
-		if aggregateSubmittedAt != nil {
-			meta.AggregateSubmittedAt = aggregateSubmittedAt.UTC()
 		}
 		groups = append(groups, meta)
 	}
@@ -1578,7 +1657,7 @@ ORDER BY created_at ASC, id ASC
 	return groups, nil
 }
 
-func (s *Store) LoadSpawnGroupChildThreadIDs(ctx context.Context, spawnGroupID string) ([]int64, error) {
+func (s *Store) LoadSpawnGroupChildThreadIDs(ctx context.Context, spawnGroupID int64) ([]int64, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT child_thread_id
 FROM spawn_group_children
@@ -1586,7 +1665,7 @@ WHERE spawn_group_id = $1
 ORDER BY child_index ASC NULLS LAST, child_thread_id ASC
 `, spawnGroupID)
 	if err != nil {
-		return nil, fmt.Errorf("list spawn group children %s: %w", spawnGroupID, err)
+		return nil, fmt.Errorf("list spawn group children %d: %w", spawnGroupID, err)
 	}
 	defer rows.Close()
 
@@ -1605,7 +1684,7 @@ ORDER BY child_index ASC NULLS LAST, child_thread_id ASC
 	return ids, nil
 }
 
-func (s *Store) ListSpawnResults(ctx context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
+func (s *Store) ListSpawnResults(ctx context.Context, spawnGroupID int64) ([]threadstore.SpawnChildResult, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT
     sgc.child_thread_id,
@@ -1623,7 +1702,7 @@ WHERE sgc.spawn_group_id = $1 AND sgc.status <> 'pending'
 ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 `, spawnGroupID)
 	if err != nil {
-		return nil, fmt.Errorf("list spawn results %s: %w", spawnGroupID, err)
+		return nil, fmt.Errorf("list spawn results %d: %w", spawnGroupID, err)
 	}
 	defer rows.Close()
 
@@ -1650,6 +1729,73 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 	}
 
 	return results, nil
+}
+
+func loadDocumentQuerySpawnGroupTx(ctx context.Context, tx pgx.Tx, parentThreadID int64, stableKey string) (threadstore.SpawnGroupMeta, error) {
+	row := tx.QueryRow(ctx, `
+SELECT
+    id,
+    parent_thread_id,
+    parent_call_id,
+    group_kind,
+    COALESCE(stable_key, ''),
+    expected,
+    completed,
+    failed,
+    cancelled,
+    status,
+    aggregate_submitted_at,
+    COALESCE(aggregate_cmd_id, ''),
+    created_at,
+    updated_at
+FROM spawn_groups
+WHERE parent_thread_id = $1
+  AND group_kind = 'document_query'
+  AND stable_key = $2
+`, parentThreadID, stableKey)
+
+	meta, err := scanSpawnGroupScanner(row)
+	if err != nil {
+		if isNoRows(err) {
+			return threadstore.SpawnGroupMeta{}, threadstore.ErrThreadNotFound
+		}
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load document query spawn group for thread %d/%s: %w", parentThreadID, stableKey, err)
+	}
+	return meta, nil
+}
+
+type pgxScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSpawnGroupScanner(scanner pgxScanner) (threadstore.SpawnGroupMeta, error) {
+	var meta threadstore.SpawnGroupMeta
+	var status string
+	var aggregateSubmittedAt *time.Time
+	if err := scanner.Scan(
+		&meta.ID,
+		&meta.ParentThreadID,
+		&meta.ParentCallID,
+		&meta.GroupKind,
+		&meta.StableKey,
+		&meta.Expected,
+		&meta.Completed,
+		&meta.Failed,
+		&meta.Cancelled,
+		&status,
+		&aggregateSubmittedAt,
+		&meta.AggregateCmdID,
+		&meta.CreatedAt,
+		&meta.UpdatedAt,
+	); err != nil {
+		return threadstore.SpawnGroupMeta{}, err
+	}
+
+	meta.Status = threadstore.SpawnGroupStatus(status)
+	if aggregateSubmittedAt != nil {
+		meta.AggregateSubmittedAt = aggregateSubmittedAt.UTC()
+	}
+	return meta, nil
 }
 
 type pgxExec interface {
@@ -1896,7 +2042,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.SocketExpiresAt),
 		nullIfBlank(meta.LastResponseID),
 		nullIfBlank(meta.ActiveResponseID),
-		nullIfBlank(meta.ActiveSpawnGroupID),
+		nullIfZeroInt64(meta.ActiveSpawnGroupID),
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
@@ -1930,7 +2076,7 @@ SELECT
     socket_expires_at,
     COALESCE(last_response_id, ''),
     COALESCE(active_response_id, ''),
-    COALESCE(active_spawn_group_id, ''),
+    COALESCE(active_spawn_group_id, 0),
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
@@ -2037,7 +2183,7 @@ WHERE thread_id = $1
 	return current + 1, nil
 }
 
-func listSpawnResultsTx(ctx context.Context, db pgxQueryer, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
+func listSpawnResultsTx(ctx context.Context, db pgxQueryer, spawnGroupID int64) ([]threadstore.SpawnChildResult, error) {
 	rows, err := db.Query(ctx, `
 SELECT
     sgc.child_thread_id,
@@ -2055,7 +2201,7 @@ WHERE sgc.spawn_group_id = $1 AND sgc.status <> 'pending'
 ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 `, spawnGroupID)
 	if err != nil {
-		return nil, fmt.Errorf("list spawn results %s: %w", spawnGroupID, err)
+		return nil, fmt.Errorf("list spawn results %d: %w", spawnGroupID, err)
 	}
 	defer rows.Close()
 

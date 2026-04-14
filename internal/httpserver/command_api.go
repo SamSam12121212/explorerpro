@@ -68,10 +68,11 @@ type submitCommandRequest struct {
 }
 
 type threadRoute struct {
-	ThreadID    int64
-	Resource    string
-	ResourceID  string
-	Subresource string
+	ThreadID     int64
+	Resource     string
+	ResourceID   string
+	SpawnGroupID int64
+	Subresource  string
 }
 
 type listQuery struct {
@@ -148,7 +149,7 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 		a.handleGetResponse(w, r, route.ThreadID, route.ResourceID)
 	case "spawn-groups":
 		switch {
-		case route.ResourceID == "":
+		case route.SpawnGroupID <= 0:
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w, http.MethodGet)
 				return
@@ -159,13 +160,13 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 				methodNotAllowed(w, http.MethodGet)
 				return
 			}
-			a.handleGetSpawnGroup(w, r, route.ThreadID, route.ResourceID)
+			a.handleGetSpawnGroup(w, r, route.ThreadID, route.SpawnGroupID)
 		case route.Subresource == "results":
 			if r.Method != http.MethodGet {
 				methodNotAllowed(w, http.MethodGet)
 				return
 			}
-			a.handleListSpawnGroupResults(w, r, route.ThreadID, route.ResourceID)
+			a.handleListSpawnGroupResults(w, r, route.ThreadID, route.SpawnGroupID)
 		default:
 			http.NotFound(w, r)
 		}
@@ -506,10 +507,10 @@ func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, thr
 		return
 	}
 
-	if meta.ActiveSpawnGroupID != "" {
+	if meta.ActiveSpawnGroupID > 0 {
 		spawn, err := a.loadSpawnGroupForRead(r.Context(), meta.ActiveSpawnGroupID)
 		if err != nil && !errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %s: %v", meta.ActiveSpawnGroupID, err))
+			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %d: %v", meta.ActiveSpawnGroupID, err))
 			return
 		}
 		if err == nil {
@@ -661,7 +662,7 @@ func (a *commandAPI) handleListSpawnGroups(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID string) {
+func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID int64) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
@@ -674,20 +675,20 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 	spawn, err := a.loadSpawnGroupForRead(r.Context(), spawnGroupID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found", spawnGroupID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %d not found", spawnGroupID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %s: %v", spawnGroupID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %d: %v", spawnGroupID, err))
 		return
 	}
 	if spawn.ParentThreadID != threadID {
-		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %d", spawnGroupID, threadID))
+		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %d not found for thread %d", spawnGroupID, threadID))
 		return
 	}
 
 	childThreadIDs, err := a.loadSpawnGroupChildThreadIDsForRead(r.Context(), spawnGroupID)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load child thread ids for spawn group %s: %v", spawnGroupID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load child thread ids for spawn group %d: %v", spawnGroupID, err))
 		return
 	}
 
@@ -698,7 +699,7 @@ func (a *commandAPI) handleGetSpawnGroup(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID string) {
+func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.Request, threadID int64, spawnGroupID int64) {
 	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
@@ -711,20 +712,20 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 	spawn, err := a.loadSpawnGroupForRead(r.Context(), spawnGroupID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found", spawnGroupID))
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %d not found", spawnGroupID))
 			return
 		}
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %s: %v", spawnGroupID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load spawn group %d: %v", spawnGroupID, err))
 		return
 	}
 	if spawn.ParentThreadID != threadID {
-		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %s not found for thread %d", spawnGroupID, threadID))
+		writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("spawn group %d not found for thread %d", spawnGroupID, threadID))
 		return
 	}
 
 	results, err := a.listSpawnResultsForRead(r.Context(), spawnGroupID)
 	if err != nil {
-		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list results for spawn group %s: %v", spawnGroupID, err))
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list results for spawn group %d: %v", spawnGroupID, err))
 		return
 	}
 
@@ -745,7 +746,7 @@ func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID int64) (thr
 	return a.store.LoadThread(ctx, threadID)
 }
 
-func (a *commandAPI) loadSpawnGroupForRead(ctx context.Context, spawnGroupID string) (threadstore.SpawnGroupMeta, error) {
+func (a *commandAPI) loadSpawnGroupForRead(ctx context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error) {
 	return a.store.LoadSpawnGroup(ctx, spawnGroupID)
 }
 
@@ -779,11 +780,11 @@ func (a *commandAPI) listSpawnGroupsByParentForRead(ctx context.Context, parentT
 	return a.store.ListSpawnGroupsByParent(ctx, parentThreadID)
 }
 
-func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID string) ([]int64, error) {
+func (a *commandAPI) loadSpawnGroupChildThreadIDsForRead(ctx context.Context, spawnGroupID int64) ([]int64, error) {
 	return a.store.LoadSpawnGroupChildThreadIDs(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID string) ([]threadstore.SpawnChildResult, error) {
+func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID int64) ([]threadstore.SpawnChildResult, error) {
 	return a.store.ListSpawnResults(ctx, spawnGroupID)
 }
 
@@ -888,14 +889,27 @@ func parseThreadRoute(path string) (threadRoute, bool) {
 			return threadRoute{}, false
 		}
 		route.Resource = parts[1]
-		route.ResourceID = parts[2]
+		switch route.Resource {
+		case "spawn-groups":
+			spawnGroupID, err := parsePositiveInt64(parts[2])
+			if err != nil {
+				return threadRoute{}, false
+			}
+			route.SpawnGroupID = spawnGroupID
+		default:
+			route.ResourceID = parts[2]
+		}
 	}
 	if len(parts) == 4 {
 		if parts[1] != "spawn-groups" || parts[2] == "" || parts[3] == "" {
 			return threadRoute{}, false
 		}
 		route.Resource = parts[1]
-		route.ResourceID = parts[2]
+		spawnGroupID, err := parsePositiveInt64(parts[2])
+		if err != nil {
+			return threadRoute{}, false
+		}
+		route.SpawnGroupID = spawnGroupID
 		route.Subresource = parts[3]
 	}
 

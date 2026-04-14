@@ -93,7 +93,7 @@ type ReconcileBody struct {
 }
 
 type ChildResultBody struct {
-	SpawnGroupID    string `json:"spawn_group_id"`
+	SpawnGroupID    int64  `json:"spawn_group_id"`
 	ChildThreadID   int64  `json:"child_thread_id"`
 	ChildResponseID string `json:"child_response_id,omitempty"`
 	Status          string `json:"status,omitempty"`
@@ -169,7 +169,7 @@ func LogAttrs(cmd Command) []any {
 		}
 	case KindThreadChildCompleted, KindThreadChildFailed:
 		if body, err := cmd.ChildResultBody(); err == nil {
-			if spawnGroupID := strings.TrimSpace(body.SpawnGroupID); spawnGroupID != "" {
+			if spawnGroupID := body.SpawnGroupID; spawnGroupID > 0 {
 				attrs = append(attrs, "spawn_group_id", spawnGroupID)
 			}
 			if childThreadID := body.ChildThreadID; childThreadID > 0 {
@@ -351,7 +351,7 @@ func (c Command) ChildResultBody() (ChildResultBody, error) {
 		return ChildResultBody{}, err
 	}
 
-	if strings.TrimSpace(body.SpawnGroupID) == "" {
+	if body.SpawnGroupID <= 0 {
 		return ChildResultBody{}, fmt.Errorf("child result missing spawn_group_id")
 	}
 
