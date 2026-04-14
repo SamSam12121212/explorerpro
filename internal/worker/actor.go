@@ -2289,12 +2289,8 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					"events_received", eventCount,
 				}, meta)...,
 			)
+			publishMeta := meta
 			childResultStatus, ok := childInvocationResultStatus(meta.Status, childInvocationResultStatusForTerminalEvent(event.Type))
-			if shouldPublishChildInvocationResult(meta, childResultStatus, ok) {
-				if err := a.publishChildInvocationResult(meta, childResultStatus); err != nil {
-					return err
-				}
-			}
 			if shouldReleaseTerminalChildResources(meta) {
 				if err := a.releaseTerminalChildResources(&meta); err != nil {
 					return err
@@ -2302,6 +2298,11 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			}
 			if err := a.clearCompletedInvocationState(&meta); err != nil {
 				return err
+			}
+			if shouldPublishChildInvocationResult(publishMeta, childResultStatus, ok) {
+				if err := a.publishChildInvocationResult(publishMeta, childResultStatus); err != nil {
+					return err
+				}
 			}
 			if statusSupportsIdleSocket(meta.Status) {
 				a.startIdleLoop(meta)

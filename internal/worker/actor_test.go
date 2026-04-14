@@ -3113,6 +3113,83 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	}
 }
 
+func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	spawnGroupID := stableDocumentSpawnGroupID("thread_parent", "call_1")
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:                 "thread_parent",
+		RootThreadID:       "thread_parent",
+		Model:              "gpt-5.4",
+		Status:             threadstore.ThreadStatusWaitingChildren,
+		ActiveSpawnGroupID: spawnGroupID,
+	}
+
+	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup")
+	store.threads[warmupThreadID] = threadstore.ThreadMeta{
+		ID:                 warmupThreadID,
+		RootThreadID:       "thread_parent",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_1",
+		Depth:              1,
+		Status:             threadstore.ThreadStatusRunning,
+		Model:              "gpt-5.4-mini",
+		OwnerWorkerID:      "worker-child",
+		SocketGeneration:   1,
+		ActiveSpawnGroupID: spawnGroupID,
+		MetadataJSON:       `{"document_id":"doc_1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+	}
+	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
+		ID:             spawnGroupID,
+		ParentThreadID: "thread_parent",
+		ParentCallID:   "call_1",
+		Expected:       1,
+		Status:         threadstore.SpawnGroupStatusWaiting,
+	}
+
+	parentActor := newActorRecoveryHarness(t, store, nil)
+	parentActor.docStore = &fakeDocActorDocStore{
+		docs: map[string]docstore.Document{
+			"doc_1": {ID: "doc_1", Filename: "report.pdf"},
+		},
+	}
+	var queryStarts []agentcmd.Command
+	parentActor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		queryStarts = append(queryStarts, cmd)
+		return nil
+	}
+
+	childConn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_warmup"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_warmup"}}`),
+		},
+	}
+	childActor := newActorRecoveryHarness(t, store, childConn)
+	childActor.threadID = warmupThreadID
+	childActor.workerID = "worker-child"
+	childActor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		return parentActor.handleChildResult(cmd, "completed")
+	}
+
+	if err := childActor.streamUntilTerminal(store.threads[warmupThreadID]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	if len(queryStarts) != 1 {
+		t.Fatalf("queryStarts = %d, want 1", len(queryStarts))
+	}
+
+	final := store.threads[warmupThreadID]
+	if final.ParentCallID != "call_1" {
+		t.Fatalf("final.ParentCallID = %q, want call_1", final.ParentCallID)
+	}
+	if final.ActiveSpawnGroupID != spawnGroupID {
+		t.Fatalf("final.ActiveSpawnGroupID = %q, want %q", final.ActiveSpawnGroupID, spawnGroupID)
+	}
+}
+
 func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T) {
 	t.Parallel()
 
