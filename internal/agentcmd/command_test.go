@@ -214,6 +214,121 @@ func TestChildResultBody(t *testing.T) {
 	}
 }
 
+func TestInputKind(t *testing.T) {
+	tests := []struct {
+		name             string
+		inputItems       json.RawMessage
+		preparedInputRef string
+		want             string
+	}{
+		{
+			name:             "prepared input",
+			preparedInputRef: "blob://prepared-inputs/pi_123.json",
+			want:             "prepared_input",
+		},
+		{
+			name:       "user message",
+			inputItems: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`),
+			want:       "user_message",
+		},
+		{
+			name:       "function call output",
+			inputItems: json.RawMessage(`[{"type":"function_call_output","call_id":"call_123","output":{"ok":true}}]`),
+			want:       "function_call_output",
+		},
+		{
+			name: "none",
+			want: "none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InputKind(tt.inputItems, tt.preparedInputRef); got != tt.want {
+				t.Fatalf("InputKind() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLogAttrs(t *testing.T) {
+	t.Run("start command", func(t *testing.T) {
+		cmd, err := Decode([]byte(`{
+			"cmd_id":"cmd_start",
+			"kind":"thread.start",
+			"thread_id":"thread_123",
+			"root_thread_id":"thread_root",
+			"body":{
+				"model":"gpt-5.4",
+				"initial_input":[{"type":"message","role":"user"}],
+				"previous_response_id":"resp_prev"
+			}
+		}`))
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		attrs := attrsToMap(LogAttrs(cmd))
+		if attrs["cmd_id"] != "cmd_start" {
+			t.Fatalf("cmd_id = %v, want cmd_start", attrs["cmd_id"])
+		}
+		if attrs["root_thread_id"] != "thread_root" {
+			t.Fatalf("root_thread_id = %v, want thread_root", attrs["root_thread_id"])
+		}
+		if attrs["input_kind"] != "user_message" {
+			t.Fatalf("input_kind = %v, want user_message", attrs["input_kind"])
+		}
+		if attrs["has_previous_response_id"] != true {
+			t.Fatalf("has_previous_response_id = %v, want true", attrs["has_previous_response_id"])
+		}
+	})
+
+	t.Run("child result command", func(t *testing.T) {
+		cmd, err := Decode([]byte(`{
+			"cmd_id":"cmd_child",
+			"kind":"thread.child_completed",
+			"thread_id":"thread_parent",
+			"root_thread_id":"thread_root",
+			"causation_id":"resp_child",
+			"body":{
+				"spawn_group_id":"sg_123",
+				"child_thread_id":"thread_child",
+				"child_response_id":"resp_child",
+				"status":"completed"
+			}
+		}`))
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		attrs := attrsToMap(LogAttrs(cmd))
+		if attrs["spawn_group_id"] != "sg_123" {
+			t.Fatalf("spawn_group_id = %v, want sg_123", attrs["spawn_group_id"])
+		}
+		if attrs["child_thread_id"] != "thread_child" {
+			t.Fatalf("child_thread_id = %v, want thread_child", attrs["child_thread_id"])
+		}
+		if attrs["child_response_id"] != "resp_child" {
+			t.Fatalf("child_response_id = %v, want resp_child", attrs["child_response_id"])
+		}
+		if attrs["child_status"] != "completed" {
+			t.Fatalf("child_status = %v, want completed", attrs["child_status"])
+		}
+	})
+}
+
+func attrsToMap(attrs []any) map[string]any {
+	mapped := make(map[string]any, len(attrs)/2)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok {
+			continue
+		}
+		mapped[key] = attrs[i+1]
+	}
+	return mapped
+}
+
 func TestReconcileBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
 		"cmd_id":"cmd_recover",

@@ -181,12 +181,6 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	a.logger.Info("create thread request received",
-		"model", req.Model,
-		"has_previous_response_id", strings.TrimSpace(req.PreviousResponseID) != "",
-		"has_tools", len(req.Tools) > 0,
-	)
-
 	if strings.TrimSpace(req.Model) == "" {
 		writeErrorJSON(w, http.StatusBadRequest, "model is required")
 		return
@@ -301,6 +295,13 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		Body:         body,
 	}
 
+	a.logger.Info("create thread request received",
+		append(agentcmd.LogAttrs(cmd),
+			"attached_document_count", len(attachedDocumentIDs),
+			"has_tools", len(tools) > 0,
+		)...,
+	)
+
 	subject := agentcmd.DispatchStartSubject
 	if err := a.publishCommand(r.Context(), subject, cmd); err != nil {
 		writeErrorJSON(w, http.StatusServiceUnavailable, err.Error())
@@ -364,12 +365,6 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	a.logger.Info("submit command request received",
-		"thread_id", threadID,
-		"kind", req.Kind,
-		"thread_status", meta.Status,
-	)
 
 	if req.Kind == "" {
 		writeErrorJSON(w, http.StatusBadRequest, "kind is required")
@@ -440,6 +435,13 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		CreatedAt:                time.Now().UTC().Format(time.RFC3339),
 		Body:                     body,
 	}
+
+	a.logger.Info("submit command request received",
+		append(agentcmd.LogAttrs(cmd),
+			"thread_status", meta.Status,
+			"attached_document_count", len(attachedDocumentIDs),
+		)...,
+	)
 
 	subject, routedDirect, owner, err := a.resolveCommandSubject(r.Context(), meta.ID, cmd.Kind)
 	if err != nil {
@@ -824,10 +826,9 @@ func (a *commandAPI) publishCommand(ctx context.Context, subject string, cmd age
 	}
 
 	a.logger.Info("published command",
-		"cmd_id", cmd.CmdID,
-		"kind", cmd.Kind,
-		"thread_id", cmd.ThreadID,
-		"subject", subject,
+		append(agentcmd.LogAttrs(cmd),
+			"subject", subject,
+		)...,
 	)
 
 	return nil

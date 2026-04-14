@@ -215,10 +215,9 @@ func (s *Service) dispatchMessage(ctx context.Context, msg *nats.Msg) error {
 	}
 
 	s.logger.Info("command dispatched to actor",
-		"cmd_id", cmd.CmdID,
-		"kind", cmd.Kind,
-		"thread_id", cmd.ThreadID,
-		"subject", msg.Subject,
+		append(agentcmd.LogAttrs(cmd),
+			"subject", msg.Subject,
+		)...,
 	)
 
 	actor := s.getActor(ctx, cmd.ThreadID)

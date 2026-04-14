@@ -103,6 +103,94 @@ type ChildResultBody struct {
 	ErrorRef        string `json:"error_ref,omitempty"`
 }
 
+func InputKind(inputItems json.RawMessage, preparedInputRef string) string {
+	if strings.TrimSpace(preparedInputRef) != "" {
+		return "prepared_input"
+	}
+
+	items := decodeInputItems(inputItems)
+	if len(items) == 0 {
+		return "none"
+	}
+
+	itemType := strings.TrimSpace(stringValue(items[0]["type"]))
+	switch itemType {
+	case "message":
+		if strings.TrimSpace(stringValue(items[0]["role"])) == "user" {
+			return "user_message"
+		}
+		return "message"
+	case "":
+		return "input_items"
+	default:
+		return itemType
+	}
+}
+
+func LogAttrs(cmd Command) []any {
+	attrs := []any{
+		"cmd_id", cmd.CmdID,
+		"kind", cmd.Kind,
+		"thread_id", cmd.ThreadID,
+	}
+	if rootThreadID := strings.TrimSpace(cmd.RootThreadID); rootThreadID != "" {
+		attrs = append(attrs, "root_thread_id", rootThreadID)
+	}
+	if causationID := strings.TrimSpace(cmd.CausationID); causationID != "" {
+		attrs = append(attrs, "causation_id", causationID)
+	}
+	if correlationID := strings.TrimSpace(cmd.CorrelationID); correlationID != "" {
+		attrs = append(attrs, "correlation_id", correlationID)
+	}
+
+	switch cmd.Kind {
+	case KindThreadStart:
+		if body, err := cmd.StartBody(); err == nil {
+			attrs = append(attrs,
+				"model", body.Model,
+				"input_kind", InputKind(body.InitialInput, body.PreparedInputRef),
+				"has_previous_response_id", strings.TrimSpace(body.PreviousResponseID) != "",
+			)
+		}
+	case KindThreadResume:
+		if body, err := cmd.ResumeBody(); err == nil {
+			attrs = append(attrs, "input_kind", InputKind(body.InputItems, body.PreparedInputRef))
+		}
+	case KindThreadSubmitToolOutput:
+		if body, err := cmd.SubmitToolOutputBody(); err == nil {
+			callID := strings.TrimSpace(body.CallID)
+			if callID == "" {
+				callID = functionCallOutputCallID(body.OutputItem)
+			}
+			attrs = append(attrs, "input_kind", "function_call_output")
+			if callID != "" {
+				attrs = append(attrs, "call_id", callID)
+			}
+		}
+	case KindThreadChildCompleted, KindThreadChildFailed:
+		if body, err := cmd.ChildResultBody(); err == nil {
+			if spawnGroupID := strings.TrimSpace(body.SpawnGroupID); spawnGroupID != "" {
+				attrs = append(attrs, "spawn_group_id", spawnGroupID)
+			}
+			if childThreadID := strings.TrimSpace(body.ChildThreadID); childThreadID != "" {
+				attrs = append(attrs, "child_thread_id", childThreadID)
+			}
+			childStatus := strings.TrimSpace(body.Status)
+			if childStatus == "" {
+				childStatus = childStatusForKind(cmd.Kind)
+			}
+			if childStatus != "" {
+				attrs = append(attrs, "child_status", childStatus)
+			}
+			if childResponseID := strings.TrimSpace(body.ChildResponseID); childResponseID != "" {
+				attrs = append(attrs, "child_response_id", childResponseID)
+			}
+		}
+	}
+
+	return attrs
+}
+
 func Decode(raw []byte) (Command, error) {
 	var cmd Command
 	if err := json.Unmarshal(raw, &cmd); err != nil {
@@ -126,6 +214,40 @@ func Decode(raw []byte) (Command, error) {
 	}
 
 	return cmd, nil
+}
+
+func decodeInputItems(raw json.RawMessage) []map[string]any {
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	return items
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func childStatusForKind(kind Kind) string {
+	switch kind {
+	case KindThreadChildCompleted:
+		return "completed"
+	case KindThreadChildFailed:
+		return "failed"
+	default:
+		return ""
+	}
+}
+
+func functionCallOutputCallID(raw json.RawMessage) string {
+	var payload struct {
+		CallID string `json:"call_id"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.CallID)
 }
 
 func (c Command) StartBody() (StartBody, error) {

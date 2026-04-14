@@ -268,8 +268,10 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 	}
 
 	a.logger.Info("processing command",
-		"cmd_id", queued.cmd.CmdID,
-		"kind", queued.cmd.Kind,
+		a.appendCommandLifecycleGraphAttrs([]any{
+			"cmd_id", queued.cmd.CmdID,
+			"kind", queued.cmd.Kind,
+		}, queued.cmd)...,
 	)
 
 	if err := a.processCommand(queued.cmd); err != nil {
@@ -322,11 +324,48 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 	}
 
 	a.logger.Info("command completed",
-		"cmd_id", queued.cmd.CmdID,
-		"kind", queued.cmd.Kind,
+		a.appendCommandLifecycleGraphAttrs([]any{
+			"cmd_id", queued.cmd.CmdID,
+			"kind", queued.cmd.Kind,
+		}, queued.cmd)...,
 	)
 
 	return queued.msg.Ack()
+}
+
+func (a *threadActor) appendCommandLifecycleGraphAttrs(attrs []any, cmd agentcmd.Command) []any {
+	meta := a.commandLifecycleThreadMeta(cmd)
+	return appendThreadGraphAttrs(attrs, meta)
+}
+
+func (a *threadActor) commandLifecycleThreadMeta(cmd agentcmd.Command) threadstore.ThreadMeta {
+	fallback := threadstore.ThreadMeta{
+		ID:           cmd.ThreadID,
+		RootThreadID: strings.TrimSpace(cmd.RootThreadID),
+	}
+
+	a.mu.Lock()
+	current := a.meta
+	a.mu.Unlock()
+	if current.ID == cmd.ThreadID {
+		if strings.TrimSpace(current.RootThreadID) == "" {
+			current.RootThreadID = defaultRootThreadID(fallback)
+		}
+		return current
+	}
+
+	if a.store == nil {
+		return fallback
+	}
+
+	meta, err := a.store.LoadThread(a.ctx, cmd.ThreadID)
+	if err != nil {
+		return fallback
+	}
+	if strings.TrimSpace(meta.RootThreadID) == "" {
+		meta.RootThreadID = defaultRootThreadID(fallback)
+	}
+	return meta
 }
 
 func (a *threadActor) handleTransientCommandError(queued queuedCommand, cause error) error {
@@ -844,6 +883,7 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 			"spawn_group_id", spawnGroupID,
 			"child_thread_id", body.ChildThreadID,
 			"child_status", status,
+			"child_response_id", body.ChildResponseID,
 			"completed_children", spawn.Completed,
 			"failed_children", spawn.Failed,
 			"cancelled_children", spawn.Cancelled,
@@ -993,7 +1033,10 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 			"child_kind", "document_query",
 			"lineage_source", "warmup",
 			"document_id", documentID,
+			"document_name", childMetadata["document_name"],
+			"phase", "query",
 			"model", model,
+			"has_previous_response_id", true,
 		}, parentMeta)...,
 	)
 	return true, nil
@@ -2011,6 +2054,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			return err
 		}
 		eventCount++
+		responseID := event.ResolvedResponseID()
 
 		if strings.HasSuffix(string(event.Type), ".delta") {
 			state := deltaLogs[event.Type]
@@ -2023,23 +2067,21 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				state.firstRaw = raw
 				state.lastRaw = raw
 				state.firstLogged = true
-				a.logger.Info("received openai event", "event_type", event.Type)
+				a.logOpenAIEvent(meta, responseID, "event_type", event.Type)
 			} else {
 				state.lastRaw = string(event.Raw)
 				state.suppressedAny = true
 			}
 		} else if event.Type == openaiws.EventTypeResponseOutputItemAdded {
-			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
-			a.logOutputItemEvent(event)
+			a.flushDeltaLogForDoneEvent(deltaLogs, meta, responseID, event.Type)
+			a.logOutputItemEvent(meta, responseID, event)
 		} else if event.Type == openaiws.EventTypeResponseOutputItemDone {
-			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
-			a.logOutputItemEvent(event)
+			a.flushDeltaLogForDoneEvent(deltaLogs, meta, responseID, event.Type)
+			a.logOutputItemEvent(meta, responseID, event)
 		} else {
-			a.flushDeltaLogForDoneEvent(deltaLogs, event.Type)
-			a.logger.Info("received openai event", "event_type", event.Type)
+			a.flushDeltaLogForDoneEvent(deltaLogs, meta, responseID, event.Type)
+			a.logOpenAIEvent(meta, responseID, "event_type", event.Type)
 		}
-
-		responseID := event.ResolvedResponseID()
 		if !strings.HasSuffix(string(event.Type), ".delta") {
 			if a.history == nil {
 				return fmt.Errorf("thread history store is not configured")
@@ -2104,8 +2146,10 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					}
 				}
 				a.logger.Info("output item received",
-					"item_type", itemType,
-					"response_id", responseID,
+					appendThreadGraphAttrs(append([]any{
+						"item_type", itemType,
+						"response_id", responseID,
+					}, outputItemSemanticAttrs(itemRaw)...), meta)...,
 				)
 				if _, err := a.appendItem(threadstore.ItemLogEntry{
 					ThreadID:    meta.ID,
@@ -2189,7 +2233,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		if event.Type.IsTerminal() {
-			a.flushAllDeltaLogs(deltaLogs)
+			a.flushAllDeltaLogs(deltaLogs, meta, responseID)
 			a.logger.Info("stream completed",
 				appendThreadGraphAttrs([]any{
 					"final_status", meta.Status,
@@ -2215,22 +2259,22 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	}
 }
 
-func (a *threadActor) flushDeltaLogForDoneEvent(deltaLogs map[openaiws.EventType]*deltaLogState, eventType openaiws.EventType) {
+func (a *threadActor) flushDeltaLogForDoneEvent(deltaLogs map[openaiws.EventType]*deltaLogState, meta threadstore.ThreadMeta, responseID string, eventType openaiws.EventType) {
 	if !strings.HasSuffix(string(eventType), ".done") {
 		return
 	}
 
 	deltaType := openaiws.EventType(strings.TrimSuffix(string(eventType), ".done") + ".delta")
-	a.flushDeltaLog(deltaLogs, deltaType)
+	a.flushDeltaLog(deltaLogs, meta, responseID, deltaType)
 }
 
-func (a *threadActor) flushAllDeltaLogs(deltaLogs map[openaiws.EventType]*deltaLogState) {
+func (a *threadActor) flushAllDeltaLogs(deltaLogs map[openaiws.EventType]*deltaLogState, meta threadstore.ThreadMeta, responseID string) {
 	for eventType := range deltaLogs {
-		a.flushDeltaLog(deltaLogs, eventType)
+		a.flushDeltaLog(deltaLogs, meta, responseID, eventType)
 	}
 }
 
-func (a *threadActor) flushDeltaLog(deltaLogs map[openaiws.EventType]*deltaLogState, eventType openaiws.EventType) {
+func (a *threadActor) flushDeltaLog(deltaLogs map[openaiws.EventType]*deltaLogState, meta threadstore.ThreadMeta, responseID string, eventType openaiws.EventType) {
 	state := deltaLogs[eventType]
 	if state == nil {
 		return
@@ -2241,7 +2285,7 @@ func (a *threadActor) flushDeltaLog(deltaLogs map[openaiws.EventType]*deltaLogSt
 		return
 	}
 
-	a.logger.Info("received openai event", "event_type", eventType)
+	a.logOpenAIEvent(meta, responseID, "event_type", eventType)
 }
 
 func (a *threadActor) startIdleLoop(meta threadstore.ThreadMeta) {
@@ -2637,12 +2681,25 @@ func itemTypeFromRaw(raw json.RawMessage) string {
 	return item.Type
 }
 
-func (a *threadActor) logOutputItemEvent(event openaiws.ServerEvent) {
+func (a *threadActor) logOpenAIEvent(meta threadstore.ThreadMeta, responseID string, attrs ...any) {
+	a.logger.Info("received openai event", appendOpenAIEventLogAttrs(attrs, meta, responseID)...)
+}
+
+func appendOpenAIEventLogAttrs(attrs []any, meta threadstore.ThreadMeta, responseID string) []any {
+	if strings.TrimSpace(responseID) != "" && !hasLogAttrKey(attrs, "response_id") {
+		attrs = append(attrs, "response_id", responseID)
+	}
+	return appendThreadGraphAttrs(attrs, meta)
+}
+
+func (a *threadActor) logOutputItemEvent(meta threadstore.ThreadMeta, responseID string, event openaiws.ServerEvent) {
+	itemRaw := outputItemEventItemRaw(event)
 	attrs := []any{"event_type", outputItemLogEventType(event)}
 	if sequenceNumber, ok := outputItemEventSequenceNumber(event); ok {
 		attrs = append(attrs, "event_sequence_number", sequenceNumber)
 	}
-	a.logger.Info("received openai event", attrs...)
+	attrs = append(attrs, outputItemSemanticAttrs(itemRaw)...)
+	a.logOpenAIEvent(meta, responseID, attrs...)
 }
 
 func outputItemLogEventType(event openaiws.ServerEvent) string {
@@ -2650,16 +2707,7 @@ func outputItemLogEventType(event openaiws.ServerEvent) string {
 		return string(event.Type)
 	}
 
-	itemRaw := event.Field("item")
-	if len(itemRaw) == 0 && len(event.Raw) > 0 {
-		var payload struct {
-			Item json.RawMessage `json:"item"`
-		}
-		if err := json.Unmarshal(event.Raw, &payload); err == nil {
-			itemRaw = payload.Item
-		}
-	}
-
+	itemRaw := outputItemEventItemRaw(event)
 	itemType := itemTypeFromRaw(itemRaw)
 	if itemType == "" || itemType == "unknown" {
 		return string(event.Type)
@@ -2689,6 +2737,92 @@ func outputItemEventSequenceNumber(event openaiws.ServerEvent) (int64, bool) {
 	}
 
 	return sequenceNumber, true
+}
+
+func outputItemEventItemRaw(event openaiws.ServerEvent) json.RawMessage {
+	itemRaw := event.Field("item")
+	if len(itemRaw) == 0 && len(event.Raw) > 0 {
+		var payload struct {
+			Item json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal(event.Raw, &payload); err == nil {
+			itemRaw = payload.Item
+		}
+	}
+	return itemRaw
+}
+
+func outputItemSemanticAttrs(itemRaw json.RawMessage) []any {
+	if len(itemRaw) == 0 {
+		return nil
+	}
+
+	itemType := itemTypeFromRaw(itemRaw)
+	if itemType != "function_call" {
+		return nil
+	}
+
+	call, err := parseFunctionCallItem(itemRaw)
+	if err != nil {
+		return nil
+	}
+
+	attrs := make([]any, 0, 8)
+	if strings.TrimSpace(call.CallID) != "" {
+		attrs = append(attrs, "call_id", call.CallID)
+	}
+	if strings.TrimSpace(call.Name) != "" {
+		attrs = append(attrs,
+			"call_name", call.Name,
+			"call_kind", classifyFunctionCallName(call.Name),
+		)
+	}
+
+	switch call.Name {
+	case doccmd.ToolNameQueryAttachedDocuments:
+		if req, ok := decodeDocQueryRequestForLog(call.Arguments); ok {
+			attrs = append(attrs, "document_count", len(req.DocumentIDs))
+		}
+	case "spawn_subagents":
+		if req, ok := decodeSpawnRequestForLog(call.Arguments); ok {
+			attrs = append(attrs, "child_count", len(req.Children))
+			if spawnMode := normalizeSpawnMode(req.SpawnMode); spawnMode != "" {
+				attrs = append(attrs, "spawn_mode", spawnMode)
+			}
+		}
+	}
+
+	return attrs
+}
+
+func classifyFunctionCallName(name string) string {
+	switch strings.TrimSpace(name) {
+	case doccmd.ToolNameQueryAttachedDocuments:
+		return "document_query"
+	case "spawn_subagents":
+		return "spawn_subagents"
+	case "":
+		return "tool"
+	default:
+		return "tool"
+	}
+}
+
+func decodeDocQueryRequestForLog(arguments string) (docQueryRequest, bool) {
+	var req docQueryRequest
+	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
+		return docQueryRequest{}, false
+	}
+	req.DocumentIDs = uniqueStringsPreserveOrder(req.DocumentIDs)
+	return req, len(req.DocumentIDs) > 0
+}
+
+func decodeSpawnRequestForLog(arguments string) (spawnRequest, bool) {
+	var req spawnRequest
+	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
+		return spawnRequest{}, false
+	}
+	return req, len(req.Children) > 0
 }
 
 func responseCreateReasoningEffort(payload map[string]any) string {

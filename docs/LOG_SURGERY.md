@@ -70,12 +70,16 @@ We aligned worker logs to the actual thread model:
 - explicit start/resume/send triggers
 - explicit child-barrier lifecycle
 - explicit document lineage source
+- explicit function-call semantics on output items
+- explicit command-envelope context at API and worker boundaries
+- explicit child-response correlation on barrier updates
 
 Important effect:
 
 - grepping one root thread id now gives a coherent story
 - child threads read as normal threads instead of pseudo-types
 - parent regroup is visible as a barrier close and resume, not as mysterious extra model work
+- known tool calls now say what they are without making you inspect payload storage
 
 ## Incision Plan
 
@@ -185,6 +189,7 @@ Updated tests:
 
 - [`internal/logutil/handler_test.go`](/Users/detachedhead/explorer/internal/logutil/handler_test.go)
 - [`internal/worker/actor_test.go`](/Users/detachedhead/explorer/internal/worker/actor_test.go)
+- [`internal/agentcmd/command_test.go`](/Users/detachedhead/explorer/internal/agentcmd/command_test.go)
 
 Coverage added for:
 
@@ -193,11 +198,126 @@ Coverage added for:
 - response-create input classification
 - thread-graph attr enrichment
 - duplicate-key avoidance in thread-graph attr enrichment
+- function-call semantic logging
+- command-envelope logging attrs
 
 Verification run:
 
 - `go test ./internal/logutil`
+- `go test ./internal/agentcmd`
 - `go test ./internal/worker`
+- `go test ./internal/httpserver`
+
+### Incision 8: Teach output-item logs what tool call they saw — DONE
+
+Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go):
+
+- `received openai event` for `response.output_item.added/done.function_call` now logs:
+- `call_id`
+- `call_name`
+- `call_kind`
+- known structural hints such as `document_count`, `child_count`, and `spawn_mode`
+- `output item received` now carries the same semantic hints for function calls
+
+Important effect:
+
+- `function_call` stopped being a vague noun
+- known runtime calls such as `query_attached_documents` and `spawn_subagents` are recognizable at a glance
+- we still do not log raw arguments or prompt text
+
+### Incision 9: Carry thread-graph context onto raw OpenAI event lines — DONE
+
+Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go):
+
+- `received openai event` logs now carry:
+- `response_id`
+- `root_thread_id`
+- `parent_thread_id`
+- `parent_call_id`
+- `depth`
+- `spawn_group_id` when active
+
+This applies to:
+
+- regular non-delta events
+- output-item events
+- flushed delta summaries
+
+Important effect:
+
+- grepping `root_thread_id` now catches the raw event trail instead of only the high-level lifecycle lines
+- the low-level event stream stays attached to the same thread tree as the lifecycle logs
+
+### Incision 10: Make command-envelope logs structurally honest — DONE
+
+Changed:
+
+- [`internal/agentcmd/command.go`](/Users/detachedhead/explorer/internal/agentcmd/command.go)
+- [`internal/httpserver/command_api.go`](/Users/detachedhead/explorer/internal/httpserver/command_api.go)
+- [`internal/worker/service.go`](/Users/detachedhead/explorer/internal/worker/service.go)
+
+Added shared command-log attr rendering for:
+
+- `root_thread_id`
+- `causation_id`
+- `correlation_id`
+- `input_kind` where the command body makes that knowable
+- `model` and `has_previous_response_id` for `thread.start`
+- `spawn_group_id`, `child_thread_id`, `child_status`, and `child_response_id` for child-result commands
+
+Important effect:
+
+- API publish logs and worker dispatch logs now speak the same structural language
+- child-result commands can be read without decoding their JSON body by hand
+- command routing stopped erasing thread ancestry and regroup context
+
+### Incision 11: Correlate parent barrier updates back to child responses — DONE
+
+Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go):
+
+- `child barrier updated` now includes `child_response_id`
+
+Important effect:
+
+- parent barrier progress lines can now be correlated directly with child terminal lines and stored responses
+
+### Incision 12: Close the command lifecycle seam — DONE
+
+Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go):
+
+- `processing command` now carries thread-graph context
+- `command completed` now carries thread-graph context
+
+Those lines now stay inside the same structural envelope as the rest of the run:
+
+- `root_thread_id`
+- `parent_thread_id`
+- `parent_call_id`
+- `depth`
+- `spawn_group_id` when active
+
+Important effect:
+
+- the command path now reads as one continuous chain:
+- request publish
+- worker dispatch
+- actor processing
+- actor completion
+- grepping `root_thread_id` no longer loses the actor-internal command lifecycle lines
+
+### Incision 13: Normalize warmup handoff spawn logs — DONE
+
+Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go):
+
+- the post-warmup `spawning child thread` line now includes the same document-facing fields as the initial document-query spawn:
+- `document_name`
+- `phase=query`
+- `has_previous_response_id=true`
+
+Important effect:
+
+- warmup handoff no longer looks like a different class of spawn
+- document query children read the same way whether they came from `document_base` directly or from a warmup bootstrap
 
 ## Post-Op Anatomy
 
@@ -205,7 +325,7 @@ After surgery, a document query run reads like this:
 
 1. root thread `thread.start`
 2. initial `response.create` with `trigger=start`
-3. model emits `query_attached_documents`
+3. model emits `query_attached_documents` and the output-item log says so with `call_id`, `call_name`, `call_kind=document_query`, and `document_count`
 4. parent logs one `spawning child thread` per document
 5. parent logs `opened child barrier`
 6. each child logs its own normal thread lifecycle with:
@@ -214,11 +334,12 @@ After surgery, a document query run reads like this:
 - `parent_call_id`
 - `depth=1`
 - shared `spawn_group_id`
-7. each child publishes terminal completion
-8. parent logs `child barrier updated` for each child result
-9. parent logs `resuming thread resume_reason=child_barrier`
-10. parent sends a second `response.create` with `trigger=child_barrier` and `input_kind=function_call_output`
-11. parent reaches `ready`
+7. if a document needs warmup first, the warmup completion logs a second `spawning child thread` with the same document fields as any other query child, plus `bootstrap_child_thread_id`
+8. each terminal child publishes completion
+9. parent logs `child barrier updated` for each child result, including `child_response_id`
+10. parent logs `resuming thread resume_reason=child_barrier`
+11. parent sends a second `response.create` with `trigger=child_barrier` and `input_kind=function_call_output`
+12. parent reaches `ready`
 
 That is the actual runtime shape.
 
@@ -230,6 +351,10 @@ The logs now say so out loud.
 - one structural vocabulary for root threads, children, document queries, and subagents
 - clear distinction between initial send, resume, regroup, and recovery
 - immediate visibility into whether document queries reused base anchors or required warmup
+- direct visibility into which known function call fired without opening payload tables
+- command publish/dispatch logs that preserve thread ancestry and child-result structure
+- actor processing/completion logs that stay inside the same grep path
+- warmup-bootstrap document queries that no longer change shape halfway through the trace
 - less need to jump to Postgres just to understand a run
 
 Most importantly:
@@ -250,11 +375,15 @@ This stayed inside the normal thread runtime on purpose.
 
 - [`internal/logutil/handler.go`](/Users/detachedhead/explorer/internal/logutil/handler.go) — removed id shortening; kept explicit thread ids
 - [`internal/logutil/handler_test.go`](/Users/detachedhead/explorer/internal/logutil/handler_test.go) — updated formatter expectations
-- [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go) — added thread-graph attr enrichment, trigger/cause logging, barrier logging, lineage-source logging, duplicate-key protection
-- [`internal/worker/actor_test.go`](/Users/detachedhead/explorer/internal/worker/actor_test.go) — added tests for input-kind classification and graph attr behavior
+- [`internal/agentcmd/command.go`](/Users/detachedhead/explorer/internal/agentcmd/command.go) — added shared command-log attrs and shared input-kind classification
+- [`internal/agentcmd/command_test.go`](/Users/detachedhead/explorer/internal/agentcmd/command_test.go) — added tests for command-log attrs
+- [`internal/httpserver/command_api.go`](/Users/detachedhead/explorer/internal/httpserver/command_api.go) — enriched API-side request/publish logs with shared command context
+- [`internal/worker/service.go`](/Users/detachedhead/explorer/internal/worker/service.go) — enriched dispatch logs with shared command context
+- [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go) — added thread-graph attr enrichment, trigger/cause logging, barrier logging, lineage-source logging, duplicate-key protection, raw-event graph attrs, function-call semantic attrs, child-response correlation, command lifecycle graph attrs, and warmup-handoff spawn normalization
+- [`internal/worker/actor_test.go`](/Users/detachedhead/explorer/internal/worker/actor_test.go) — added tests for input-kind classification, graph attr behavior, delta-event graph attrs, function-call semantic logging, command lifecycle graph attrs, and warmup-handoff logging
 
 ## What Remains
 
-1. If we later want even tighter troubleshooting loops, we can add more explicit classification for `output item received` when the item is a known `function_call`.
-2. We may eventually want the same graph/cause treatment in adjacent services if they emit worker-adjacent runtime logs.
-3. We should keep resisting the temptation to log prompts and answers by default; item history already owns payload inspection.
+1. If we later want even tighter troubleshooting loops, we can consider logging command-route outcome details like `routed_direct` and `owner_worker_id` alongside publish logs where that context exists.
+2. We may eventually want symmetric outbound worker-command publish logs for child terminal notifications and recovery commands, not just inbound dispatch logs.
+3. We should keep resisting the temptation to log prompts, raw tool arguments, and assistant answers by default; item history and stored payloads already own payload inspection.

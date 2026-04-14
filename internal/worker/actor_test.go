@@ -243,6 +243,67 @@ func TestAppendThreadGraphAttrsSkipsExistingKeys(t *testing.T) {
 	}
 }
 
+func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
+	store := newFakeActorStore(t)
+	store.threads["thread_child"] = threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		RootThreadID:       "thread_root",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_parent",
+		Depth:              1,
+		ActiveSpawnGroupID: "sg_123",
+	}
+
+	actor := newActorRecoveryHarness(t, store, nil)
+	got := actor.appendCommandLifecycleGraphAttrs([]any{
+		"cmd_id", "cmd_123",
+		"kind", agentcmd.KindThreadStart,
+	}, agentcmd.Command{
+		CmdID:        "cmd_123",
+		Kind:         agentcmd.KindThreadStart,
+		ThreadID:     "thread_child",
+		RootThreadID: "thread_root",
+	})
+
+	want := []any{
+		"cmd_id", "cmd_123",
+		"kind", agentcmd.KindThreadStart,
+		"root_thread_id", "thread_root",
+		"parent_thread_id", "thread_parent",
+		"parent_call_id", "call_parent",
+		"depth", 1,
+		"spawn_group_id", "sg_123",
+	}
+
+	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
+		t.Fatalf("appendCommandLifecycleGraphAttrs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestAppendCommandLifecycleGraphAttrsFallsBackToCommandRootThreadID(t *testing.T) {
+	actor := newActorRecoveryHarness(t, newFakeActorStore(t), nil)
+	got := actor.appendCommandLifecycleGraphAttrs([]any{
+		"cmd_id", "cmd_123",
+		"kind", agentcmd.KindThreadResume,
+	}, agentcmd.Command{
+		CmdID:        "cmd_123",
+		Kind:         agentcmd.KindThreadResume,
+		ThreadID:     "thread_missing",
+		RootThreadID: "thread_root",
+	})
+
+	want := []any{
+		"cmd_id", "cmd_123",
+		"kind", agentcmd.KindThreadResume,
+		"root_thread_id", "thread_root",
+		"depth", 0,
+	}
+
+	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
+		t.Fatalf("appendCommandLifecycleGraphAttrs() fallback = %#v, want %#v", got, want)
+	}
+}
+
 func TestValidateCommandPreconditions(t *testing.T) {
 	t.Parallel()
 
@@ -2456,6 +2517,8 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	var publishedSubject string
 	var publishedCommands []agentcmd.Command
 	actor := newActorRecoveryHarness(t, store, nil)
+	var logBuf bytes.Buffer
+	actor.logger = slog.New(slog.NewTextHandler(&logBuf, nil))
 	actor.docStore = docStore
 	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
 		publishedSubject = subject
@@ -2542,6 +2605,19 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	}
 	if len(store.spawnResults[spawnGroupID]) != 0 {
 		t.Fatalf("spawnResults = %#v, want no stored result after warmup completion", store.spawnResults[spawnGroupID])
+	}
+
+	logs := logBuf.String()
+	for _, needle := range []string{
+		`msg="spawning child thread"`,
+		`bootstrap_child_thread_id=` + warmupThreadID,
+		`document_name=report.pdf`,
+		`phase=query`,
+		`has_previous_response_id=true`,
+	} {
+		if !strings.Contains(logs, needle) {
+			t.Fatalf("logs = %q, want %s", logs, needle)
+		}
 	}
 }
 
@@ -2690,7 +2766,10 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 		},
 	}
 
-	actor.flushDeltaLogForDoneEvent(deltaLogs, openaiws.EventTypeResponseFunctionArgsDone)
+	actor.flushDeltaLogForDoneEvent(deltaLogs, threadstore.ThreadMeta{
+		RootThreadID: "thread_root",
+		Depth:        0,
+	}, "resp_123", openaiws.EventTypeResponseFunctionArgsDone)
 
 	if len(deltaLogs) != 0 {
 		t.Fatalf("deltaLogs still has %d entries, want 0", len(deltaLogs))
@@ -2698,6 +2777,12 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	logs := logBuf.String()
 	if !strings.Contains(logs, `event_type=response.function_call_arguments.delta`) {
 		t.Fatalf("logs = %q, want flushed delta event type", logs)
+	}
+	if !strings.Contains(logs, `root_thread_id=thread_root`) {
+		t.Fatalf("logs = %q, want root_thread_id", logs)
+	}
+	if !strings.Contains(logs, `response_id=resp_123`) {
+		t.Fatalf("logs = %q, want response_id", logs)
 	}
 	if strings.Contains(logs, `raw=`) {
 		t.Fatalf("logs = %q, want no raw delta payload", logs)
@@ -2720,7 +2805,7 @@ func TestFlushDeltaLogForDoneEventSkipsWhenOnlyFirstDeltaSeen(t *testing.T) {
 		},
 	}
 
-	actor.flushDeltaLogForDoneEvent(deltaLogs, openaiws.EventTypeResponseOutputTextDone)
+	actor.flushDeltaLogForDoneEvent(deltaLogs, threadstore.ThreadMeta{}, "", openaiws.EventTypeResponseOutputTextDone)
 
 	if len(deltaLogs) != 0 {
 		t.Fatalf("deltaLogs still has %d entries, want 0", len(deltaLogs))
@@ -2787,6 +2872,109 @@ func TestOutputItemEventSequenceNumber(t *testing.T) {
 	if got != 3 {
 		t.Fatalf("outputItemEventSequenceNumber() = %d, want 3", got)
 	}
+}
+
+func TestOutputItemSemanticAttrsForDocumentQuery(t *testing.T) {
+	t.Parallel()
+
+	attrs := attrsMap(outputItemSemanticAttrs(json.RawMessage(`{
+		"type":"function_call",
+		"call_id":"call_doc_123",
+		"name":"query_attached_documents",
+		"arguments":"{\"document_ids\":[\"doc_1\",\"doc_2\",\"doc_1\"],\"task\":\"Summarize page 1\"}"
+	}`)))
+
+	if attrs["call_id"] != "call_doc_123" {
+		t.Fatalf("call_id = %v, want call_doc_123", attrs["call_id"])
+	}
+	if attrs["call_name"] != "query_attached_documents" {
+		t.Fatalf("call_name = %v, want query_attached_documents", attrs["call_name"])
+	}
+	if attrs["call_kind"] != "document_query" {
+		t.Fatalf("call_kind = %v, want document_query", attrs["call_kind"])
+	}
+	if attrs["document_count"] != 2 {
+		t.Fatalf("document_count = %v, want 2", attrs["document_count"])
+	}
+}
+
+func TestOutputItemSemanticAttrsForSpawnSubagents(t *testing.T) {
+	t.Parallel()
+
+	attrs := attrsMap(outputItemSemanticAttrs(json.RawMessage(`{
+		"type":"function_call",
+		"call_id":"call_spawn_123",
+		"name":"spawn_subagents",
+		"arguments":"{\"spawn_mode\":\"warm_branch\",\"children\":[{\"prompt\":\"one\"},{\"prompt\":\"two\"}]}"
+	}`)))
+
+	if attrs["call_kind"] != "spawn_subagents" {
+		t.Fatalf("call_kind = %v, want spawn_subagents", attrs["call_kind"])
+	}
+	if attrs["child_count"] != 2 {
+		t.Fatalf("child_count = %v, want 2", attrs["child_count"])
+	}
+	if attrs["spawn_mode"] != "warm_branch" {
+		t.Fatalf("spawn_mode = %v, want warm_branch", attrs["spawn_mode"])
+	}
+}
+
+func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
+	t.Parallel()
+
+	var logBuf bytes.Buffer
+	actor := &threadActor{
+		logger: slog.New(slog.NewTextHandler(&logBuf, nil)),
+	}
+
+	actor.logOutputItemEvent(threadstore.ThreadMeta{
+		RootThreadID:   "thread_root",
+		ParentThreadID: "thread_parent",
+		ParentCallID:   "call_parent",
+		Depth:          1,
+	}, "resp_123", openaiws.ServerEvent{
+		Type: openaiws.EventTypeResponseOutputItemDone,
+		Raw: json.RawMessage(`{
+			"type":"response.output_item.done",
+			"sequence_number":7,
+			"item":{
+				"type":"function_call",
+				"call_id":"call_doc_123",
+				"name":"query_attached_documents",
+				"arguments":"{\"document_ids\":[\"doc_1\",\"doc_2\"],\"task\":\"Summarize page 1\"}"
+			}
+		}`),
+	})
+
+	logs := logBuf.String()
+	for _, needle := range []string{
+		`event_type=response.output_item.done.function_call`,
+		`response_id=resp_123`,
+		`root_thread_id=thread_root`,
+		`parent_thread_id=thread_parent`,
+		`parent_call_id=call_parent`,
+		`depth=1`,
+		`call_id=call_doc_123`,
+		`call_name=query_attached_documents`,
+		`call_kind=document_query`,
+		`document_count=2`,
+	} {
+		if !strings.Contains(logs, needle) {
+			t.Fatalf("logs = %q, want %s", logs, needle)
+		}
+	}
+}
+
+func attrsMap(attrs []any) map[string]any {
+	mapped := make(map[string]any, len(attrs)/2)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok {
+			continue
+		}
+		mapped[key] = attrs[i+1]
+	}
+	return mapped
 }
 
 func TestResponseCreateReasoningEffort(t *testing.T) {
