@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,7 +67,11 @@ func (a *documentAPI) handleDocumentRoutes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	docID := parts[0]
+	docID, err := parseDocumentID(parts[0])
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 
 	switch {
 	case len(parts) == 1:
@@ -151,7 +156,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		filename = ""
 	}
 
-	docID, err := idgen.New("doc")
+	docID, err := a.store.ReserveID(r.Context())
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -163,7 +168,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sourceRef := a.runtime.Blob().Ref("documents", docID, "source.pdf")
+	sourceRef := a.runtime.Blob().Ref("documents", formatDocumentID(docID), "source.pdf")
 	if err := a.runtime.Blob().WriteRef(r.Context(), sourceRef, payload.Bytes()); err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("store uploaded document: %v", err))
 		return
@@ -223,7 +228,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (a *documentAPI) handleGetDocument(w http.ResponseWriter, r *http.Request, docID string) {
+func (a *documentAPI) handleGetDocument(w http.ResponseWriter, r *http.Request, docID int64) {
 	doc, err := a.store.Get(r.Context(), docID)
 	if errors.Is(err, docstore.ErrDocumentNotFound) {
 		writeErrorJSON(w, http.StatusNotFound, "document not found")
@@ -239,7 +244,7 @@ func (a *documentAPI) handleGetDocument(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Request, docID string) {
+func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Request, docID int64) {
 	var req updateDocumentRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -273,7 +278,7 @@ func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (a *documentAPI) handleDocumentSource(w http.ResponseWriter, r *http.Request, docID string) {
+func (a *documentAPI) handleDocumentSource(w http.ResponseWriter, r *http.Request, docID int64) {
 	doc, err := a.store.Get(r.Context(), docID)
 	if errors.Is(err, docstore.ErrDocumentNotFound) {
 		writeErrorJSON(w, http.StatusNotFound, "document not found")
@@ -301,7 +306,7 @@ func (a *documentAPI) handleDocumentSource(w http.ResponseWriter, r *http.Reques
 	_, _ = w.Write(data)
 }
 
-func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, docID string) {
+func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, docID int64) {
 	doc, err := a.store.Get(r.Context(), docID)
 	if errors.Is(err, docstore.ErrDocumentNotFound) {
 		writeErrorJSON(w, http.StatusNotFound, "document not found")
@@ -368,4 +373,19 @@ func normalizeDocumentQueryModel(raw string) (string, error) {
 		return "", fmt.Errorf("unsupported query_model %q", model)
 	}
 	return model, nil
+}
+
+func parseDocumentID(raw string) (int64, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid document id %q: %w", raw, err)
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("document id must be greater than zero")
+	}
+	return id, nil
+}
+
+func formatDocumentID(id int64) string {
+	return strconv.FormatInt(id, 10)
 }

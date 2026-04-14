@@ -196,20 +196,20 @@ func TestNormalizeAttachedDocumentIDs(t *testing.T) {
 	t.Run("dedupes and trims", func(t *testing.T) {
 		t.Parallel()
 
-		got, err := normalizeAttachedDocumentIDs([]string{" doc_1 ", "doc_1", "doc_2"})
+		got, err := normalizeAttachedDocumentIDs([]int64{1, 1, 2})
 		if err != nil {
 			t.Fatalf("normalizeAttachedDocumentIDs() error = %v", err)
 		}
-		if stringJSON(got) != `["doc_1","doc_2"]` {
-			t.Fatalf("got %s, want [\"doc_1\",\"doc_2\"]", stringJSON(got))
+		if stringJSON(got) != `[1,2]` {
+			t.Fatalf("got %s, want [1,2]", stringJSON(got))
 		}
 	})
 
-	t.Run("rejects blank ids", func(t *testing.T) {
+	t.Run("rejects non-positive ids", func(t *testing.T) {
 		t.Parallel()
 
-		if _, err := normalizeAttachedDocumentIDs([]string{"doc_1", " "}); err == nil {
-			t.Fatal("expected blank attached document id to fail")
+		if _, err := normalizeAttachedDocumentIDs([]int64{1, 0}); err == nil {
+			t.Fatal("expected invalid attached document id to fail")
 		}
 	})
 }
@@ -219,7 +219,7 @@ func TestNormalizeResumeBodyPreservesAttachedDocumentIDs(t *testing.T) {
 
 	got, err := normalizeResumeBody(json.RawMessage(`{
 		"input_items":"hello",
-		"attached_document_ids":["doc_1","doc_2"]
+		"attached_document_ids":[1,2]
 	}`))
 	if err != nil {
 		t.Fatalf("normalizeResumeBody() error = %v", err)
@@ -229,8 +229,8 @@ func TestNormalizeResumeBodyPreservesAttachedDocumentIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractAttachedDocumentIDs() error = %v", err)
 	}
-	if stringJSON(ids) != `["doc_1","doc_2"]` {
-		t.Fatalf("attached_document_ids = %s, want [\"doc_1\",\"doc_2\"]", stringJSON(ids))
+	if stringJSON(ids) != `[1,2]` {
+		t.Fatalf("attached_document_ids = %s, want [1,2]", stringJSON(ids))
 	}
 }
 

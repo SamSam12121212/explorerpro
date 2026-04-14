@@ -10,7 +10,7 @@ import type {
 
 function documentTitle(document: DocumentEntry) {
   const filename = document.filename.trim();
-  return filename || document.id;
+  return filename || document.id.toString();
 }
 
 function toAttachedDocument(document: DocumentEntry): AttachedDocument {
@@ -23,7 +23,7 @@ function toAttachedDocument(document: DocumentEntry): AttachedDocument {
 }
 
 interface DocumentsViewProps {
-  attachedDocumentIds: string[];
+  attachedDocumentIds: number[];
   onAttachDocument: (document: AttachedDocument) => void;
 }
 
@@ -35,7 +35,7 @@ export function DocumentsView({
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
-  const [openMenuDocumentId, setOpenMenuDocumentId] = useState<string | null>(null);
+  const [openMenuDocumentId, setOpenMenuDocumentId] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const fetchDocuments = useCallback(async () => {

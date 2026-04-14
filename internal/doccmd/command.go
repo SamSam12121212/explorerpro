@@ -26,7 +26,7 @@ const (
 
 type SplitCommand struct {
 	CmdID      string `json:"cmd_id"`
-	DocumentID string `json:"document_id"`
+	DocumentID int64  `json:"document_id"`
 	SourceRef  string `json:"source_ref"`
 	DPI        int    `json:"dpi,omitempty"`
 }
@@ -35,7 +35,7 @@ type PrepareInputRequest struct {
 	RequestID  string          `json:"request_id"`
 	Kind       string          `json:"kind"`
 	ThreadID   string          `json:"thread_id,omitempty"`
-	DocumentID string          `json:"document_id"`
+	DocumentID int64           `json:"document_id"`
 	Task       string          `json:"task,omitempty"`
 	InputItems json.RawMessage `json:"input_items,omitempty"`
 }
@@ -67,7 +67,7 @@ func DecodeSplit(data []byte) (SplitCommand, error) {
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		return SplitCommand{}, fmt.Errorf("decode split command: %w", err)
 	}
-	if strings.TrimSpace(cmd.DocumentID) == "" {
+	if cmd.DocumentID <= 0 {
 		return SplitCommand{}, fmt.Errorf("split command missing document_id")
 	}
 	if strings.TrimSpace(cmd.SourceRef) == "" {
@@ -190,7 +190,7 @@ func validatePrepareInputRequest(req PrepareInputRequest) error {
 	if strings.TrimSpace(req.Kind) == "" {
 		return fmt.Errorf("prepare input request missing kind")
 	}
-	if strings.TrimSpace(req.DocumentID) == "" {
+	if req.DocumentID <= 0 {
 		return fmt.Errorf("prepare input request missing document_id")
 	}
 	return nil
@@ -238,7 +238,7 @@ func QueryAttachedDocumentsToolDefinition() map[string]any {
 			"properties": map[string]any{
 				"document_ids": map[string]any{
 					"type":        "array",
-					"items":       map[string]any{"type": "string"},
+					"items":       map[string]any{"type": "integer"},
 					"description": "IDs of the attached documents to query.",
 				},
 				"task": map[string]any{

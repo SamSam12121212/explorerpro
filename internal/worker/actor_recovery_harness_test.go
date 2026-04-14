@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,7 +64,8 @@ func (s *fakeActorStore) LoadThread(_ context.Context, threadID string) (threads
 	return meta, nil
 }
 
-func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Context, parentThreadID, documentID string) (threadstore.DocumentQueryLineage, error) {
+func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Context, parentThreadID string, documentID int64) (threadstore.DocumentQueryLineage, error) {
+	documentIDText := strconv.FormatInt(documentID, 10)
 	var latest threadstore.ThreadMeta
 	found := false
 
@@ -79,7 +81,7 @@ func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Conte
 		if err := json.Unmarshal([]byte(meta.MetadataJSON), &metadata); err != nil {
 			s.t.Fatalf("json.Unmarshal(meta.MetadataJSON) error = %v", err)
 		}
-		if metadata["spawn_mode"] != "document_query" || metadata["document_id"] != documentID {
+		if metadata["spawn_mode"] != "document_query" || metadata["document_id"] != documentIDText {
 			continue
 		}
 		if meta.Status != threadstore.ThreadStatusCompleted && meta.Status != threadstore.ThreadStatusReady {

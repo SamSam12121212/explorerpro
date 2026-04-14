@@ -42,6 +42,10 @@ func shouldPersistThreadEvent(eventType string) bool {
 	return !strings.HasSuffix(eventType, ".delta")
 }
 
+func formatDocumentMetadataID(id int64) string {
+	return strconv.FormatInt(id, 10)
+}
+
 func (s *Store) CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error {
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO threads (
@@ -1005,7 +1009,8 @@ WHERE id = $1
 	return meta, nil
 }
 
-func (s *Store) LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID, documentID string) (threadstore.DocumentQueryLineage, error) {
+func (s *Store) LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID string, documentID int64) (threadstore.DocumentQueryLineage, error) {
+	documentIDText := formatDocumentMetadataID(documentID)
 	row := s.pool.QueryRow(ctx, `
 SELECT
     id,
@@ -1019,14 +1024,14 @@ WHERE parent_thread_id = $1
   AND metadata_json ->> 'document_id' = $2
 ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT 1
-`, parentThreadID, documentID)
+`, parentThreadID, documentIDText)
 
 	var lineage threadstore.DocumentQueryLineage
 	if err := row.Scan(&lineage.ChildThreadID, &lineage.ResponseID, &lineage.Model); err != nil {
 		if isNoRows(err) {
 			return threadstore.DocumentQueryLineage{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.DocumentQueryLineage{}, fmt.Errorf("load latest completed document query lineage for %s/%s: %w", parentThreadID, documentID, err)
+		return threadstore.DocumentQueryLineage{}, fmt.Errorf("load latest completed document query lineage for %s/%d: %w", parentThreadID, documentID, err)
 	}
 
 	return lineage, nil

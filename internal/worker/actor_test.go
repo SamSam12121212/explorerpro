@@ -41,8 +41,8 @@ func TestWrapRawItemAsArray(t *testing.T) {
 func TestStableDocumentChildThreadIDIgnoresInvocationAndPhase(t *testing.T) {
 	t.Parallel()
 
-	warmupID := stableDocumentChildThreadID("thread_root", "call_1", "doc_1", "warmup")
-	queryID := stableDocumentChildThreadID("thread_root", "call_2", "doc_1", "query")
+	warmupID := stableDocumentChildThreadID("thread_root", "call_1", 1, "warmup")
+	queryID := stableDocumentChildThreadID("thread_root", "call_2", 1, "query")
 
 	if warmupID != queryID {
 		t.Fatalf("stableDocumentChildThreadID() = %q and %q, want same stable id", warmupID, queryID)
@@ -162,8 +162,8 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 	t.Parallel()
 
 	parentCallID, err := encodeDocQueryRoundCalls([]docQueryRoundCall{
-		{CallID: "call_parent_1", DocumentIDs: []string{"doc_1"}, Task: "Summarize doc 1"},
-		{CallID: "call_parent_2", DocumentIDs: []string{"doc_2"}, Task: "Summarize doc 2"},
+		{CallID: "call_parent_1", DocumentIDs: []int64{1}, Task: "Summarize doc 1"},
+		{CallID: "call_parent_2", DocumentIDs: []int64{2}, Task: "Summarize doc 2"},
 	})
 	if err != nil {
 		t.Fatalf("encodeDocQueryRoundCalls() error = %v", err)
@@ -175,13 +175,13 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 		ParentCallID:   parentCallID,
 	}, []threadstore.SpawnChildResult{
 		{
-			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_1", "doc_1", "query"),
+			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_1", 1, "query"),
 			Status:          "completed",
 			ChildResponseID: "resp_doc_1",
 			AssistantText:   "Doc 1 summary",
 		},
 		{
-			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_2", "doc_2", "query"),
+			ChildThreadID:   stableDocumentChildThreadID("thread_parent", "call_parent_2", 2, "query"),
 			Status:          "failed",
 			ChildResponseID: "resp_doc_2",
 			ErrorRef:        "blob://errors/doc-2.json",
@@ -206,8 +206,8 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 	}
 
 	for i, wantThreadID := range []string{
-		stableDocumentChildThreadID("thread_parent", "call_parent_1", "doc_1", "query"),
-		stableDocumentChildThreadID("thread_parent", "call_parent_2", "doc_2", "query"),
+		stableDocumentChildThreadID("thread_parent", "call_parent_1", 1, "query"),
+		stableDocumentChildThreadID("thread_parent", "call_parent_2", 2, "query"),
 	} {
 		output, ok := decoded[i]["output"].(string)
 		if !ok {
@@ -680,7 +680,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
 				"thread_123": {
-					{ID: "doc_1", Filename: "report.pdf"},
+					{ID: 1, Filename: "report.pdf"},
 				},
 			},
 		},
@@ -694,7 +694,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 			return doccmd.RuntimeContextResponse{
 				RequestID:    req.RequestID,
 				Status:       doccmd.PrepareStatusOK,
-				Instructions: "Be concise.\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>",
+				Instructions: "Be concise.\n\n<available_documents>\n<document id=\"1\" name=\"report.pdf\" />\n</available_documents>",
 				Tools:        json.RawMessage(`[{"type":"function","name":"lookup"},{"type":"function","name":"query_attached_documents"}]`),
 			}, nil
 		}),
@@ -709,7 +709,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
-	if got := payload["instructions"]; got != "Be concise.\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>" {
+	if got := payload["instructions"]; got != "Be concise.\n\n<available_documents>\n<document id=\"1\" name=\"report.pdf\" />\n</available_documents>" {
 		t.Fatalf("instructions = %v, want runtime-augmented instructions", got)
 	}
 
@@ -763,7 +763,7 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
 				"thread_123": {
-					{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
+					{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 				},
 			},
 		},
@@ -782,7 +782,7 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 	}
 
 	instructions, _ := payload["instructions"].(string)
-	if !strings.Contains(instructions, `<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />`) {
+	if !strings.Contains(instructions, `<document id="1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />`) {
 		t.Fatalf("instructions = %q, want local available_documents block", instructions)
 	}
 
@@ -823,7 +823,7 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
 				"thread_123": {
-					{ID: "doc_1", Filename: "report.pdf"},
+					{ID: 1, Filename: "report.pdf"},
 				},
 			},
 		},
@@ -1348,7 +1348,7 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[string][]docstore.Document{
 			"thread_parent": {
-				{ID: "doc_1", Filename: "report.pdf"},
+				{ID: 1, Filename: "report.pdf"},
 			},
 		},
 	}
@@ -1356,7 +1356,7 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 		return doccmd.RuntimeContextResponse{
 			RequestID:    req.RequestID,
 			Status:       doccmd.PrepareStatusOK,
-			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"doc_1\" name=\"report.pdf\" />\n</available_documents>",
+			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"1\" name=\"report.pdf\" />\n</available_documents>",
 		}, nil
 	})
 
@@ -1391,7 +1391,7 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	}
 
 	instructions, _ := payload["instructions"].(string)
-	if !strings.Contains(instructions, `<document id="doc_1" name="report.pdf" />`) {
+	if !strings.Contains(instructions, `<document id="1" name="report.pdf" />`) {
 		t.Fatalf("instructions = %q, want available_documents block", instructions)
 	}
 }
@@ -1481,7 +1481,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[string][]docstore.Document{
 			"thread_parent": {
-				{ID: "doc_2", Filename: "followup.pdf"},
+				{ID: 2, Filename: "followup.pdf"},
 			},
 		},
 	}
@@ -1489,7 +1489,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 		return doccmd.RuntimeContextResponse{
 			RequestID:    req.RequestID,
 			Status:       doccmd.PrepareStatusOK,
-			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"doc_2\" name=\"followup.pdf\" />\n</available_documents>",
+			Instructions: req.Instructions + "\n\n<available_documents>\n<document id=\"2\" name=\"followup.pdf\" />\n</available_documents>",
 		}, nil
 	})
 
@@ -1515,7 +1515,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 	}
 
 	instructions, _ := payload["instructions"].(string)
-	if !strings.Contains(instructions, `<document id="doc_2" name="followup.pdf" />`) {
+	if !strings.Contains(instructions, `<document id="2" name="followup.pdf" />`) {
 		t.Fatalf("instructions = %q, want available_documents block", instructions)
 	}
 }
@@ -2226,18 +2226,18 @@ func (s *fakeThreadDocumentStore) ListDocuments(_ context.Context, threadID stri
 	return cloned, nil
 }
 
-func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID string, documentIDs []string) ([]string, error) {
+func (s *fakeThreadDocumentStore) FilterAttached(_ context.Context, threadID string, documentIDs []int64) ([]int64, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 
 	docs := s.documentsByThread[threadID]
-	idSet := make(map[string]bool, len(docs))
+	idSet := make(map[int64]bool, len(docs))
 	for _, d := range docs {
 		idSet[d.ID] = true
 	}
 
-	attached := make([]string, 0, len(documentIDs))
+	attached := make([]int64, 0, len(documentIDs))
 	for _, id := range documentIDs {
 		if idSet[id] {
 			attached = append(attached, id)
@@ -2253,17 +2253,17 @@ func (f fakeDocRuntimeContextClient) RuntimeContext(ctx context.Context, req doc
 }
 
 type fakeDocActorDocStore struct {
-	docs        map[string]docstore.Document
+	docs        map[int64]docstore.Document
 	baseUpdates []docBaseLineageUpdate
 }
 
 type docBaseLineageUpdate struct {
-	DocumentID string
+	DocumentID int64
 	ResponseID string
 	Model      string
 }
 
-func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Document, error) {
+func (s *fakeDocActorDocStore) Get(_ context.Context, id int64) (docstore.Document, error) {
 	doc, ok := s.docs[id]
 	if !ok {
 		return docstore.Document{}, docstore.ErrDocumentNotFound
@@ -2271,7 +2271,7 @@ func (s *fakeDocActorDocStore) Get(_ context.Context, id string) (docstore.Docum
 	return doc, nil
 }
 
-func (s *fakeDocActorDocStore) UpdateBaseLineage(_ context.Context, id, baseResponseID, baseModel string) error {
+func (s *fakeDocActorDocStore) UpdateBaseLineage(_ context.Context, id int64, baseResponseID, baseModel string) error {
 	s.baseUpdates = append(s.baseUpdates, docBaseLineageUpdate{
 		DocumentID: id,
 		ResponseID: baseResponseID,
@@ -2383,7 +2383,7 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
 				"thread_123": {
-					{ID: "doc_1", Filename: "report.pdf"},
+					{ID: 1, Filename: "report.pdf"},
 				},
 			},
 		},
@@ -2415,7 +2415,7 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 func TestDecodeDocQueryRequest(t *testing.T) {
 	t.Parallel()
 
-	req, err := decodeDocQueryRequest(`{"document_ids":["doc_1","doc_2"],"task":"summarize findings"}`)
+	req, err := decodeDocQueryRequest(`{"document_ids":[1,2],"task":"summarize findings"}`)
 	if err != nil {
 		t.Fatalf("decodeDocQueryRequest() error = %v", err)
 	}
@@ -2439,7 +2439,7 @@ func TestDecodeDocQueryRequestRejectsEmptyDocumentIDs(t *testing.T) {
 func TestDecodeDocQueryRequestRejectsEmptyTask(t *testing.T) {
 	t.Parallel()
 
-	_, err := decodeDocQueryRequest(`{"document_ids":["doc_1"],"task":""}`)
+	_, err := decodeDocQueryRequest(`{"document_ids":[1],"task":""}`)
 	if err == nil {
 		t.Fatal("expected error for empty task")
 	}
@@ -2453,7 +2453,7 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 		ctx: context.Background(),
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
-				"thread_123": {{ID: "doc_1"}},
+				"thread_123": {{ID: 1}},
 			},
 		},
 		store: store,
@@ -2463,15 +2463,15 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	_, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []string{"doc_1", "doc_missing"},
+			DocumentIDs: []int64{1, 999},
 			Task:        "summarize",
 		},
 	}})
 	if err == nil {
 		t.Fatal("expected error for unattached document")
 	}
-	if !strings.Contains(err.Error(), "doc_missing") {
-		t.Fatalf("error = %v, want mention of doc_missing", err)
+	if !strings.Contains(err.Error(), "999") {
+		t.Fatalf("error = %v, want mention of missing document id", err)
 	}
 }
 
@@ -2508,7 +2508,7 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 		Status:         threadstore.ThreadStatusCompleted,
 		Model:          "gpt-5.4-mini",
 		LastResponseID: "resp_doc_old",
-		MetadataJSON:   `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+		MetadataJSON:   `{"document_id":"1","spawn_mode":"document_query"}`,
 		CreatedAt:      time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 4, 13, 10, 1, 0, 0, time.UTC),
 	}
@@ -2520,13 +2520,13 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
-			docs: map[string]docstore.Document{
-				"doc_1": {
-					ID:         "doc_1",
+			docs: map[int64]docstore.Document{
+				1: {
+					ID:         1,
 					Filename:   "report.pdf",
 					QueryModel: "gpt-5.4-nano",
 				},
@@ -2543,7 +2543,7 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []string{"doc_1"},
+			DocumentIDs: []int64{1},
 			Task:        "summarize",
 		},
 	}}); err != nil {
@@ -2585,7 +2585,7 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 		Status:         threadstore.ThreadStatusReady,
 		Model:          "gpt-5.4-mini",
 		LastResponseID: "resp_doc_ready",
-		MetadataJSON:   `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+		MetadataJSON:   `{"document_id":"1","spawn_mode":"document_query"}`,
 		CreatedAt:      time.Date(2026, 4, 13, 11, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 4, 13, 11, 1, 0, 0, time.UTC),
 	}
@@ -2597,13 +2597,13 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
-			docs: map[string]docstore.Document{
-				"doc_1": {
-					ID:         "doc_1",
+			docs: map[int64]docstore.Document{
+				1: {
+					ID:         1,
 					Filename:   "report.pdf",
 					QueryModel: "gpt-5.4-nano",
 				},
@@ -2620,7 +2620,7 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []string{"doc_1"},
+			DocumentIDs: []int64{1},
 			Task:        "summarize",
 		},
 	}}); err != nil {
@@ -2665,13 +2665,13 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
-			docs: map[string]docstore.Document{
-				"doc_1": {
-					ID:             "doc_1",
+			docs: map[int64]docstore.Document{
+				1: {
+					ID:             1,
 					Filename:       "report.pdf",
 					QueryModel:     "gpt-5.4-mini",
 					BaseResponseID: "resp_doc_base",
@@ -2690,7 +2690,7 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []string{"doc_1"},
+			DocumentIDs: []int64{1},
 			Task:        "summarize",
 		},
 	}}); err != nil {
@@ -2746,13 +2746,13 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 		store:  store,
 		threadDocs: &fakeThreadDocumentStore{
 			documentsByThread: map[string][]docstore.Document{
-				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+				"thread_parent": {{ID: 1, Filename: "report.pdf"}},
 			},
 		},
 		docStore: &fakeDocActorDocStore{
-			docs: map[string]docstore.Document{
-				"doc_1": {
-					ID:         "doc_1",
+			docs: map[int64]docstore.Document{
+				1: {
+					ID:         1,
 					Filename:   "report.pdf",
 					QueryModel: "gpt-5.4-mini",
 				},
@@ -2769,7 +2769,7 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []string{"doc_1", "doc_1"},
+			DocumentIDs: []int64{1, 1},
 			Task:        "summarize",
 		},
 	}}); err != nil {
@@ -2785,7 +2785,7 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	if len(publishedCommands) != 1 {
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
-	if publishedCommands[0].ThreadID != stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup") {
+	if publishedCommands[0].ThreadID != stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup") {
 		t.Fatalf("publishedCommands[0].ThreadID = %q, want warmup thread id", publishedCommands[0].ThreadID)
 	}
 
@@ -2826,7 +2826,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		ActiveSpawnGroupID: spawnGroupID,
 	}
 
-	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup")
+	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup")
 	store.threads[warmupThreadID] = threadstore.ThreadMeta{
 		ID:                 warmupThreadID,
 		RootThreadID:       "thread_parent",
@@ -2837,7 +2837,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		Model:              "gpt-5.4-mini",
 		LastResponseID:     "resp_warmup",
 		ActiveSpawnGroupID: spawnGroupID,
-		MetadataJSON:       `{"document_id":"doc_1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+		MetadataJSON:       `{"document_id":"1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
 	}
 	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
 		ID:             spawnGroupID,
@@ -2848,9 +2848,9 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	}
 
 	docStore := &fakeDocActorDocStore{
-		docs: map[string]docstore.Document{
-			"doc_1": {
-				ID:       "doc_1",
+		docs: map[int64]docstore.Document{
+			1: {
+				ID:       1,
 				Filename: "report.pdf",
 			},
 		},
@@ -2887,8 +2887,8 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	if len(docStore.baseUpdates) != 1 {
 		t.Fatalf("baseUpdates = %d, want 1", len(docStore.baseUpdates))
 	}
-	if docStore.baseUpdates[0].DocumentID != "doc_1" {
-		t.Fatalf("DocumentID = %q, want doc_1", docStore.baseUpdates[0].DocumentID)
+	if docStore.baseUpdates[0].DocumentID != 1 {
+		t.Fatalf("DocumentID = %d, want 1", docStore.baseUpdates[0].DocumentID)
 	}
 	if docStore.baseUpdates[0].ResponseID != "resp_warmup" {
 		t.Fatalf("ResponseID = %q, want resp_warmup", docStore.baseUpdates[0].ResponseID)
@@ -2904,7 +2904,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
 
-	queryThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "query")
+	queryThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "query")
 	if publishedCommands[0].ThreadID != queryThreadID {
 		t.Fatalf("publishedCommands[0].ThreadID = %q, want %q", publishedCommands[0].ThreadID, queryThreadID)
 	}
@@ -2980,7 +2980,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 		"type":"function_call",
 		"call_id":"call_doc_1",
 		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[\"doc_1\"],\"task\":\"summarize\"}"
+		"arguments":"{\"document_ids\":[1],\"task\":\"summarize\"}"
 	}`
 	conn := &actorTestConn{
 		reads: [][]byte{
@@ -2993,12 +2993,12 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[string][]docstore.Document{
-			"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+			"thread_parent": {{ID: 1, Filename: "report.pdf"}},
 		},
 	}
 	actor.docStore = &fakeDocActorDocStore{
-		docs: map[string]docstore.Document{
-			"doc_1": {ID: "doc_1", Filename: "report.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest"},
+		docs: map[int64]docstore.Document{
+			1: {ID: 1, Filename: "report.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest"},
 		},
 	}
 	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
@@ -3046,13 +3046,13 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 		"type":"function_call",
 		"call_id":"call_doc_1",
 		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[\"doc_1\"],\"task\":\"summarize doc 1\"}"
+		"arguments":"{\"document_ids\":[1],\"task\":\"summarize doc 1\"}"
 	}`
 	funcCallItem2 := `{
 		"type":"function_call",
 		"call_id":"call_doc_2",
 		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[\"doc_2\"],\"task\":\"summarize doc 2\"}"
+		"arguments":"{\"document_ids\":[2],\"task\":\"summarize doc 2\"}"
 	}`
 	conn := &actorTestConn{
 		reads: [][]byte{
@@ -3067,15 +3067,15 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[string][]docstore.Document{
 			"thread_parent": {
-				{ID: "doc_1", Filename: "report-1.pdf"},
-				{ID: "doc_2", Filename: "report-2.pdf"},
+				{ID: 1, Filename: "report-1.pdf"},
+				{ID: 2, Filename: "report-2.pdf"},
 			},
 		},
 	}
 	actor.docStore = &fakeDocActorDocStore{
-		docs: map[string]docstore.Document{
-			"doc_1": {ID: "doc_1", Filename: "report-1.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-1"},
-			"doc_2": {ID: "doc_2", Filename: "report-2.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-2"},
+		docs: map[int64]docstore.Document{
+			1: {ID: 1, Filename: "report-1.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-1"},
+			2: {ID: 2, Filename: "report-2.pdf", QueryModel: "gpt-5.4", ManifestRef: "blob://manifest-2"},
 		},
 	}
 	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
@@ -3126,7 +3126,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		ActiveSpawnGroupID: spawnGroupID,
 	}
 
-	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", "doc_1", "warmup")
+	warmupThreadID := stableDocumentChildThreadID("thread_parent", "call_1", 1, "warmup")
 	store.threads[warmupThreadID] = threadstore.ThreadMeta{
 		ID:                 warmupThreadID,
 		RootThreadID:       "thread_parent",
@@ -3138,7 +3138,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		OwnerWorkerID:      "worker-child",
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: spawnGroupID,
-		MetadataJSON:       `{"document_id":"doc_1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
+		MetadataJSON:       `{"document_id":"1","document_name":"report.pdf","document_task":"summarize","spawn_mode":"document_warmup"}`,
 	}
 	store.spawnGroups[spawnGroupID] = threadstore.SpawnGroupMeta{
 		ID:             spawnGroupID,
@@ -3150,8 +3150,8 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 
 	parentActor := newActorRecoveryHarness(t, store, nil)
 	parentActor.docStore = &fakeDocActorDocStore{
-		docs: map[string]docstore.Document{
-			"doc_1": {ID: "doc_1", Filename: "report.pdf"},
+		docs: map[int64]docstore.Document{
+			1: {ID: 1, Filename: "report.pdf"},
 		},
 	}
 	var queryStarts []agentcmd.Command
@@ -3261,7 +3261,7 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 		OwnerWorkerID:      "worker-local-1",
 		SocketGeneration:   1,
 		ActiveSpawnGroupID: "sg_waiting",
-		MetadataJSON:       `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+		MetadataJSON:       `{"document_id":"1","spawn_mode":"document_query"}`,
 	}
 
 	conn := &actorTestConn{
@@ -3489,7 +3489,7 @@ func TestOutputItemSemanticAttrsForDocumentQuery(t *testing.T) {
 		"type":"function_call",
 		"call_id":"call_doc_123",
 		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[\"doc_1\",\"doc_2\",\"doc_1\"],\"task\":\"Summarize page 1\"}"
+		"arguments":"{\"document_ids\":[1,2,1],\"task\":\"Summarize page 1\"}"
 	}`)))
 
 	if attrs["call_id"] != "call_doc_123" {
@@ -3549,7 +3549,7 @@ func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
 				"type":"function_call",
 				"call_id":"call_doc_123",
 				"name":"query_attached_documents",
-				"arguments":"{\"document_ids\":[\"doc_1\",\"doc_2\"],\"task\":\"Summarize page 1\"}"
+				"arguments":"{\"document_ids\":[1,2],\"task\":\"Summarize page 1\"}"
 			}
 		}`),
 	})

@@ -14,7 +14,7 @@ interface LeftSidebarProps {
   onSelectThread: (id: string) => void;
   onNewChat: () => void;
   onAttachDocument: (document: AttachedDocument) => void;
-  attachedDocumentIds: string[];
+  attachedDocumentIds: number[];
 }
 
 const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [

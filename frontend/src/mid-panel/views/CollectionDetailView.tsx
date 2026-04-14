@@ -10,7 +10,7 @@ import type {
 
 function documentTitle(document: DocumentEntry) {
   const filename = document.filename.trim();
-  return filename || document.id;
+  return filename || document.id.toString();
 }
 
 /** Title for collection list rows — never show raw document id. */
@@ -35,7 +35,7 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
   const navigate = useNavigate();
   const [detail, setDetail] = useState<CollectionDetailResponse | null>(null);
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
-  const [selectedDocumentId, setSelectedDocumentId] = useState("");
+  const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -72,8 +72,8 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
 
   useEffect(() => {
     if (availableDocuments.length === 0) {
-      if (selectedDocumentId !== "") {
-        setSelectedDocumentId("");
+      if (selectedDocumentId !== null) {
+        setSelectedDocumentId(null);
       }
       return;
     }
@@ -82,12 +82,12 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
       return document.id === selectedDocumentId;
     });
     if (!selectedStillAvailable) {
-      setSelectedDocumentId(availableDocuments[0]?.id ?? "");
+      setSelectedDocumentId(availableDocuments[0]?.id ?? null);
     }
   }, [availableDocuments, selectedDocumentId]);
 
   const handleAddDocument = async () => {
-    if (!selectedDocumentId || saving) return;
+    if (selectedDocumentId === null || saving) return;
 
     setSaving(true);
     setError("");
@@ -153,15 +153,16 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
               className="w-full border border-[#333] bg-[#252525] px-3 py-2 text-sm text-[#d4d4d4] outline-none focus:border-[#007acc] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={saving || availableDocuments.length === 0}
               onChange={(event) => {
-                setSelectedDocumentId(event.target.value);
+                const value = Number(event.target.value);
+                setSelectedDocumentId(Number.isFinite(value) ? value : null);
               }}
-              value={selectedDocumentId}
+              value={selectedDocumentId?.toString() ?? ""}
             >
               {availableDocuments.length === 0 ? (
                 <option value="">No available documents</option>
               ) : (
                 availableDocuments.map((document) => (
-                  <option key={document.id} value={document.id}>
+                  <option key={document.id} value={document.id.toString()}>
                     {documentTitle(document)}
                   </option>
                 ))
@@ -170,7 +171,7 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
           </label>
           <button
             className="bg-[#007acc] px-4 py-2 text-xs font-semibold uppercase tracking-wide text-white transition hover:bg-[#1b8de4] disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={saving || !selectedDocumentId}
+            disabled={saving || selectedDocumentId === null}
             onClick={() => {
               void handleAddDocument();
             }}

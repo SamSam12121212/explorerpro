@@ -13,7 +13,7 @@ import (
 var ErrDocumentNotFound = errors.New("document not found")
 
 type Document struct {
-	ID                string     `json:"id"`
+	ID                int64      `json:"id"`
 	Filename          string     `json:"filename"`
 	SourceRef         string     `json:"source_ref"`
 	Status            string     `json:"status"`
@@ -37,10 +37,19 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+func (s *Store) ReserveID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := s.pool.QueryRow(ctx, `
+	SELECT nextval(pg_get_serial_sequence('documents', 'id'))`).Scan(&id); err != nil {
+		return 0, fmt.Errorf("reserve document id: %w", err)
+	}
+	return id, nil
+}
+
 func (s *Store) Create(ctx context.Context, doc Document) error {
 	_, err := s.pool.Exec(ctx, `
-	INSERT INTO documents (id, filename, source_ref, status, dpi, query_model, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, COALESCE(NULLIF($6, ''), 'gpt-5.4'), $7, $8)`,
+		INSERT INTO documents (id, filename, source_ref, status, dpi, query_model, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, COALESCE(NULLIF($6, ''), 'gpt-5.4'), $7, $8)`,
 		doc.ID, doc.Filename, doc.SourceRef, doc.Status, doc.DPI, doc.QueryModel, doc.CreatedAt, doc.UpdatedAt,
 	)
 	if err != nil {
@@ -49,7 +58,7 @@ func (s *Store) Create(ctx context.Context, doc Document) error {
 	return nil
 }
 
-func (s *Store) Get(ctx context.Context, id string) (Document, error) {
+func (s *Store) Get(ctx context.Context, id int64) (Document, error) {
 	var d Document
 	err := s.pool.QueryRow(ctx, `
 	SELECT id, filename, source_ref, status, error, manifest_ref, page_count, dpi,
@@ -102,7 +111,7 @@ func (s *Store) List(ctx context.Context, limit int64) ([]Document, error) {
 	return docs, rows.Err()
 }
 
-func (s *Store) UpdateBaseLineage(ctx context.Context, id, baseResponseID, baseModel string) error {
+func (s *Store) UpdateBaseLineage(ctx context.Context, id int64, baseResponseID, baseModel string) error {
 	_, err := s.pool.Exec(ctx, `
 	UPDATE documents
 	SET base_response_id = $2, base_model = $3, base_initialized_at = now(), updated_at = now()
@@ -113,7 +122,7 @@ func (s *Store) UpdateBaseLineage(ctx context.Context, id, baseResponseID, baseM
 	return nil
 }
 
-func (s *Store) UpdateSettings(ctx context.Context, id, queryModel string, clearBase bool) (Document, error) {
+func (s *Store) UpdateSettings(ctx context.Context, id int64, queryModel string, clearBase bool) (Document, error) {
 	var d Document
 	err := s.pool.QueryRow(ctx, `
 	UPDATE documents
@@ -141,7 +150,7 @@ func (s *Store) UpdateSettings(ctx context.Context, id, queryModel string, clear
 	return d, nil
 }
 
-func (s *Store) UpdateStatus(ctx context.Context, id, status, manifestRef string, pageCount int, errMsg string) error {
+func (s *Store) UpdateStatus(ctx context.Context, id int64, status, manifestRef string, pageCount int, errMsg string) error {
 	_, err := s.pool.Exec(ctx, `
 UPDATE documents SET status = $2, manifest_ref = $3, page_count = $4, error = $5, updated_at = now()
 WHERE id = $1`, id, status, manifestRef, pageCount, errMsg)

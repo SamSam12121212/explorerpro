@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 )
 
 type documentStore interface {
-	Get(ctx context.Context, id string) (docstore.Document, error)
+	Get(ctx context.Context, id int64) (docstore.Document, error)
 }
 
 type threadDocumentStore interface {
@@ -368,7 +369,7 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
 			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(doc.ID),
+			escapePromptAttribute(formatDocumentID(doc.ID)),
 			manifest.PageCount),
 	})
 
@@ -420,7 +421,7 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
 			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(doc.ID),
+			escapePromptAttribute(formatDocumentID(doc.ID)),
 			manifest.PageCount),
 	})
 
@@ -504,10 +505,10 @@ func formatAvailableDocumentsBlock(documents []docstore.Document) string {
 	count := 0
 
 	for _, document := range documents {
-		id := strings.TrimSpace(document.ID)
-		if id == "" {
+		if document.ID <= 0 {
 			continue
 		}
+		id := formatDocumentID(document.ID)
 
 		name := strings.TrimSpace(document.Filename)
 		if name == "" {
@@ -532,6 +533,10 @@ func formatAvailableDocumentsBlock(documents []docstore.Document) string {
 
 	builder.WriteString("</available_documents>")
 	return builder.String()
+}
+
+func formatDocumentID(id int64) string {
+	return strconv.FormatInt(id, 10)
 }
 
 func appendQueryAttachedDocumentsTool(raw json.RawMessage) (json.RawMessage, error) {

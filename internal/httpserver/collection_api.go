@@ -28,7 +28,7 @@ type createCollectionRequest struct {
 }
 
 type addCollectionDocumentRequest struct {
-	DocumentID string `json:"document_id"`
+	DocumentID int64 `json:"document_id"`
 }
 
 type collectionRoute struct {
@@ -184,8 +184,8 @@ func (a *collectionAPI) handleAddCollectionDocument(w http.ResponseWriter, r *ht
 		return
 	}
 
-	documentID := strings.TrimSpace(req.DocumentID)
-	if documentID == "" {
+	documentID := req.DocumentID
+	if documentID <= 0 {
 		writeErrorJSON(w, http.StatusBadRequest, "document_id is required")
 		return
 	}

@@ -171,6 +171,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 
 	now := time.Now().UTC()
 	pages := make([]PageEntry, 0, len(pngFiles))
+	documentID := strconv.FormatInt(cmd.DocumentID, 10)
 
 	for i, pngPath := range pngFiles {
 		pageNum := i + 1
@@ -188,7 +189,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 			return "", 0, fmt.Errorf("decode page %d dimensions: %w", pageNum, err)
 		}
 
-		pageRef := s.blob.Ref("documents", cmd.DocumentID, "pages", fmt.Sprintf("page-%04d.png", pageNum))
+		pageRef := s.blob.Ref("documents", documentID, "pages", fmt.Sprintf("page-%04d.png", pageNum))
 		if err := s.blob.WriteRef(ctx, pageRef, data); err != nil {
 			return "", 0, fmt.Errorf("write page %d to blob: %w", pageNum, err)
 		}
@@ -209,7 +210,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		Filename:             doc.Filename,
 		CreatedAt:            now.Format(time.RFC3339),
 		PageCount:            len(pages),
-		AssetsRootRef:        s.blob.Ref("documents", cmd.DocumentID),
+		AssetsRootRef:        s.blob.Ref("documents", documentID),
 		RenderBackend:        "poppler/pdftocairo",
 		RenderBackendVersion: backendVersion,
 		RenderParams: RenderParams{
@@ -224,7 +225,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		return "", 0, fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	manifestRef := s.blob.Ref("documents", cmd.DocumentID, "manifest.json")
+	manifestRef := s.blob.Ref("documents", documentID, "manifest.json")
 	if err := s.blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
 		return "", 0, fmt.Errorf("write manifest to blob: %w", err)
 	}

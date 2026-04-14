@@ -16,14 +16,15 @@ import (
 func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 	ctx := context.Background()
 	blob := newTestBlobStore(t)
+	const documentID int64 = 123
 
-	imageRef := blob.Ref("documents", "doc_123", "pages", "page-0001.png")
+	imageRef := blob.Ref("documents", "123", "pages", "page-0001.png")
 	if err := blob.WriteRef(ctx, imageRef, []byte("png")); err != nil {
 		t.Fatalf("WriteRef(image) error = %v", err)
 	}
 
 	manifestJSON, err := json.Marshal(docsplitter.Manifest{
-		DocumentID: "doc_123",
+		DocumentID: documentID,
 		Filename:   "report.pdf",
 		PageCount:  1,
 		Pages: []docsplitter.PageEntry{
@@ -34,15 +35,15 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 		t.Fatalf("json.Marshal(manifest) error = %v", err)
 	}
 
-	manifestRef := blob.Ref("documents", "doc_123", "manifest.json")
+	manifestRef := blob.Ref("documents", "123", "manifest.json")
 	if err := blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
 		t.Fatalf("WriteRef(manifest) error = %v", err)
 	}
 
 	svc := New(nil, nil, nil, &fakeDocStore{
-		documents: map[string]docstore.Document{
-			"doc_123": {
-				ID:          "doc_123",
+		documents: map[int64]docstore.Document{
+			123: {
+				ID:          documentID,
 				Filename:    "report.pdf",
 				ManifestRef: manifestRef,
 				PageCount:   1,
@@ -55,7 +56,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 		RequestID:  "req_123",
 		Kind:       doccmd.PrepareKindWarmup,
 		ThreadID:   "thread_123",
-		DocumentID: "doc_123",
+		DocumentID: documentID,
 	})
 
 	if resp.Status != doccmd.PrepareStatusOK {
@@ -118,7 +119,7 @@ func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
 	resp := svc.prepareInput(context.Background(), doccmd.PrepareInputRequest{
 		RequestID:  "req_unsupported",
 		Kind:       "repo_warmup",
-		DocumentID: "doc_123",
+		DocumentID: 123,
 	})
 
 	if resp.Status != doccmd.PrepareStatusError {
@@ -133,7 +134,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{
 		documentsByThread: map[string][]docstore.Document{
 			"thread_123": {
-				{ID: "doc_1", Filename: `Quarterly "Report" <Draft>.pdf`},
+				{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 			},
 		},
 	}, newTestBlobStore(t))
@@ -150,7 +151,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	}
 
 	wantInstructions := "Be concise.\n\n<available_documents>\n" +
-		`<document id="doc_1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />` + "\n" +
+		`<document id="1" name="Quarterly &quot;Report&quot; &lt;Draft&gt;.pdf" />` + "\n" +
 		"</available_documents>"
 	if resp.Instructions != wantInstructions {
 		t.Fatalf("instructions = %q, want %q", resp.Instructions, wantInstructions)
@@ -190,10 +191,10 @@ func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
 }
 
 type fakeDocStore struct {
-	documents map[string]docstore.Document
+	documents map[int64]docstore.Document
 }
 
-func (s *fakeDocStore) Get(_ context.Context, id string) (docstore.Document, error) {
+func (s *fakeDocStore) Get(_ context.Context, id int64) (docstore.Document, error) {
 	doc, ok := s.documents[id]
 	if !ok {
 		return docstore.Document{}, docstore.ErrDocumentNotFound

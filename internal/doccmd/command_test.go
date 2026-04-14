@@ -12,7 +12,7 @@ func TestPrepareInputRequestRoundTrip(t *testing.T) {
 		RequestID:  "prep_123",
 		Kind:       PrepareKindWarmup,
 		ThreadID:   "thread_123",
-		DocumentID: "doc_123",
+		DocumentID: 123,
 		Task:       "warm document pages",
 		InputItems: json.RawMessage(`[{"type":"message","role":"user"}]`),
 	}
@@ -34,7 +34,7 @@ func TestPrepareInputRequestRoundTrip(t *testing.T) {
 		t.Fatalf("Kind = %q, want %q", decoded.Kind, req.Kind)
 	}
 	if decoded.DocumentID != req.DocumentID {
-		t.Fatalf("DocumentID = %q, want %q", decoded.DocumentID, req.DocumentID)
+		t.Fatalf("DocumentID = %d, want %d", decoded.DocumentID, req.DocumentID)
 	}
 }
 
@@ -42,8 +42,8 @@ func TestPrepareInputRequestValidation(t *testing.T) {
 	t.Parallel()
 
 	tests := []PrepareInputRequest{
-		{Kind: PrepareKindWarmup, DocumentID: "doc_123"},
-		{RequestID: "prep_123", DocumentID: "doc_123"},
+		{Kind: PrepareKindWarmup, DocumentID: 123},
+		{RequestID: "prep_123", DocumentID: 123},
 		{RequestID: "prep_123", Kind: PrepareKindWarmup},
 	}
 

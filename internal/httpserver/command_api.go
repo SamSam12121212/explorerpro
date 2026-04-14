@@ -51,7 +51,7 @@ type createThreadRequest struct {
 	Reasoning           json.RawMessage `json:"reasoning,omitempty"`
 	Store               *bool           `json:"store,omitempty"`
 	PreviousResponseID  string          `json:"previous_response_id,omitempty"`
-	AttachedDocumentIDs []string        `json:"attached_document_ids,omitempty"`
+	AttachedDocumentIDs []int64         `json:"attached_document_ids,omitempty"`
 }
 
 type submitCommandRequest struct {
@@ -938,7 +938,7 @@ func normalizeCommandBody(kind agentcmd.Kind, raw json.RawMessage) (json.RawMess
 	}
 }
 
-func attachedDocumentIDsForCommand(kind agentcmd.Kind, raw json.RawMessage) ([]string, error) {
+func attachedDocumentIDsForCommand(kind agentcmd.Kind, raw json.RawMessage) ([]int64, error) {
 	if kind != agentcmd.KindThreadResume {
 		return nil, nil
 	}
@@ -1000,13 +1000,13 @@ func normalizeOptionalBody(raw json.RawMessage) (json.RawMessage, error) {
 	return normalizeObjectBody(raw)
 }
 
-func extractAttachedDocumentIDs(raw json.RawMessage) ([]string, error) {
+func extractAttachedDocumentIDs(raw json.RawMessage) ([]int64, error) {
 	if isBlankJSON(raw) {
 		return nil, nil
 	}
 
 	var payload struct {
-		AttachedDocumentIDs []string `json:"attached_document_ids"`
+		AttachedDocumentIDs []int64 `json:"attached_document_ids"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, fmt.Errorf("decode attached_document_ids: %w", err)
@@ -1015,17 +1015,16 @@ func extractAttachedDocumentIDs(raw json.RawMessage) ([]string, error) {
 	return normalizeAttachedDocumentIDs(payload.AttachedDocumentIDs)
 }
 
-func normalizeAttachedDocumentIDs(rawIDs []string) ([]string, error) {
+func normalizeAttachedDocumentIDs(rawIDs []int64) ([]int64, error) {
 	if len(rawIDs) == 0 {
 		return nil, nil
 	}
 
-	seen := make(map[string]struct{}, len(rawIDs))
-	ids := make([]string, 0, len(rawIDs))
-	for _, rawID := range rawIDs {
-		id := strings.TrimSpace(rawID)
-		if id == "" {
-			return nil, fmt.Errorf("attached_document_ids cannot contain blank values")
+	seen := make(map[int64]struct{}, len(rawIDs))
+	ids := make([]int64, 0, len(rawIDs))
+	for _, id := range rawIDs {
+		if id <= 0 {
+			return nil, fmt.Errorf("attached_document_ids must contain only positive integers")
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -1037,11 +1036,11 @@ func normalizeAttachedDocumentIDs(rawIDs []string) ([]string, error) {
 	return ids, nil
 }
 
-func (a *commandAPI) ensureDocumentsExist(ctx context.Context, documentIDs []string) error {
+func (a *commandAPI) ensureDocumentsExist(ctx context.Context, documentIDs []int64) error {
 	for _, documentID := range documentIDs {
 		if _, err := a.docs.Get(ctx, documentID); err != nil {
 			if errors.Is(err, docstore.ErrDocumentNotFound) {
-				return fmt.Errorf("%w: %s", docstore.ErrDocumentNotFound, documentID)
+				return fmt.Errorf("%w: %d", docstore.ErrDocumentNotFound, documentID)
 			}
 			return err
 		}

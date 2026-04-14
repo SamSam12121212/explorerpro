@@ -174,7 +174,7 @@ LIMIT $2`, collectionID, limit)
 	return documents, rows.Err()
 }
 
-func (s *Store) AddDocument(ctx context.Context, collectionID, documentID string) error {
+func (s *Store) AddDocument(ctx context.Context, collectionID string, documentID int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin add collection document tx: %w", err)

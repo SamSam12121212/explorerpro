@@ -2,7 +2,7 @@ package docsplitter
 
 type Manifest struct {
 	Version              string       `json:"version"`
-	DocumentID           string       `json:"document_id"`
+	DocumentID           int64        `json:"document_id"`
 	Filename             string       `json:"filename"`
 	CreatedAt            string       `json:"created_at"`
 	PageCount            int          `json:"page_count"`

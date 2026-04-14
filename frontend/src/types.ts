@@ -81,7 +81,7 @@ export interface RepoAddResponse {
 }
 
 export interface DocumentEntry {
-  id: string;
+  id: number;
   filename: string;
   source_ref: string;
   status: string;
@@ -98,7 +98,7 @@ export interface DocumentEntry {
 }
 
 export interface AttachedDocument {
-  id: string;
+  id: number;
   filename: string;
   page_count: number;
   status: string;

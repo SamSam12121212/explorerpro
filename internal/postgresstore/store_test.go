@@ -48,3 +48,11 @@ func TestShouldPersistThreadEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatDocumentMetadataID(t *testing.T) {
+	t.Parallel()
+
+	if got := formatDocumentMetadataID(123); got != "123" {
+		t.Fatalf("formatDocumentMetadataID(123) = %q, want %q", got, "123")
+	}
+}

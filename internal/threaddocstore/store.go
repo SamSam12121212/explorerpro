@@ -17,7 +17,7 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func (s *Store) AddDocuments(ctx context.Context, threadID string, documentIDs []string) error {
+func (s *Store) AddDocuments(ctx context.Context, threadID string, documentIDs []int64) error {
 	if len(documentIDs) == 0 {
 		return nil
 	}
@@ -25,9 +25,9 @@ func (s *Store) AddDocuments(ctx context.Context, threadID string, documentIDs [
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO thread_documents (thread_id, document_id)
 SELECT $1, document_id
-FROM unnest($2::text[]) AS document_id
+FROM unnest($2::bigint[]) AS document_id
 ON CONFLICT (thread_id, document_id) DO NOTHING
-`, threadID, documentIDs)
+	`, threadID, documentIDs)
 	if err != nil {
 		return fmt.Errorf("insert thread documents for %s: %w", threadID, err)
 	}
@@ -93,7 +93,7 @@ LIMIT $2`, threadID, limit)
 	return documents, rows.Err()
 }
 
-func (s *Store) FilterAttached(ctx context.Context, threadID string, documentIDs []string) ([]string, error) {
+func (s *Store) FilterAttached(ctx context.Context, threadID string, documentIDs []int64) ([]int64, error) {
 	if len(documentIDs) == 0 {
 		return nil, nil
 	}
@@ -102,15 +102,15 @@ func (s *Store) FilterAttached(ctx context.Context, threadID string, documentIDs
 SELECT document_id
 FROM thread_documents
 WHERE thread_id = $1
-  AND document_id = ANY($2::text[])`, threadID, documentIDs)
+  AND document_id = ANY($2::bigint[])`, threadID, documentIDs)
 	if err != nil {
 		return nil, fmt.Errorf("filter attached documents for %s: %w", threadID, err)
 	}
 	defer rows.Close()
 
-	attached := make([]string, 0, len(documentIDs))
+	attached := make([]int64, 0, len(documentIDs))
 	for rows.Next() {
-		var id string
+		var id int64
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan attached document id: %w", err)
 		}
