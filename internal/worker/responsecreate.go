@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/doccmd"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/packages/param"
@@ -219,11 +219,11 @@ func decodeResponseCreateField(key string, raw json.RawMessage) (any, error) {
 }
 
 func normalizeMetadataJSON(raw json.RawMessage) (json.RawMessage, error) {
-	return agentcmd.NormalizeMetadata(raw)
+	return threadcmd.NormalizeMetadata(raw)
 }
 
 func decodeMetadataParam(raw json.RawMessage) (shared.Metadata, error) {
-	return agentcmd.DecodeMetadata(raw)
+	return threadcmd.DecodeMetadata(raw)
 }
 
 func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
@@ -239,11 +239,11 @@ func normalizeSharedMetadataParam(raw shared.Metadata) shared.Metadata {
 }
 
 func decodeToolsParam(raw json.RawMessage) ([]responses.ToolUnionParam, error) {
-	return agentcmd.DecodeTools(raw)
+	return threadcmd.DecodeTools(raw)
 }
 
 func normalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
-	return agentcmd.NormalizeToolsParam(tools)
+	return threadcmd.NormalizeToolsParam(tools)
 }
 
 func decodePayloadTools(value any) ([]responses.ToolUnionParam, error) {
@@ -271,28 +271,28 @@ func toolParamName(tool responses.ToolUnionParam) string {
 }
 
 func decodeReasoningParam(raw json.RawMessage) (shared.ReasoningParam, error) {
-	return agentcmd.DecodeReasoning(raw)
+	return threadcmd.DecodeReasoning(raw)
 }
 
 func normalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningParam {
-	return agentcmd.NormalizeReasoningParam(reasoning)
+	return threadcmd.NormalizeReasoningParam(reasoning)
 }
 
 func decodeToolChoiceParam(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {
-	return agentcmd.DecodeToolChoice(raw)
+	return threadcmd.DecodeToolChoice(raw)
 }
 
 func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {
 	return toolChoice
 }
 
-func filterSubagentToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) (responses.ResponseNewParamsToolChoiceUnion, bool) {
+func filterChildThreadToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) (responses.ResponseNewParamsToolChoiceUnion, bool) {
 	if !param.IsOmitted(toolChoice.OfToolChoiceMode) {
 		return toolChoice, true
 	}
 
 	if choice := toolChoice.OfAllowedTools; choice != nil {
-		filtered := filterSubagentAllowedTools(choice.Tools)
+		filtered := filterChildThreadAllowedTools(choice.Tools)
 		if len(filtered) == 0 {
 			return responses.ResponseNewParamsToolChoiceUnion{}, false
 		}
@@ -310,7 +310,7 @@ func filterSubagentToolChoiceParam(toolChoice responses.ResponseNewParamsToolCho
 	return toolChoice, true
 }
 
-func filterSubagentAllowedTools(tools []map[string]any) []map[string]any {
+func filterChildThreadAllowedTools(tools []map[string]any) []map[string]any {
 	filtered := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		if isInternalRuntimeToolName(toolDefinitionName(tool)) {
@@ -328,7 +328,7 @@ func toolDefinitionName(tool map[string]any) string {
 
 func isInternalRuntimeToolName(name string) bool {
 	switch name {
-	case "spawn_subagents", doccmd.ToolNameQueryAttachedDocuments:
+	case "spawn_threads", doccmd.ToolNameQueryAttachedDocuments:
 		return true
 	default:
 		return false
@@ -336,7 +336,7 @@ func isInternalRuntimeToolName(name string) bool {
 }
 
 func ensureRequiredResponseInclude(payload map[string]any) error {
-	include, err := agentcmd.EnsureIncludeValue(payload["include"])
+	include, err := threadcmd.EnsureIncludeValue(payload["include"])
 	if err != nil {
 		return err
 	}

@@ -8,7 +8,7 @@ It is not implemented yet.
 
 ## Decision
 
-The runtime will support two subagent spawn modes:
+The runtime will support two child thread spawn modes:
 
 - `cold_spawn`
 - `warm_branch`
@@ -46,7 +46,7 @@ That means the parent branch point must not rely only on one live socket's short
 Parent flow:
 
 1. Parent thread runs normally.
-2. Parent produces a plan or task list for child agents.
+2. Parent produces a plan or task list for child threads.
 3. Parent spawns N child threads in `warm_branch` mode.
 4. Each child starts from the same parent `previous_response_id`.
 5. Each child gets a different task.
@@ -110,7 +110,7 @@ The runtime should treat this as:
 - add only the branch-specific task input
 - keep the child on its own thread, socket, and ownership lease
 
-## Planned `spawn_subagents` Additions
+## Planned `spawn_threads` Additions
 
 The parent tool call should be able to request the spawn mode explicitly.
 
@@ -169,11 +169,11 @@ Example:
 4. Each child explores one concern using the same inherited codebase context.
 5. Parent recomposes the five results into one answer.
 
-This is stronger than single-repo agents because the branch point can already contain cross-repo understanding before the split.
+This is stronger than single-repo threads because the branch point can already contain cross-repo understanding before the split.
 
 ## Barrier Behavior
 
-Warm-branch children still use the same regroup path as normal subagents:
+Warm-branch children still use the same regroup path as normal child threads:
 
 - child finishes
 - child result is persisted
@@ -196,4 +196,4 @@ There is no separate regroup mechanism for warm branches.
 - It uses `previous_response_id`, not socket cloning.
 - It requires `store=true`.
 - It is especially important for the multi-repo Git engine.
-- It rejoins through the same `spawn_group` barrier system as standard subagents.
+- It rejoins through the same `spawn_group` barrier system as standard child threads.

@@ -2,14 +2,14 @@
 
 ## Command Plane
 
-Durable commands live in JetStream stream `AGENT_CMD`.
+Durable commands live in JetStream stream `THREAD_CMD`.
 
 Subjects:
 
-- `agent.dispatch.thread.start`
-- `agent.dispatch.thread.adopt`
-- `agent.dispatch.thread.<kind>` for unowned or expired threads
-- `agent.worker.<worker_id>.cmd.<kind>` for direct owner routing
+- `thread.dispatch.start`
+- `thread.dispatch.adopt`
+- `thread.dispatch.<kind_suffix>` for unowned or expired threads
+- `thread.worker.<worker_id>.cmd.<kind_suffix>` for direct owner routing
 
 Each command carries:
 

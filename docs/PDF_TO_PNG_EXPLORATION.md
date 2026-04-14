@@ -34,7 +34,7 @@ Key repo-grounded findings:
 - Local development already treats `./blob-storage` as the artifact root.
 - The suggested local blob layout already includes `blob-storage/pdfs/`, `blob-storage/child-results/`, and `blob-storage/tmp/`.
 - The worker already pauses on `function_call` output and resumes via `thread.submit_tool_output`, which is the right seam for integrating a PDF render step later.
-- There is not yet a general-purpose tool execution subsystem. The current code mainly special-cases `spawn_subagents` and otherwise lands model tool calls in `waiting_tool`.
+- There is not yet a general-purpose tool execution subsystem. The current code mainly special-cases `spawn_threads` and otherwise lands model tool calls in `waiting_tool`.
 - Recovery is replay-oriented, which means any eventual PDF render step should be idempotent.
 
 Practical implication:

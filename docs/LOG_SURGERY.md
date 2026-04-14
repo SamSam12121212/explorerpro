@@ -21,7 +21,7 @@ Clinical decision:
 - stop shortening command ids
 - log the thread graph explicitly
 - log causes, not prompts
-- make document children and subagent children read like the same runtime
+- make document children and spawned children read like the same runtime
 - do not change execution behavior just to satisfy logging
 
 This was an observability surgery, not a behavior surgery. The point was not to make the worker emit more noise. The point was to make the existing thread runtime legible.
@@ -110,7 +110,7 @@ Added shared log attribute enrichment in [`internal/worker/actor.go`](/Users/det
 Important effect:
 
 - every key lifecycle line can now be placed directly in the thread tree
-- document children and subagent children use the same structural vocabulary
+- document children and spawned children use the same structural vocabulary
 
 ### Incision 3: Log execution cause explicitly — DONE
 
@@ -189,7 +189,7 @@ Updated tests:
 
 - [`internal/logutil/handler_test.go`](/Users/detachedhead/explorer/internal/logutil/handler_test.go)
 - [`internal/worker/actor_test.go`](/Users/detachedhead/explorer/internal/worker/actor_test.go)
-- [`internal/agentcmd/command_test.go`](/Users/detachedhead/explorer/internal/agentcmd/command_test.go)
+- [`internal/threadcmd/command_test.go`](/Users/detachedhead/explorer/internal/threadcmd/command_test.go)
 
 Coverage added for:
 
@@ -204,7 +204,7 @@ Coverage added for:
 Verification run:
 
 - `go test ./internal/logutil`
-- `go test ./internal/agentcmd`
+- `go test ./internal/threadcmd`
 - `go test ./internal/worker`
 - `go test ./internal/httpserver`
 
@@ -222,7 +222,7 @@ Changed [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worke
 Important effect:
 
 - `function_call` stopped being a vague noun
-- known runtime calls such as `query_attached_documents` and `spawn_subagents` are recognizable at a glance
+- known runtime calls such as `query_attached_documents` and `spawn_threads` are recognizable at a glance
 - we still do not log raw arguments or prompt text
 
 ### Incision 9: Carry thread-graph context onto raw OpenAI event lines — DONE
@@ -252,7 +252,7 @@ Important effect:
 
 Changed:
 
-- [`internal/agentcmd/command.go`](/Users/detachedhead/explorer/internal/agentcmd/command.go)
+- [`internal/threadcmd/command.go`](/Users/detachedhead/explorer/internal/threadcmd/command.go)
 - [`internal/httpserver/command_api.go`](/Users/detachedhead/explorer/internal/httpserver/command_api.go)
 - [`internal/worker/service.go`](/Users/detachedhead/explorer/internal/worker/service.go)
 
@@ -348,7 +348,7 @@ The logs now say so out loud.
 ## What This Gives Us
 
 - one grep target: `root_thread_id`
-- one structural vocabulary for root threads, children, document queries, and subagents
+- one structural vocabulary for root threads, spawned children, and document queries
 - clear distinction between initial send, resume, regroup, and recovery
 - immediate visibility into whether document queries reused base anchors or required warmup
 - direct visibility into which known function call fired without opening payload tables
@@ -375,8 +375,8 @@ This stayed inside the normal thread runtime on purpose.
 
 - [`internal/logutil/handler.go`](/Users/detachedhead/explorer/internal/logutil/handler.go) — removed id shortening; kept explicit thread ids
 - [`internal/logutil/handler_test.go`](/Users/detachedhead/explorer/internal/logutil/handler_test.go) — updated formatter expectations
-- [`internal/agentcmd/command.go`](/Users/detachedhead/explorer/internal/agentcmd/command.go) — added shared command-log attrs and shared input-kind classification
-- [`internal/agentcmd/command_test.go`](/Users/detachedhead/explorer/internal/agentcmd/command_test.go) — added tests for command-log attrs
+- [`internal/threadcmd/command.go`](/Users/detachedhead/explorer/internal/threadcmd/command.go) — added shared command-log attrs and shared input-kind classification
+- [`internal/threadcmd/command_test.go`](/Users/detachedhead/explorer/internal/threadcmd/command_test.go) — added tests for command-log attrs
 - [`internal/httpserver/command_api.go`](/Users/detachedhead/explorer/internal/httpserver/command_api.go) — enriched API-side request/publish logs with shared command context
 - [`internal/worker/service.go`](/Users/detachedhead/explorer/internal/worker/service.go) — enriched dispatch logs with shared command context
 - [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go) — added thread-graph attr enrichment, trigger/cause logging, barrier logging, lineage-source logging, duplicate-key protection, raw-event graph attrs, function-call semantic attrs, child-response correlation, command lifecycle graph attrs, and warmup-handoff spawn normalization

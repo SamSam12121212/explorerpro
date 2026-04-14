@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
@@ -53,7 +53,7 @@ type threadActorConfig struct {
 	PreparedInputs docActorPreparedInputClient
 	Blob           *blobstore.LocalStore
 	OpenAIConfig   openaiws.Config
-	Publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	Publish        func(ctx context.Context, subject string, cmd threadcmd.Command) error
 	PublishEvent   func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 	SessionFactory func() *openaiws.Session
 }
@@ -116,7 +116,7 @@ type threadActor struct {
 	preparedInputs docActorPreparedInputClient
 	blob           *blobstore.LocalStore
 	cfg            openaiws.Config
-	publish        func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	publish        func(ctx context.Context, subject string, cmd threadcmd.Command) error
 	publishEvent   func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 
 	sessionFactory func() *openaiws.Session
@@ -342,12 +342,12 @@ func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
 	return queued.msg.Ack()
 }
 
-func (a *threadActor) appendCommandLifecycleGraphAttrs(attrs []any, cmd agentcmd.Command) []any {
+func (a *threadActor) appendCommandLifecycleGraphAttrs(attrs []any, cmd threadcmd.Command) []any {
 	meta := a.commandLifecycleThreadMeta(cmd)
 	return appendThreadGraphAttrs(attrs, meta)
 }
 
-func (a *threadActor) commandLifecycleThreadMeta(cmd agentcmd.Command) threadstore.ThreadMeta {
+func (a *threadActor) commandLifecycleThreadMeta(cmd threadcmd.Command) threadstore.ThreadMeta {
 	fallback := threadstore.ThreadMeta{
 		ID:           cmd.ThreadID,
 		RootThreadID: cmd.RootThreadID,
@@ -518,34 +518,34 @@ func shouldDropMissingThreadCommand(err error) bool {
 	return errors.Is(err, threadstore.ErrThreadNotFound)
 }
 
-func (a *threadActor) processCommand(cmd agentcmd.Command) error {
+func (a *threadActor) processCommand(cmd threadcmd.Command) error {
 	switch cmd.Kind {
-	case agentcmd.KindThreadStart:
+	case threadcmd.KindThreadStart:
 		return a.handleStart(cmd)
-	case agentcmd.KindThreadResume:
+	case threadcmd.KindThreadResume:
 		return a.handleResume(cmd)
-	case agentcmd.KindThreadSubmitToolOutput:
+	case threadcmd.KindThreadSubmitToolOutput:
 		return a.handleSubmitToolOutput(cmd)
-	case agentcmd.KindThreadChildCompleted:
+	case threadcmd.KindThreadChildCompleted:
 		return a.handleChildResult(cmd, "completed")
-	case agentcmd.KindThreadChildFailed:
+	case threadcmd.KindThreadChildFailed:
 		return a.handleChildResult(cmd, "failed")
-	case agentcmd.KindThreadAdopt:
+	case threadcmd.KindThreadAdopt:
 		return a.handleAdopt(cmd)
-	case agentcmd.KindThreadRotateSocket:
+	case threadcmd.KindThreadRotateSocket:
 		return a.handleRotateSocket(cmd)
-	case agentcmd.KindThreadReconcile:
+	case threadcmd.KindThreadReconcile:
 		return a.handleReconcile(cmd)
-	case agentcmd.KindThreadCancel:
+	case threadcmd.KindThreadCancel:
 		return a.handleCancel(cmd)
-	case agentcmd.KindThreadDisconnectSocket:
+	case threadcmd.KindThreadDisconnectSocket:
 		return a.handleDisconnectSocket(cmd)
 	default:
 		return fmt.Errorf("%w: %s", errUnsupportedKind, cmd.Kind)
 	}
 }
 
-func (a *threadActor) handleStart(cmd agentcmd.Command) error {
+func (a *threadActor) handleStart(cmd threadcmd.Command) error {
 	body, err := cmd.StartBody()
 	if err != nil {
 		return err
@@ -566,19 +566,19 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	if err != nil {
 		return fmt.Errorf("normalize thread.start metadata: %w", err)
 	}
-	body.Include, err = agentcmd.NormalizeInclude(body.Include)
+	body.Include, err = threadcmd.NormalizeInclude(body.Include)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start include: %w", err)
 	}
-	body.Tools, err = agentcmd.NormalizeTools(body.Tools)
+	body.Tools, err = threadcmd.NormalizeTools(body.Tools)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start tools: %w", err)
 	}
-	body.ToolChoice, err = agentcmd.NormalizeToolChoice(body.ToolChoice)
+	body.ToolChoice, err = threadcmd.NormalizeToolChoice(body.ToolChoice)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start tool_choice: %w", err)
 	}
-	body.Reasoning, err = agentcmd.NormalizeReasoning(body.Reasoning)
+	body.Reasoning, err = threadcmd.NormalizeReasoning(body.Reasoning)
 	if err != nil {
 		return fmt.Errorf("normalize thread.start reasoning: %w", err)
 	}
@@ -688,7 +688,7 @@ func (a *threadActor) handleStart(cmd agentcmd.Command) error {
 	return a.sendAndStream(meta, cmd.CmdID, payload, "start")
 }
 
-func (a *threadActor) handleResume(cmd agentcmd.Command) error {
+func (a *threadActor) handleResume(cmd threadcmd.Command) error {
 	body, err := cmd.ResumeBody()
 	if err != nil {
 		return err
@@ -753,7 +753,7 @@ func (a *threadActor) handleResume(cmd agentcmd.Command) error {
 	return a.continueWithPreparedInput(meta, cmd.CmdID, body.InputItems, body.PreparedInputRef, "user_input")
 }
 
-func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
+func (a *threadActor) handleSubmitToolOutput(cmd threadcmd.Command) error {
 	body, err := cmd.SubmitToolOutputBody()
 	if err != nil {
 		return err
@@ -819,7 +819,7 @@ func (a *threadActor) handleSubmitToolOutput(cmd agentcmd.Command) error {
 	return a.continueWithInputItems(meta, cmd.CmdID, inputItems, "tool_output")
 }
 
-func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus string) error {
+func (a *threadActor) handleChildResult(cmd threadcmd.Command, fallbackStatus string) error {
 	body, err := cmd.ChildResultBody()
 	if err != nil {
 		return err
@@ -968,7 +968,7 @@ func (a *threadActor) handleChildResult(cmd agentcmd.Command, fallbackStatus str
 	return nil
 }
 
-func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.ThreadMeta, spawn threadstore.SpawnGroupMeta, body agentcmd.ChildResultBody, status string) (bool, error) {
+func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.ThreadMeta, spawn threadstore.SpawnGroupMeta, body threadcmd.ChildResultBody, status string) (bool, error) {
 	if status != "completed" || body.ChildThreadID <= 0 {
 		return false, nil
 	}
@@ -1034,7 +1034,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 		return false, err
 	}
 
-	if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, startCmd); err != nil {
+	if err := a.publish(a.ctx, threadcmd.DispatchStartSubject, startCmd); err != nil {
 		return false, err
 	}
 
@@ -1056,7 +1056,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 	return true, nil
 }
 
-func (a *threadActor) handleAdopt(cmd agentcmd.Command) error {
+func (a *threadActor) handleAdopt(cmd threadcmd.Command) error {
 	if _, err := cmd.AdoptBody(); err != nil {
 		return err
 	}
@@ -1072,7 +1072,7 @@ func (a *threadActor) handleAdopt(cmd agentcmd.Command) error {
 	return a.recoverThread(meta, cmd.CmdID, false)
 }
 
-func (a *threadActor) handleRotateSocket(cmd agentcmd.Command) error {
+func (a *threadActor) handleRotateSocket(cmd threadcmd.Command) error {
 	body, err := cmd.RotateSocketBody()
 	if err != nil {
 		return err
@@ -1153,7 +1153,7 @@ func (a *threadActor) handleRotateSocket(cmd agentcmd.Command) error {
 	}, fmt.Sprintf("socket-rotate-%d", newGeneration))
 }
 
-func (a *threadActor) handleReconcile(cmd agentcmd.Command) error {
+func (a *threadActor) handleReconcile(cmd threadcmd.Command) error {
 	if _, err := cmd.ReconcileBody(); err != nil {
 		return err
 	}
@@ -1214,7 +1214,7 @@ func (a *threadActor) recoverThread(meta threadstore.ThreadMeta, cmdID string, f
 	}
 }
 
-func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
+func (a *threadActor) handleCancel(cmd threadcmd.Command) error {
 	if _, err := cmd.CancelBody(); err != nil {
 		return err
 	}
@@ -1261,7 +1261,7 @@ func (a *threadActor) handleCancel(cmd agentcmd.Command) error {
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
 
-func (a *threadActor) handleDisconnectSocket(cmd agentcmd.Command) error {
+func (a *threadActor) handleDisconnectSocket(cmd threadcmd.Command) error {
 	meta, err := a.store.LoadThread(a.ctx, cmd.ThreadID)
 	if err != nil {
 		return err
@@ -2183,7 +2183,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				itemType := itemTypeFromRaw(itemRaw)
 				if itemType == "function_call" {
 					call, err := parseFunctionCallItem(itemRaw)
-					if err == nil && call.Name == "spawn_subagents" {
+					if err == nil && call.Name == "spawn_threads" {
 						req, err := decodeSpawnRequest(call.Arguments, meta)
 						if err != nil {
 							return err
@@ -2986,7 +2986,7 @@ func outputItemSemanticAttrs(itemRaw json.RawMessage) []any {
 		if req, ok := decodeDocQueryRequestForLog(call.Arguments); ok {
 			attrs = append(attrs, "document_count", len(req.DocumentIDs))
 		}
-	case "spawn_subagents":
+	case "spawn_threads":
 		if req, ok := decodeSpawnRequestForLog(call.Arguments); ok {
 			attrs = append(attrs, "child_count", len(req.Children))
 			if spawnMode := normalizeSpawnMode(req.SpawnMode); spawnMode != "" {
@@ -3002,8 +3002,8 @@ func classifyFunctionCallName(name string) string {
 	switch strings.TrimSpace(name) {
 	case doccmd.ToolNameQueryAttachedDocuments:
 		return "document_query"
-	case "spawn_subagents":
-		return "spawn_subagents"
+	case "spawn_threads":
+		return "spawn_threads"
 	case "":
 		return "tool"
 	default:
@@ -3209,15 +3209,15 @@ func parseFunctionCallItem(raw json.RawMessage) (functionCallItem, error) {
 func decodeSpawnRequest(arguments string, parentMeta threadstore.ThreadMeta) (spawnRequest, error) {
 	var request spawnRequest
 	if err := json.Unmarshal([]byte(arguments), &request); err != nil {
-		return spawnRequest{}, fmt.Errorf("decode spawn_subagents arguments: %w", err)
+		return spawnRequest{}, fmt.Errorf("decode spawn_threads arguments: %w", err)
 	}
 
 	if len(request.Children) == 0 {
-		return spawnRequest{}, fmt.Errorf("spawn_subagents requires at least one child")
+		return spawnRequest{}, fmt.Errorf("spawn_threads requires at least one child")
 	}
 
 	if parentMeta.Depth >= 1 {
-		return spawnRequest{}, fmt.Errorf("spawn_subagents depth limit reached for thread %d", parentMeta.ID)
+		return spawnRequest{}, fmt.Errorf("spawn_threads depth limit reached for thread %d", parentMeta.ID)
 	}
 	switch normalizeSpawnMode(request.SpawnMode) {
 	case spawnModeCold, spawnModeWarmBranch:
@@ -3271,7 +3271,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 
 	spawnGroupID := stableDocumentSpawnGroupID(parentMeta.ID, roundCallID)
 	childThreadIDs := make([]int64, 0, len(docWork))
-	childCommands := make([]agentcmd.Command, 0, len(docWork))
+	childCommands := make([]threadcmd.Command, 0, len(docWork))
 	encodedParentCallID, err := encodeDocQueryRoundCalls(roundCalls)
 	if err != nil {
 		return "", err
@@ -3375,7 +3375,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	)
 
 	for _, cmd := range childCommands {
-		if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, cmd); err != nil {
+		if err := a.publish(a.ctx, threadcmd.DispatchStartSubject, cmd); err != nil {
 			return "", err
 		}
 	}
@@ -3497,7 +3497,7 @@ func roundCallsToPendingCalls(calls []docQueryRoundCall) []docQueryCall {
 	return pending
 }
 
-func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID string, documentID int64, documentName, model, phase, previousResponseID, preparedInputRef, task string, bootstrapChildThreadID int64) (int64, agentcmd.Command, bool, error) {
+func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID string, documentID int64, documentName, model, phase, previousResponseID, preparedInputRef, task string, bootstrapChildThreadID int64) (int64, threadcmd.Command, bool, error) {
 	cmdID := stableDocumentChildCmdID(parentMeta.ID, parentCallID, documentID, phase)
 
 	startBody := map[string]any{
@@ -3539,23 +3539,23 @@ func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.Thre
 
 	childMetadataJSON, err := json.Marshal(metadataMap)
 	if err != nil {
-		return 0, agentcmd.Command{}, false, fmt.Errorf("marshal child metadata: %w", err)
+		return 0, threadcmd.Command{}, false, fmt.Errorf("marshal child metadata: %w", err)
 	}
 
 	metadata, err := rawJSONToAny(childMetadataJSON)
 	if err != nil {
-		return 0, agentcmd.Command{}, false, fmt.Errorf("decode child metadata: %w", err)
+		return 0, threadcmd.Command{}, false, fmt.Errorf("decode child metadata: %w", err)
 	}
 	startBody["metadata"] = metadata
 
 	body, err := json.Marshal(startBody)
 	if err != nil {
-		return 0, agentcmd.Command{}, false, fmt.Errorf("marshal child start body: %w", err)
+		return 0, threadcmd.Command{}, false, fmt.Errorf("marshal child start body: %w", err)
 	}
 
 	threadID, reusedThread, err := a.prepareDocumentChildThreadMeta(parentMeta, spawnGroupID, parentCallID, documentID, phase, model, string(childMetadataJSON))
 	if err != nil {
-		return 0, agentcmd.Command{}, false, err
+		return 0, threadcmd.Command{}, false, err
 	}
 
 	causationID := parentMeta.LastResponseID
@@ -3563,9 +3563,9 @@ func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.Thre
 		causationID = previousResponseID
 	}
 
-	return threadID, agentcmd.Command{
+	return threadID, threadcmd.Command{
 		CmdID:        cmdID,
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     threadID,
 		RootThreadID: parentMeta.RootThreadID,
 		CausationID:  causationID,
@@ -3755,12 +3755,12 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 	}
 
 	childThreadIDs := make([]int64, 0, len(request.Children))
-	childCommands := make([]agentcmd.Command, 0, len(request.Children))
-	childToolsJSON, err := filterSubagentTools(parentMeta.ToolsJSON)
+	childCommands := make([]threadcmd.Command, 0, len(request.Children))
+	childToolsJSON, err := filterChildThreadTools(parentMeta.ToolsJSON)
 	if err != nil {
 		return "", err
 	}
-	childToolChoiceJSON, err := filterSubagentToolChoice(parentMeta.ToolChoiceJSON)
+	childToolChoiceJSON, err := filterChildThreadToolChoice(parentMeta.ToolChoiceJSON)
 	if err != nil {
 		return "", err
 	}
@@ -3801,7 +3801,7 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 		}
 		childIncludeJSON := parentMeta.IncludeJSON
 		if childIncludeJSON == "" {
-			normalizedInclude, err := agentcmd.NormalizeInclude(nil)
+			normalizedInclude, err := threadcmd.NormalizeInclude(nil)
 			if err != nil {
 				return "", fmt.Errorf("normalize child include: %w", err)
 			}
@@ -3860,9 +3860,9 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 			return "", fmt.Errorf("marshal child start body: %w", err)
 		}
 
-		childCommands = append(childCommands, agentcmd.Command{
+		childCommands = append(childCommands, threadcmd.Command{
 			CmdID:        cmdID,
-			Kind:         agentcmd.KindThreadStart,
+			Kind:         threadcmd.KindThreadStart,
 			ThreadID:     threadID,
 			RootThreadID: parentMeta.RootThreadID,
 			CausationID:  parentMeta.LastResponseID,
@@ -3895,7 +3895,7 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 			appendThreadGraphAttrs([]any{
 				"spawn_group_id", spawnGroupID,
 				"child_thread_id", threadID,
-				"child_kind", "subagent",
+				"child_kind", "thread",
 				"spawn_mode", spawnMode,
 				"child_model", defaultString(child.Model, parentMeta.Model),
 				"branch_previous_response_id", strings.TrimSpace(branchPreviousResponseID) != "",
@@ -3918,14 +3918,14 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 	a.logger.Info("opened child barrier",
 		appendThreadGraphAttrs([]any{
 			"spawn_group_id", spawnGroupID,
-			"child_source", "spawn_subagents",
+			"child_source", "spawn_threads",
 			"spawn_mode", spawnMode,
 			"expected_children", len(childCommands),
 		}, parentMeta)...,
 	)
 
 	for _, cmd := range childCommands {
-		if err := a.publish(a.ctx, agentcmd.DispatchStartSubject, cmd); err != nil {
+		if err := a.publish(a.ctx, threadcmd.DispatchStartSubject, cmd); err != nil {
 			return "", err
 		}
 	}
@@ -3957,7 +3957,7 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 		assistantText = ""
 	}
 
-	body, err := json.Marshal(agentcmd.ChildResultBody{
+	body, err := json.Marshal(threadcmd.ChildResultBody{
 		SpawnGroupID:    meta.ActiveSpawnGroupID,
 		ChildThreadID:   meta.ID,
 		ChildResponseID: meta.LastResponseID,
@@ -3968,24 +3968,24 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 		return fmt.Errorf("marshal child terminal body: %w", err)
 	}
 
-	kind := agentcmd.KindThreadChildCompleted
+	kind := threadcmd.KindThreadChildCompleted
 	if resultStatus != "completed" {
-		kind = agentcmd.KindThreadChildFailed
+		kind = threadcmd.KindThreadChildFailed
 	}
 
-	subject := agentcmd.DispatchAdoptSubject
+	subject := threadcmd.DispatchAdoptSubject
 	if parentMeta.OwnerWorkerID != "" {
-		subject = agentcmd.WorkerCommandSubject(parentMeta.OwnerWorkerID, kind)
+		subject = threadcmd.WorkerCommandSubject(parentMeta.OwnerWorkerID, kind)
 	} else {
 		switch kind {
-		case agentcmd.KindThreadChildCompleted:
-			subject = "agent.dispatch.thread.child_completed"
+		case threadcmd.KindThreadChildCompleted:
+			subject = "thread.dispatch.child_completed"
 		default:
-			subject = "agent.dispatch.thread.child_failed"
+			subject = "thread.dispatch.child_failed"
 		}
 	}
 
-	return a.publish(a.ctx, subject, agentcmd.Command{
+	return a.publish(a.ctx, subject, threadcmd.Command{
 		CmdID:        cmdID,
 		Kind:         kind,
 		ThreadID:     meta.ParentThreadID,
@@ -4124,13 +4124,13 @@ func mergeMetadataJSON(existing string, extra map[string]string, enabled bool) (
 	return string(raw), nil
 }
 
-func filterSubagentTools(raw string) (string, error) {
+func filterChildThreadTools(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
 	}
 
-	tools, err := agentcmd.DecodeTools(json.RawMessage(raw))
+	tools, err := threadcmd.DecodeTools(json.RawMessage(raw))
 	if err != nil {
 		return "", fmt.Errorf("decode tools for child filtering: %w", err)
 	}
@@ -4155,7 +4155,7 @@ func filterSubagentTools(raw string) (string, error) {
 	return string(payload), nil
 }
 
-func filterSubagentToolChoice(raw string) (string, error) {
+func filterChildThreadToolChoice(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
@@ -4166,7 +4166,7 @@ func filterSubagentToolChoice(raw string) (string, error) {
 		return "", fmt.Errorf("decode tool_choice for child filtering: %w", err)
 	}
 
-	filtered, ok := filterSubagentToolChoiceParam(choice)
+	filtered, ok := filterChildThreadToolChoiceParam(choice)
 	if !ok {
 		return "", nil
 	}
@@ -4256,7 +4256,7 @@ func isTerminalThreadStatus(status threadstore.ThreadStatus) bool {
 	}
 }
 
-func validateCommandPreconditions(cmd agentcmd.Command, meta threadstore.ThreadMeta) error {
+func validateCommandPreconditions(cmd threadcmd.Command, meta threadstore.ThreadMeta) error {
 	if cmd.ExpectedStatus != "" && string(meta.Status) != cmd.ExpectedStatus {
 		return fmt.Errorf("%w: expected status %s, got %s", errCommandPrecond, cmd.ExpectedStatus, meta.Status)
 	}

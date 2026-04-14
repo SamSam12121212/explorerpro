@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
@@ -20,6 +19,7 @@ import (
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threaddocstore"
 	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
@@ -53,7 +53,7 @@ type Service struct {
 	docClient    *documenthandler.Client
 	docStore     docActorDocStore
 	sweepStore   serviceSweepStore
-	publishFn    func(ctx context.Context, subject string, cmd agentcmd.Command) error
+	publishFn    func(ctx context.Context, subject string, cmd threadcmd.Command) error
 
 	actorsMu sync.Mutex
 	actors   map[int64]*threadActor
@@ -106,7 +106,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	if err := natsbootstrap.EnsureAgentCommandStream(s.runtime.NATS().JetStream()); err != nil {
+	if err := natsbootstrap.EnsureThreadCommandStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
 	if err := natsbootstrap.EnsureThreadEventsStream(s.runtime.NATS().JetStream()); err != nil {
@@ -120,11 +120,11 @@ func (s *Service) Run(ctx context.Context) error {
 	workerCh := make(chan *nats.Msg, 256)
 
 	dispatchSub, err := s.runtime.NATS().JetStream().ChanQueueSubscribe(
-		"agent.dispatch.thread.*",
-		agentcmd.DispatchQueue,
+		"thread.dispatch.*",
+		threadcmd.DispatchQueue,
 		dispatchCh,
-		nats.BindStream(agentcmd.StreamName),
-		nats.Durable(agentcmd.DurableDispatchName()),
+		nats.BindStream(threadcmd.StreamName),
+		nats.Durable(threadcmd.DurableDispatchName()),
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(commandAckWait),
@@ -135,10 +135,10 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	workerSub, err := s.runtime.NATS().JetStream().ChanSubscribe(
-		agentcmd.WorkerCommandWildcard(s.workerID),
+		threadcmd.WorkerCommandWildcard(s.workerID),
 		workerCh,
-		nats.BindStream(agentcmd.StreamName),
-		nats.Durable(agentcmd.DurableWorkerName(s.workerID)),
+		nats.BindStream(threadcmd.StreamName),
+		nats.Durable(threadcmd.DurableWorkerName(s.workerID)),
 		nats.InactiveThreshold(workerConsumerTTL),
 		nats.ManualAck(),
 		nats.AckExplicit(),
@@ -204,13 +204,13 @@ func (s *Service) consumeChannel(ctx context.Context, source string, ch <-chan *
 }
 
 func (s *Service) dispatchMessage(ctx context.Context, msg *nats.Msg) error {
-	cmd, err := agentcmd.Decode(msg.Data)
+	cmd, err := threadcmd.Decode(msg.Data)
 	if err != nil {
 		s.logger.Error("invalid command payload", "subject", msg.Subject, "error", err)
 		return msg.Term()
 	}
 
-	if kindFromSubject := agentcmd.SubjectToKind(msg.Subject); kindFromSubject != "" && cmd.Kind == "" {
+	if kindFromSubject := threadcmd.SubjectToKind(msg.Subject); kindFromSubject != "" && cmd.Kind == "" {
 		cmd.Kind = kindFromSubject
 	}
 
@@ -220,7 +220,7 @@ func (s *Service) dispatchMessage(ctx context.Context, msg *nats.Msg) error {
 	}
 
 	s.logger.Info("command dispatched to actor",
-		append(agentcmd.LogAttrs(cmd),
+		append(threadcmd.LogAttrs(cmd),
 			"subject", msg.Subject,
 		)...,
 	)
@@ -294,7 +294,7 @@ func newWorkerID() (string, error) {
 
 type queuedCommand struct {
 	msg *nats.Msg
-	cmd agentcmd.Command
+	cmd threadcmd.Command
 }
 
 func boolOrDefault(value *bool, fallback bool) bool {
@@ -346,7 +346,7 @@ func (s *Service) publishThreadEvent(ctx context.Context, threadID int64, socket
 	return nil
 }
 
-func (s *Service) publishCommand(ctx context.Context, subject string, cmd agentcmd.Command) error {
+func (s *Service) publishCommand(ctx context.Context, subject string, cmd threadcmd.Command) error {
 	if s.publishFn != nil {
 		return s.publishFn(ctx, subject, cmd)
 	}
@@ -477,9 +477,9 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 	now := time.Now().UTC()
 	ownerLive := ownerKnown && strings.TrimSpace(owner.WorkerID) != "" && owner.LeaseUntil.After(now)
 
-	subject := agentcmd.DispatchSubject(kind)
-	if kind == agentcmd.KindThreadAdopt {
-		subject = agentcmd.DispatchAdoptSubject
+	subject := threadcmd.DispatchSubject(kind)
+	if kind == threadcmd.KindThreadAdopt {
+		subject = threadcmd.DispatchAdoptSubject
 	}
 
 	if ownerLive {
@@ -489,7 +489,7 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 		if s.hasLiveActor(threadID) {
 			return nil
 		}
-		subject = agentcmd.WorkerCommandSubject(s.workerID, kind)
+		subject = threadcmd.WorkerCommandSubject(s.workerID, kind)
 	}
 
 	cmd, err := buildRecoveryCommand(meta, owner, kind)
@@ -508,15 +508,15 @@ func (s *Service) hasLiveActor(threadID int64) bool {
 	return ok && !actor.IsClosed()
 }
 
-func recoveryKindForThread(meta threadstore.ThreadMeta) agentcmd.Kind {
+func recoveryKindForThread(meta threadstore.ThreadMeta) threadcmd.Kind {
 	if meta.Status == threadstore.ThreadStatusRunning || meta.Status == threadstore.ThreadStatusReconciling || meta.ActiveResponseID != "" {
-		return agentcmd.KindThreadReconcile
+		return threadcmd.KindThreadReconcile
 	}
 
-	return agentcmd.KindThreadAdopt
+	return threadcmd.KindThreadAdopt
 }
 
-func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRecord, kind agentcmd.Kind) (agentcmd.Command, error) {
+func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRecord, kind threadcmd.Kind) (threadcmd.Command, error) {
 	bodyStruct := map[string]any{
 		"previous_worker_id":  owner.WorkerID,
 		"required_generation": owner.SocketGeneration,
@@ -524,7 +524,7 @@ func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRe
 
 	body, err := json.Marshal(bodyStruct)
 	if err != nil {
-		return agentcmd.Command{}, fmt.Errorf("marshal recovery body: %w", err)
+		return threadcmd.Command{}, fmt.Errorf("marshal recovery body: %w", err)
 	}
 
 	cmdID := fmt.Sprintf("recovery_%s_%s_%d_%s",
@@ -534,7 +534,7 @@ func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRe
 		strings.ReplaceAll(string(meta.Status), ".", "_"),
 	)
 
-	return agentcmd.Command{
+	return threadcmd.Command{
 		CmdID:                    cmdID,
 		Kind:                     kind,
 		ThreadID:                 meta.ID,
@@ -582,7 +582,7 @@ func (s *Service) scheduleSocketRotations(ctx context.Context) {
 				continue
 			}
 
-			if err := s.publishCommand(ctx, agentcmd.WorkerCommandSubject(s.workerID, agentcmd.KindThreadRotateSocket), cmd); err != nil {
+			if err := s.publishCommand(ctx, threadcmd.WorkerCommandSubject(s.workerID, threadcmd.KindThreadRotateSocket), cmd); err != nil {
 				s.logger.Warn("failed to publish rotate command", "thread_id", threadID, "error", err)
 			}
 		}
@@ -616,18 +616,18 @@ func shouldRotateSocket(meta threadstore.ThreadMeta, workerID string, now time.T
 	return !meta.SocketExpiresAt.After(now.Add(socketRotateLead))
 }
 
-func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (agentcmd.Command, error) {
-	body, err := json.Marshal(agentcmd.RotateSocketBody{
+func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (threadcmd.Command, error) {
+	body, err := json.Marshal(threadcmd.RotateSocketBody{
 		Reason:      "pre_expiry_rotation",
 		ScheduledAt: now.Format(time.RFC3339),
 	})
 	if err != nil {
-		return agentcmd.Command{}, fmt.Errorf("marshal rotate body: %w", err)
+		return threadcmd.Command{}, fmt.Errorf("marshal rotate body: %w", err)
 	}
 
-	return agentcmd.Command{
+	return threadcmd.Command{
 		CmdID:                    fmt.Sprintf("rotate_%d_%d", meta.ID, meta.SocketGeneration),
-		Kind:                     agentcmd.KindThreadRotateSocket,
+		Kind:                     threadcmd.KindThreadRotateSocket,
 		ThreadID:                 meta.ID,
 		RootThreadID:             defaultRootThreadID(meta),
 		ExpectedStatus:           string(meta.Status),

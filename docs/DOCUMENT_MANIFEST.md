@@ -17,7 +17,7 @@ Responsible for:
 - writing the manifest
 - storing assets in blob storage
 
-### Agent Runtime
+### Thread Runtime
 
 Responsible for:
 

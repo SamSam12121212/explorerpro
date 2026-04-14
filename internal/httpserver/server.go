@@ -16,8 +16,8 @@ import (
 )
 
 func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime) (*http.Server, error) {
-	if err := natsbootstrap.EnsureAgentCommandStream(runtime.NATS().JetStream()); err != nil {
-		return nil, fmt.Errorf("bootstrap agent command stream: %w", err)
+	if err := natsbootstrap.EnsureThreadCommandStream(runtime.NATS().JetStream()); err != nil {
+		return nil, fmt.Errorf("bootstrap thread command stream: %w", err)
 	}
 	if err := natsbootstrap.EnsureGitCommandStream(runtime.NATS().JetStream()); err != nil {
 		return nil, fmt.Errorf("bootstrap git command stream: %w", err)

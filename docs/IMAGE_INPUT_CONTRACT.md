@@ -19,7 +19,7 @@ Responsible for:
 - storing original bytes in blob storage
 - producing the runtime image reference and metadata
 
-### Agent Runtime
+### Thread Runtime
 
 Responsible for:
 

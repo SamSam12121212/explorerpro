@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"explorer/internal/agentcmd"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threadstore"
 )
 
@@ -75,7 +75,7 @@ func (s *fakeSweepStore) PruneExpiredOpenAISocketSessions(_ context.Context, _ t
 
 type publishedCommand struct {
 	subject string
-	cmd     agentcmd.Command
+	cmd     threadcmd.Command
 }
 
 type recoveryHarness struct {
@@ -102,7 +102,7 @@ func newRecoveryHarness(t *testing.T, workerID string) *recoveryHarness {
 		sweepStore: store,
 		actors:     map[int64]*threadActor{},
 	}
-	h.service.publishFn = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+	h.service.publishFn = func(_ context.Context, subject string, cmd threadcmd.Command) error {
 		h.published = append(h.published, publishedCommand{
 			subject: subject,
 			cmd:     cmd,
@@ -174,11 +174,11 @@ func TestRecoveryHarnessReconcilesExpiredRunningThread(t *testing.T) {
 	h.recover(100)
 
 	published := h.requireSinglePublish()
-	if published.subject != agentcmd.DispatchSubject(agentcmd.KindThreadReconcile) {
-		t.Fatalf("subject = %q, want %q", published.subject, agentcmd.DispatchSubject(agentcmd.KindThreadReconcile))
+	if published.subject != threadcmd.DispatchSubject(threadcmd.KindThreadReconcile) {
+		t.Fatalf("subject = %q, want %q", published.subject, threadcmd.DispatchSubject(threadcmd.KindThreadReconcile))
 	}
-	if published.cmd.Kind != agentcmd.KindThreadReconcile {
-		t.Fatalf("kind = %q, want %q", published.cmd.Kind, agentcmd.KindThreadReconcile)
+	if published.cmd.Kind != threadcmd.KindThreadReconcile {
+		t.Fatalf("kind = %q, want %q", published.cmd.Kind, threadcmd.KindThreadReconcile)
 	}
 	if published.cmd.ExpectedSocketGeneration != 7 {
 		t.Fatalf("ExpectedSocketGeneration = %d, want 7", published.cmd.ExpectedSocketGeneration)
@@ -216,11 +216,11 @@ func TestRecoveryHarnessAdoptsExpiredWaitingChildrenThread(t *testing.T) {
 	h.recover(200)
 
 	published := h.requireSinglePublish()
-	if published.subject != agentcmd.DispatchAdoptSubject {
-		t.Fatalf("subject = %q, want %q", published.subject, agentcmd.DispatchAdoptSubject)
+	if published.subject != threadcmd.DispatchAdoptSubject {
+		t.Fatalf("subject = %q, want %q", published.subject, threadcmd.DispatchAdoptSubject)
 	}
-	if published.cmd.Kind != agentcmd.KindThreadAdopt {
-		t.Fatalf("kind = %q, want %q", published.cmd.Kind, agentcmd.KindThreadAdopt)
+	if published.cmd.Kind != threadcmd.KindThreadAdopt {
+		t.Fatalf("kind = %q, want %q", published.cmd.Kind, threadcmd.KindThreadAdopt)
 	}
 
 	body, err := published.cmd.AdoptBody()
@@ -291,12 +291,12 @@ func TestRecoveryHarnessRequeuesOwnedThreadToSameWorkerOnRestart(t *testing.T) {
 	h.recover(400)
 
 	published := h.requireSinglePublish()
-	wantSubject := agentcmd.WorkerCommandSubject("worker-local-1", agentcmd.KindThreadReconcile)
+	wantSubject := threadcmd.WorkerCommandSubject("worker-local-1", threadcmd.KindThreadReconcile)
 	if published.subject != wantSubject {
 		t.Fatalf("subject = %q, want %q", published.subject, wantSubject)
 	}
-	if published.cmd.Kind != agentcmd.KindThreadReconcile {
-		t.Fatalf("kind = %q, want %q", published.cmd.Kind, agentcmd.KindThreadReconcile)
+	if published.cmd.Kind != threadcmd.KindThreadReconcile {
+		t.Fatalf("kind = %q, want %q", published.cmd.Kind, threadcmd.KindThreadReconcile)
 	}
 }
 
@@ -356,12 +356,12 @@ func TestRecoveryHarnessSchedulesRotationOnlyForLocalLiveActors(t *testing.T) {
 	h.rotateSweep()
 
 	published := h.requireSinglePublish()
-	wantSubject := agentcmd.WorkerCommandSubject("worker-local-1", agentcmd.KindThreadRotateSocket)
+	wantSubject := threadcmd.WorkerCommandSubject("worker-local-1", threadcmd.KindThreadRotateSocket)
 	if published.subject != wantSubject {
 		t.Fatalf("subject = %q, want %q", published.subject, wantSubject)
 	}
-	if published.cmd.Kind != agentcmd.KindThreadRotateSocket {
-		t.Fatalf("kind = %q, want %q", published.cmd.Kind, agentcmd.KindThreadRotateSocket)
+	if published.cmd.Kind != threadcmd.KindThreadRotateSocket {
+		t.Fatalf("kind = %q, want %q", published.cmd.Kind, threadcmd.KindThreadRotateSocket)
 	}
 	if published.cmd.ThreadID != 600 {
 		t.Fatalf("ThreadID = %d, want 600", published.cmd.ThreadID)

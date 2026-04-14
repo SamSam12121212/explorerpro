@@ -11,8 +11,8 @@ export const COLLECTIONS_CHANGED_EVENT = "explorer:collections-changed";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
-  "If parallel work would materially help, you may call spawn_subagents once with up to 10 child agents.",
-  "Only use subagents when the task benefits from decomposition; otherwise answer normally.",
+  "If parallel work would materially help, you may call spawn_threads once with up to 10 child threads.",
+  "Only use child threads when the task benefits from decomposition; otherwise answer normally.",
   "After child results return, synthesize one final answer for the user.",
 ].join(" ");
 
@@ -28,9 +28,9 @@ export const REASONING_OPTIONS: { value: ReasoningEffort; label: string }[] = [
 export const EXPLORER_TOOLS = [
   {
     type: "function",
-    name: "spawn_subagents",
+    name: "spawn_threads",
     description:
-      "Launch up to 10 focused child agent threads for parallel work and synthesize their results back in the parent thread.",
+      "Launch up to 10 focused child threads for parallel work and synthesize their results back in the parent thread.",
     parameters: {
       type: "object",
       additionalProperties: false,

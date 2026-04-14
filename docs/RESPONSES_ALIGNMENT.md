@@ -189,7 +189,7 @@ The next typed request-shape slice is now done too.
 - direct request payloads and stored thread `tool_choice` state now both normalize through that same typed builder path
 - child-thread filtering now reuses the same typed `tool_choice` decode instead of assuming the payload is always a JSON object
 - child filtering now correctly preserves string modes such as `"auto"` and `"required"`
-- child filtering now drops runtime-only function choices for `spawn_subagents` and `query_attached_documents`
+- child filtering now drops runtime-only function choices for `spawn_threads` and `query_attached_documents`
 - `allowed_tools` child filtering now strips those runtime-only function definitions while keeping any remaining allowed tools intact
 
 ### Why this is better
@@ -243,7 +243,7 @@ The next ingress-alignment cleanup is now done too.
 ### What changed
 
 - `POST /threads` now normalizes `metadata`, `include`, `tool_choice`, and `reasoning` before writing the initial `thread.start` command body and initial `ThreadMeta`
-- shared field-normalization helpers now live in `internal/agentcmd`, so the API layer and worker use the same canonicalization logic for these top-level request fields
+- shared field-normalization helpers now live in `internal/threadcmd`, so the API layer and worker use the same canonicalization logic for these top-level request fields
 - `thread.start` still re-normalizes `metadata`, `include`, `tool_choice`, and `reasoning` defensively before storing thread state and sending the first response
 
 ### Why this is better
@@ -259,7 +259,7 @@ The next top-level request field slice is now done too.
 
 ### What changed
 
-- shared normalization helpers in `internal/agentcmd` now normalize `tools` through `openai-go`'s request-side tool union
+- shared normalization helpers in `internal/threadcmd` now normalize `tools` through `openai-go`'s request-side tool union
 - `POST /threads` now normalizes `tools` before writing the initial `thread.start` body and initial `ThreadMeta`
 - `thread.start` now defensively re-normalizes `tools` before storing thread state and sending the first response
 - the canonical payload builder now decodes `tools` into typed `responses.ToolUnionParam` slices

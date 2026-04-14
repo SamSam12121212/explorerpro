@@ -1,6 +1,6 @@
 # ExplorerPRO
 
-An agent runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready and has loads of bugs.
+A runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode). Not considered production-ready and has loads of bugs.
 
 OpenAI-native by design with no provider abstraction layer which has not yet been planned. Azure OpenAI also does not work.
 
@@ -11,7 +11,7 @@ In the current setup, your data is not processed under ZDR settings, so potentia
 ## Aims
 
 - Thread execution with persistent worker-owned WebSockets and response continuity via `previous_response_id`
-- Parallel subagent fan-out — parent spawns N children on separate sockets, results regroup through a barrier
+- Parallel child thread fan-out — parent spawns N children on separate sockets, results regroup through a barrier
 - Warm branching — children fork from a parent's accumulated context instead of starting cold
 - Sticky worker ownership tracked in Postgres, commands route directly
 - Durable command transport via NATS + JetStream with idempotent delivery and replay safety

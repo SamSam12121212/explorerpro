@@ -11,7 +11,7 @@
 
 - Postgres holds durable runtime truth: thread snapshots, ownership, dedupe, item history, response storage, spawn groups, spawn results, and thread-document links.
 - NATS + JetStream carries command delivery and thread history:
-  - `AGENT_CMD` for durable commands
+  - `THREAD_CMD` for durable commands
   - `THREAD_EVENTS` for live browser fanout
   - `THREAD_HISTORY` for durable `client.response.create` checkpoints and raw socket history
 - Blob storage holds large source artifacts such as prepared input packages, document pages, and image bytes.
@@ -49,7 +49,7 @@ flowchart LR
 ## Main Flow
 
 1. The API creates the thread row in Postgres.
-2. The API publishes `thread.start` to `AGENT_CMD`.
+2. The API publishes `thread.start` to `THREAD_CMD`.
 3. A worker claims ownership in Postgres and opens the socket.
 4. The worker sends `response.create` and persists thread snapshots, items, responses, and spawn state to Postgres.
 5. The worker publishes live deltas to `THREAD_EVENTS` and durable raw history to `THREAD_HISTORY`.

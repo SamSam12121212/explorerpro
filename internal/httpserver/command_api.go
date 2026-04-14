@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/idgen"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threaddocstore"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
@@ -56,7 +56,7 @@ type createThreadRequest struct {
 
 type submitCommandRequest struct {
 	CmdID                    string          `json:"cmd_id,omitempty"`
-	Kind                     agentcmd.Kind   `json:"kind"`
+	Kind                     threadcmd.Kind  `json:"kind"`
 	RootThreadID             int64           `json:"root_thread_id,omitempty"`
 	CausationID              string          `json:"causation_id,omitempty"`
 	CorrelationID            string          `json:"correlation_id,omitempty"`
@@ -195,27 +195,27 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	include, err := agentcmd.NormalizeInclude(req.Include)
+	include, err := threadcmd.NormalizeInclude(req.Include)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	metadata, err := agentcmd.NormalizeMetadata(req.Metadata)
+	metadata, err := threadcmd.NormalizeMetadata(req.Metadata)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	toolChoice, err := agentcmd.NormalizeToolChoice(req.ToolChoice)
+	toolChoice, err := threadcmd.NormalizeToolChoice(req.ToolChoice)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tools, err := agentcmd.NormalizeTools(req.Tools)
+	tools, err := threadcmd.NormalizeTools(req.Tools)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	reasoning, err := agentcmd.NormalizeReasoning(req.Reasoning)
+	reasoning, err := threadcmd.NormalizeReasoning(req.Reasoning)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -246,7 +246,7 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := json.Marshal(agentcmd.StartBody{
+	body, err := json.Marshal(threadcmd.StartBody{
 		InitialInput:       initialInput,
 		Model:              req.Model,
 		Instructions:       req.Instructions,
@@ -286,9 +286,9 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:        cmdID,
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     threadID,
 		RootThreadID: threadID,
 		CreatedAt:    now.Format(time.RFC3339),
@@ -296,13 +296,13 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 	}
 
 	a.logger.Info("create thread request received",
-		append(agentcmd.LogAttrs(cmd),
+		append(threadcmd.LogAttrs(cmd),
 			"attached_document_count", len(attachedDocumentIDs),
 			"has_tools", len(tools) > 0,
 		)...,
 	)
 
-	subject := agentcmd.DispatchStartSubject
+	subject := threadcmd.DispatchStartSubject
 	if err := a.publishCommand(r.Context(), subject, cmd); err != nil {
 		writeErrorJSON(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -371,7 +371,7 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if req.Kind == agentcmd.KindThreadStart {
+	if req.Kind == threadcmd.KindThreadStart {
 		writeErrorJSON(w, http.StatusBadRequest, "use POST /threads for thread.start")
 		return
 	}
@@ -421,7 +421,7 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		rootThreadID = threadID
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:                    cmdID,
 		Kind:                     req.Kind,
 		ThreadID:                 threadID,
@@ -437,7 +437,7 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 	}
 
 	a.logger.Info("submit command request received",
-		append(agentcmd.LogAttrs(cmd),
+		append(threadcmd.LogAttrs(cmd),
 			"thread_status", meta.Status,
 			"attached_document_count", len(attachedDocumentIDs),
 		)...,
@@ -787,28 +787,28 @@ func (a *commandAPI) listSpawnResultsForRead(ctx context.Context, spawnGroupID s
 	return a.store.ListSpawnResults(ctx, spawnGroupID)
 }
 
-func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID int64, kind agentcmd.Kind) (string, bool, threadstore.OwnerRecord, error) {
+func (a *commandAPI) resolveCommandSubject(ctx context.Context, threadID int64, kind threadcmd.Kind) (string, bool, threadstore.OwnerRecord, error) {
 	switch kind {
-	case agentcmd.KindThreadStart, agentcmd.KindThreadAdopt:
-		return agentcmd.DispatchSubject(kind), false, threadstore.OwnerRecord{}, nil
+	case threadcmd.KindThreadStart, threadcmd.KindThreadAdopt:
+		return threadcmd.DispatchSubject(kind), false, threadstore.OwnerRecord{}, nil
 	}
 
 	owner, err := a.store.LoadOwner(ctx, threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
-			return agentcmd.DispatchSubject(kind), false, threadstore.OwnerRecord{}, nil
+			return threadcmd.DispatchSubject(kind), false, threadstore.OwnerRecord{}, nil
 		}
 		return "", false, threadstore.OwnerRecord{}, err
 	}
 
 	if strings.TrimSpace(owner.WorkerID) == "" || !owner.LeaseUntil.After(time.Now().UTC()) {
-		return agentcmd.DispatchSubject(kind), false, owner, nil
+		return threadcmd.DispatchSubject(kind), false, owner, nil
 	}
 
-	return agentcmd.WorkerCommandSubject(owner.WorkerID, kind), true, owner, nil
+	return threadcmd.WorkerCommandSubject(owner.WorkerID, kind), true, owner, nil
 }
 
-func (a *commandAPI) publishCommand(ctx context.Context, subject string, cmd agentcmd.Command) error {
+func (a *commandAPI) publishCommand(ctx context.Context, subject string, cmd threadcmd.Command) error {
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return fmt.Errorf("marshal command: %w", err)
@@ -826,7 +826,7 @@ func (a *commandAPI) publishCommand(ctx context.Context, subject string, cmd age
 	}
 
 	a.logger.Info("published command",
-		append(agentcmd.LogAttrs(cmd),
+		append(threadcmd.LogAttrs(cmd),
 			"subject", subject,
 		)...,
 	)
@@ -914,37 +914,37 @@ func parseThreadRoute(path string) (threadRoute, bool) {
 	return route, true
 }
 
-func normalizeCommandBody(kind agentcmd.Kind, raw json.RawMessage) (json.RawMessage, error) {
+func normalizeCommandBody(kind threadcmd.Kind, raw json.RawMessage) (json.RawMessage, error) {
 	switch kind {
-	case agentcmd.KindThreadResume:
+	case threadcmd.KindThreadResume:
 		return normalizeResumeBody(raw)
-	case agentcmd.KindThreadSubmitToolOutput:
-		cmd := agentcmd.Command{Kind: kind, Body: raw}
+	case threadcmd.KindThreadSubmitToolOutput:
+		cmd := threadcmd.Command{Kind: kind, Body: raw}
 		if _, err := cmd.SubmitToolOutputBody(); err != nil {
 			return nil, err
 		}
 		return raw, nil
-	case agentcmd.KindThreadCancel:
+	case threadcmd.KindThreadCancel:
 		return normalizeOptionalBody(raw)
-	case agentcmd.KindThreadDisconnectSocket:
+	case threadcmd.KindThreadDisconnectSocket:
 		return normalizeOptionalBody(raw)
-	case agentcmd.KindThreadAdopt:
+	case threadcmd.KindThreadAdopt:
 		return normalizeOptionalBody(raw)
-	case agentcmd.KindThreadChildCompleted, agentcmd.KindThreadChildFailed:
-		cmd := agentcmd.Command{Kind: kind, Body: raw}
+	case threadcmd.KindThreadChildCompleted, threadcmd.KindThreadChildFailed:
+		cmd := threadcmd.Command{Kind: kind, Body: raw}
 		if _, err := cmd.ChildResultBody(); err != nil {
 			return nil, err
 		}
 		return raw, nil
-	case agentcmd.KindThreadRotateSocket, agentcmd.KindThreadReconcile:
+	case threadcmd.KindThreadRotateSocket, threadcmd.KindThreadReconcile:
 		return normalizeOptionalBody(raw)
 	default:
 		return nil, fmt.Errorf("unsupported command kind %q", kind)
 	}
 }
 
-func attachedDocumentIDsForCommand(kind agentcmd.Kind, raw json.RawMessage) ([]int64, error) {
-	if kind != agentcmd.KindThreadResume {
+func attachedDocumentIDsForCommand(kind threadcmd.Kind, raw json.RawMessage) ([]int64, error) {
+	if kind != threadcmd.KindThreadResume {
 		return nil, nil
 	}
 	return extractAttachedDocumentIDs(raw)
@@ -974,7 +974,7 @@ func normalizeResumeBody(raw json.RawMessage) (json.RawMessage, error) {
 	}
 
 	if reasoningRaw, ok := payload["reasoning"]; ok {
-		reasoning, err := agentcmd.NormalizeReasoning(reasoningRaw)
+		reasoning, err := threadcmd.NormalizeReasoning(reasoningRaw)
 		if err != nil {
 			return nil, fmt.Errorf("normalize reasoning: %w", err)
 		}
@@ -990,7 +990,7 @@ func normalizeResumeBody(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshal resume body: %w", err)
 	}
 
-	cmd := agentcmd.Command{Kind: agentcmd.KindThreadResume, Body: normalized}
+	cmd := threadcmd.Command{Kind: threadcmd.KindThreadResume, Body: normalized}
 	if _, err := cmd.ResumeBody(); err != nil {
 		return nil, err
 	}
@@ -1436,9 +1436,9 @@ func isTerminalThreadStatus(status threadstore.ThreadStatus) bool {
 	}
 }
 
-func requiresActiveThread(kind agentcmd.Kind) bool {
+func requiresActiveThread(kind threadcmd.Kind) bool {
 	switch kind {
-	case agentcmd.KindThreadResume, agentcmd.KindThreadSubmitToolOutput:
+	case threadcmd.KindThreadResume, threadcmd.KindThreadSubmitToolOutput:
 		return true
 	default:
 		return false

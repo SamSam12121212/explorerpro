@@ -1,4 +1,4 @@
-package agentcmd
+package threadcmd
 
 import (
 	"encoding/json"

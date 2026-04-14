@@ -68,7 +68,7 @@ After surgery, the document query flow will be:
 
 1. Model calls `query_attached_documents` during `streamUntilTerminal`
 2. Actor detects the tool call — same as today
-3. On `response.completed`, actor treats it **exactly like `spawn_subagents`**:
+3. On `response.completed`, actor treats it **exactly like `spawn_threads`**:
   - validates the requested document IDs are attached
   - resolves the model for each document
   - resolves `previous_response_id` from thread-local lineage, then from a compatible shared base anchor if present
@@ -105,7 +105,7 @@ Replaced `handlePendingDocumentQuery` (inline `docExec.Execute()`) with `startDo
 - resolves `previous_response_id` for each document from the latest completed document-query child thread, then from the shared base anchor on `documents`
 - if no lineage exists, requests a `warmup` prepared input from `documenthandler` that bundles the document pages
 - builds one child thread per document with `store: true`, the resolved model, and `document_id` in metadata
-- delegates to the same spawn group + dispatch barrier used by `spawn_subagents`
+- delegates to the same spawn group + dispatch barrier used by `spawn_threads`
 - parent status → `waiting_children`
 
 New interfaces on the actor: `docActorDocStore`, `docActorPreparedInputClient`, plus a runtime-store lookup for latest completed document child lineage.
@@ -176,8 +176,8 @@ Aligned:
 The thread hierarchy naturally handles document queries:
 
 - **Root thread**: the chat thread the user is talking to
-- **Parent thread**: the chat thread (or a subagent, if subagents gain document access later)
-- **Child thread**: the document query thread (structurally identical to a subagent child)
+- **Parent thread**: the chat thread (or another child thread, if nested document access is added later)
+- **Child thread**: the document query thread (structurally identical to any other spawned child)
 
 The child thread does not know it is a "document query." It is just a thread that started as a normal thread, either from a branch point or from a prepared input artifact.
 

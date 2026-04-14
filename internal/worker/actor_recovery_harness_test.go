@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 )
@@ -274,7 +274,7 @@ func newActorRecoveryHarness(t *testing.T, store *fakeActorStore, conn *actorTes
 		store:    store,
 		history:  store,
 		cfg:      testOpenAIConfig(),
-		publish:  func(context.Context, string, agentcmd.Command) error { return nil },
+		publish:  func(context.Context, string, threadcmd.Command) error { return nil },
 		ctx:      context.Background(),
 	}
 

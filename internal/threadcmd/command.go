@@ -1,4 +1,4 @@
-package agentcmd
+package threadcmd
 
 import (
 	"encoding/json"
@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	StreamName            = "AGENT_CMD"
-	DispatchQueue         = "agent-dispatchers"
-	DispatchStartSubject  = "agent.dispatch.thread.start"
-	DispatchAdoptSubject  = "agent.dispatch.thread.adopt"
-	WorkerSubjectTemplate = "agent.worker.%s.cmd.%s"
+	StreamName            = "THREAD_CMD"
+	DispatchQueue         = "thread-dispatchers"
+	DispatchStartSubject  = "thread.dispatch.start"
+	DispatchAdoptSubject  = "thread.dispatch.adopt"
+	WorkerSubjectTemplate = "thread.worker.%s.cmd.%s"
 )
 
 type Kind string
@@ -363,16 +363,15 @@ func (c Command) ChildResultBody() (ChildResultBody, error) {
 }
 
 func WorkerCommandSubject(workerID string, kind Kind) string {
-	suffix := strings.ReplaceAll(string(kind), ".", ".")
-	return fmt.Sprintf(WorkerSubjectTemplate, workerID, suffix)
+	return fmt.Sprintf(WorkerSubjectTemplate, workerID, kindSubjectSuffix(kind))
 }
 
 func DispatchSubject(kind Kind) string {
-	return "agent.dispatch." + strings.ReplaceAll(string(kind), ".", ".")
+	return "thread.dispatch." + kindSubjectSuffix(kind)
 }
 
 func WorkerCommandWildcard(workerID string) string {
-	return fmt.Sprintf("agent.worker.%s.cmd.>", workerID)
+	return fmt.Sprintf("thread.worker.%s.cmd.>", workerID)
 }
 
 func DurableWorkerName(workerID string) string {
@@ -384,19 +383,33 @@ func DurableDispatchName() string {
 }
 
 func SubjectToKind(subject string) Kind {
-	switch subject {
-	case DispatchStartSubject:
-		return KindThreadStart
-	case DispatchAdoptSubject:
-		return KindThreadAdopt
-	}
-
 	parts := strings.Split(subject, ".")
-	if len(parts) < 5 {
+	if len(parts) < 3 {
 		return ""
 	}
 
-	return Kind(strings.Join(parts[4:], "."))
+	var suffix string
+	switch {
+	case len(parts) >= 3 && parts[0] == "thread" && parts[1] == "dispatch":
+		suffix = strings.Join(parts[2:], ".")
+	case len(parts) >= 5 && parts[0] == "thread" && parts[1] == "worker" && parts[3] == "cmd":
+		suffix = strings.Join(parts[4:], ".")
+	default:
+		return ""
+	}
+
+	if suffix == "" {
+		return ""
+	}
+	if !strings.HasPrefix(suffix, "thread.") {
+		suffix = "thread." + suffix
+	}
+
+	return Kind(suffix)
+}
+
+func kindSubjectSuffix(kind Kind) string {
+	return strings.TrimPrefix(string(kind), "thread.")
 }
 
 func sanitizeToken(raw string) string {

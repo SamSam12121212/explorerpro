@@ -154,7 +154,7 @@ There is no separate document executor runtime anymore.
 
 ### 6. Regroup uses the normal spawn barrier
 
-When a child finishes, the parent handles it through the same child-result path used for subagents.
+When a child finishes, the parent handles it through the same child-result path used for spawned child threads.
 
 That path:
 
@@ -224,7 +224,7 @@ Still true:
 
 - documents are not injected into the parent thread as raw page payloads
 - the parent thread only sees attachment metadata plus tool availability
-- subagent tools filter out `query_attached_documents`
+- child thread tools filter out `query_attached_documents`
 - the composer still does not support a document-only send without text or image input
 
 ## Relevant Files

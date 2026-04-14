@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"explorer/internal/agentcmd"
 	"explorer/internal/blobstore"
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/openaiws"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadcmd"
 	"explorer/internal/threadstore"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -364,17 +364,17 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 	actor := newActorRecoveryHarness(t, store, nil)
 	got := actor.appendCommandLifecycleGraphAttrs([]any{
 		"cmd_id", "cmd_123",
-		"kind", agentcmd.KindThreadStart,
-	}, agentcmd.Command{
+		"kind", threadcmd.KindThreadStart,
+	}, threadcmd.Command{
 		CmdID:        "cmd_123",
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_child"),
 		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
 		"cmd_id", "cmd_123",
-		"kind", agentcmd.KindThreadStart,
+		"kind", threadcmd.KindThreadStart,
 		"root_thread_id", tid("thread_root"),
 		"parent_thread_id", tid("thread_parent"),
 		"parent_call_id", "call_parent",
@@ -391,17 +391,17 @@ func TestAppendCommandLifecycleGraphAttrsFallsBackToCommandRootThreadID(t *testi
 	actor := newActorRecoveryHarness(t, newFakeActorStore(t), nil)
 	got := actor.appendCommandLifecycleGraphAttrs([]any{
 		"cmd_id", "cmd_123",
-		"kind", agentcmd.KindThreadResume,
-	}, agentcmd.Command{
+		"kind", threadcmd.KindThreadResume,
+	}, threadcmd.Command{
 		CmdID:        "cmd_123",
-		Kind:         agentcmd.KindThreadResume,
+		Kind:         threadcmd.KindThreadResume,
 		ThreadID:     tid("thread_missing"),
 		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
 		"cmd_id", "cmd_123",
-		"kind", agentcmd.KindThreadResume,
+		"kind", threadcmd.KindThreadResume,
 		"root_thread_id", tid("thread_root"),
 		"depth", 0,
 	}
@@ -421,7 +421,7 @@ func TestValidateCommandPreconditions(t *testing.T) {
 		SocketGeneration: 7,
 	}
 
-	if err := validateCommandPreconditions(agentcmd.Command{
+	if err := validateCommandPreconditions(threadcmd.Command{
 		ExpectedStatus:           "waiting_tool",
 		ExpectedLastResponseID:   "resp_123",
 		ExpectedSocketGeneration: 7,
@@ -429,7 +429,7 @@ func TestValidateCommandPreconditions(t *testing.T) {
 		t.Fatalf("validateCommandPreconditions() unexpected error: %v", err)
 	}
 
-	err := validateCommandPreconditions(agentcmd.Command{
+	err := validateCommandPreconditions(threadcmd.Command{
 		ExpectedSocketGeneration: 8,
 	}, meta)
 	if !errors.Is(err, errCommandPrecond) {
@@ -485,8 +485,8 @@ func TestBuildResponseCreatePayloadMergesThreadToolState(t *testing.T) {
 	payloadJSON, err := buildResponseCreatePayload(threadstore.ThreadMeta{
 		MetadataJSON:   `{"tenant":"acme"}`,
 		IncludeJSON:    `["reasoning.encrypted_content"]`,
-		ToolsJSON:      `[{"type":"function","name":"spawn_subagents"}]`,
-		ToolChoiceJSON: `{"type":"function","name":"spawn_subagents"}`,
+		ToolsJSON:      `[{"type":"function","name":"spawn_threads"}]`,
+		ToolChoiceJSON: `{"type":"function","name":"spawn_threads"}`,
 	}, map[string]any{
 		"model": "gpt-5.4",
 		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
@@ -1013,12 +1013,12 @@ func TestLowerResponseCreatePayloadConvertsImageRef(t *testing.T) {
 	}
 }
 
-func TestFilterSubagentToolsRemovesSpawnTool(t *testing.T) {
+func TestFilterChildThreadToolsRemovesSpawnTool(t *testing.T) {
 	t.Parallel()
 
-	filtered, err := filterSubagentTools(`[{"type":"function","name":"spawn_subagents"},{"type":"function","name":"lookup"}]`)
+	filtered, err := filterChildThreadTools(`[{"type":"function","name":"spawn_threads"},{"type":"function","name":"lookup"}]`)
 	if err != nil {
-		t.Fatalf("filterSubagentTools() error = %v", err)
+		t.Fatalf("filterChildThreadTools() error = %v", err)
 	}
 
 	var tools []map[string]any
@@ -1107,19 +1107,19 @@ func TestMergeMetadataJSONAddsWarmBranchFields(t *testing.T) {
 	}
 }
 
-func TestFilterSubagentToolChoicePreservesMode(t *testing.T) {
+func TestFilterChildThreadToolChoicePreservesMode(t *testing.T) {
 	t.Parallel()
 
-	got, err := filterSubagentToolChoice(`"auto"`)
+	got, err := filterChildThreadToolChoice(`"auto"`)
 	if err != nil {
-		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+		t.Fatalf("filterChildThreadToolChoice() error = %v", err)
 	}
 	if got != `"auto"` {
-		t.Fatalf("filterSubagentToolChoice() = %s, want %s", got, `"auto"`)
+		t.Fatalf("filterChildThreadToolChoice() = %s, want %s", got, `"auto"`)
 	}
 }
 
-func TestFilterSubagentToolChoiceDropsInternalFunctionChoices(t *testing.T) {
+func TestFilterChildThreadToolChoiceDropsInternalFunctionChoices(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1127,8 +1127,8 @@ func TestFilterSubagentToolChoiceDropsInternalFunctionChoices(t *testing.T) {
 		raw  string
 	}{
 		{
-			name: "spawn subagents",
-			raw:  `{"type":"function","name":"spawn_subagents"}`,
+			name: "spawn child threads",
+			raw:  `{"type":"function","name":"spawn_threads"}`,
 		},
 		{
 			name: "attached documents",
@@ -1141,35 +1141,35 @@ func TestFilterSubagentToolChoiceDropsInternalFunctionChoices(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := filterSubagentToolChoice(tt.raw)
+			got, err := filterChildThreadToolChoice(tt.raw)
 			if err != nil {
-				t.Fatalf("filterSubagentToolChoice() error = %v", err)
+				t.Fatalf("filterChildThreadToolChoice() error = %v", err)
 			}
 			if got != "" {
-				t.Fatalf("filterSubagentToolChoice() = %s, want empty", got)
+				t.Fatalf("filterChildThreadToolChoice() = %s, want empty", got)
 			}
 		})
 	}
 }
 
-func TestFilterSubagentToolChoiceFiltersAllowedTools(t *testing.T) {
+func TestFilterChildThreadToolChoiceFiltersAllowedTools(t *testing.T) {
 	t.Parallel()
 
-	got, err := filterSubagentToolChoice(`{
+	got, err := filterChildThreadToolChoice(`{
 		"type":"allowed_tools",
 		"mode":"required",
 		"tools":[
-			{"type":"function","name":"spawn_subagents"},
+			{"type":"function","name":"spawn_threads"},
 			{"type":"function","name":"query_attached_documents"},
 			{"type":"function","name":"keep_tool"},
 			{"type":"web_search_preview"}
 		]
 	}`)
 	if err != nil {
-		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+		t.Fatalf("filterChildThreadToolChoice() error = %v", err)
 	}
 	if got == "" {
-		t.Fatal("filterSubagentToolChoice() returned empty result")
+		t.Fatal("filterChildThreadToolChoice() returned empty result")
 	}
 
 	var decoded map[string]any
@@ -1206,22 +1206,22 @@ func TestFilterSubagentToolChoiceFiltersAllowedTools(t *testing.T) {
 	}
 }
 
-func TestFilterSubagentToolChoiceDropsEmptyAllowedTools(t *testing.T) {
+func TestFilterChildThreadToolChoiceDropsEmptyAllowedTools(t *testing.T) {
 	t.Parallel()
 
-	got, err := filterSubagentToolChoice(`{
+	got, err := filterChildThreadToolChoice(`{
 		"type":"allowed_tools",
 		"mode":"required",
 		"tools":[
-			{"type":"function","name":"spawn_subagents"},
+			{"type":"function","name":"spawn_threads"},
 			{"type":"function","name":"query_attached_documents"}
 		]
 	}`)
 	if err != nil {
-		t.Fatalf("filterSubagentToolChoice() error = %v", err)
+		t.Fatalf("filterChildThreadToolChoice() error = %v", err)
 	}
 	if got != "" {
-		t.Fatalf("filterSubagentToolChoice() = %s, want empty", got)
+		t.Fatalf("filterChildThreadToolChoice() = %s, want empty", got)
 	}
 }
 
@@ -1381,7 +1381,7 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 		}, nil
 	})
 
-	body, err := json.Marshal(agentcmd.StartBody{
+	body, err := json.Marshal(threadcmd.StartBody{
 		Model:        "gpt-5.4",
 		Instructions: "Base instructions.",
 		InitialInput: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
@@ -1390,9 +1390,9 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 		t.Fatalf("json.Marshal(StartBody) error = %v", err)
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:        "cmd_start",
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
 		Body:         body,
@@ -1429,7 +1429,7 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	body, err := json.Marshal(agentcmd.StartBody{
+	body, err := json.Marshal(threadcmd.StartBody{
 		Model:        "gpt-5.4",
 		InitialInput: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]`),
 		Metadata:     json.RawMessage(`{"branch_index":2}`),
@@ -1441,9 +1441,9 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 		t.Fatalf("json.Marshal(StartBody) error = %v", err)
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:        "cmd_start",
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
 		Body:         body,
@@ -1571,7 +1571,7 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	body, err := json.Marshal(agentcmd.StartBody{
+	body, err := json.Marshal(threadcmd.StartBody{
 		Model:            "gpt-5.4",
 		PreparedInputRef: ref,
 	})
@@ -1579,9 +1579,9 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 		t.Fatalf("json.Marshal(StartBody) error = %v", err)
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:        "cmd_start_prepared",
-		Kind:         agentcmd.KindThreadStart,
+		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
 		Body:         body,
@@ -1682,16 +1682,16 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	body, err := json.Marshal(agentcmd.ResumeBody{
+	body, err := json.Marshal(threadcmd.ResumeBody{
 		PreparedInputRef: ref,
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(ResumeBody) error = %v", err)
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:        "cmd_resume_prepared",
-		Kind:         agentcmd.KindThreadResume,
+		Kind:         threadcmd.KindThreadResume,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
 		Body:         body,
@@ -1867,9 +1867,9 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	actor.setMeta(store.threads[tid("thread_idle")])
 	actor.openAISocketID = "socket_live_1"
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_disconnect_1",
-		Kind:     agentcmd.KindThreadDisconnectSocket,
+		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_idle"),
 	}
 
@@ -1908,9 +1908,9 @@ func TestHandleDisconnectSocketRejectsNonIdleThread(t *testing.T) {
 	actor.threadID = tid("thread_running")
 	actor.setMeta(store.threads[tid("thread_running")])
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_disconnect_2",
-		Kind:     agentcmd.KindThreadDisconnectSocket,
+		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_running"),
 	}
 
@@ -1938,9 +1938,9 @@ func TestHandleDisconnectSocketNoopsWithoutSession(t *testing.T) {
 	actor.threadID = tid("thread_nosess")
 	actor.setMeta(store.threads[tid("thread_nosess")])
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_disconnect_3",
-		Kind:     agentcmd.KindThreadDisconnectSocket,
+		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_nosess"),
 	}
 
@@ -2022,11 +2022,11 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 
 	var (
 		publishedSubject string
-		publishedCmd     agentcmd.Command
+		publishedCmd     threadcmd.Command
 	)
 
 	actor := newActorRecoveryHarness(t, store, nil)
-	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+	actor.publish = func(_ context.Context, subject string, cmd threadcmd.Command) error {
 		publishedSubject = subject
 		publishedCmd = cmd
 		return nil
@@ -2043,7 +2043,7 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 		t.Fatalf("publishChildInvocationResult() error = %v", err)
 	}
 
-	if publishedSubject != agentcmd.WorkerCommandSubject("worker-parent", agentcmd.KindThreadChildCompleted) {
+	if publishedSubject != threadcmd.WorkerCommandSubject("worker-parent", threadcmd.KindThreadChildCompleted) {
 		t.Fatalf("subject = %q, want worker child_completed subject", publishedSubject)
 	}
 
@@ -2069,11 +2069,11 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 
 	var (
 		publishedSubject string
-		publishedCmd     agentcmd.Command
+		publishedCmd     threadcmd.Command
 	)
 
 	actor := newActorRecoveryHarness(t, store, nil)
-	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+	actor.publish = func(_ context.Context, subject string, cmd threadcmd.Command) error {
 		publishedSubject = subject
 		publishedCmd = cmd
 		return nil
@@ -2095,7 +2095,7 @@ func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) 
 		t.Fatalf("publishChildInvocationResult() error = %v", err)
 	}
 
-	if publishedSubject != agentcmd.WorkerCommandSubject("worker-parent", agentcmd.KindThreadChildFailed) {
+	if publishedSubject != threadcmd.WorkerCommandSubject("worker-parent", threadcmd.KindThreadChildFailed) {
 		t.Fatalf("subject = %q, want worker child_failed subject", publishedSubject)
 	}
 
@@ -2127,9 +2127,9 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 
 	actor := newActorRecoveryHarness(t, store, nil)
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_child_completed",
-		Kind:     agentcmd.KindThreadChildCompleted,
+		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"sg_waiting",
@@ -2181,9 +2181,9 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_child_completed",
-		Kind:     agentcmd.KindThreadChildCompleted,
+		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"sg_waiting",
@@ -2496,12 +2496,12 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	}
 }
 
-func TestFilterSubagentToolsRemovesDocumentQueryTool(t *testing.T) {
+func TestFilterChildThreadToolsRemovesDocumentQueryTool(t *testing.T) {
 	t.Parallel()
 
-	filtered, err := filterSubagentTools(`[{"type":"function","name":"query_attached_documents"},{"type":"function","name":"lookup"}]`)
+	filtered, err := filterChildThreadTools(`[{"type":"function","name":"query_attached_documents"},{"type":"function","name":"lookup"}]`)
 	if err != nil {
-		t.Fatalf("filterSubagentTools() error = %v", err)
+		t.Fatalf("filterChildThreadTools() error = %v", err)
 	}
 
 	var tools []map[string]any
@@ -2536,7 +2536,7 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 		UpdatedAt:      time.Date(2026, 4, 13, 10, 1, 0, 0, time.UTC),
 	}
 
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := &threadActor{
 		ctx:    context.Background(),
 		logger: testActorLogger(),
@@ -2556,7 +2556,7 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 			},
 		},
 		preparedInputs: &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"},
-		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publish: func(_ context.Context, _ string, cmd threadcmd.Command) error {
 			publishedCommands = append(publishedCommands, cmd)
 			return nil
 		},
@@ -2615,7 +2615,7 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 		UpdatedAt:      time.Date(2026, 4, 13, 11, 1, 0, 0, time.UTC),
 	}
 
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := &threadActor{
 		ctx:    context.Background(),
 		logger: testActorLogger(),
@@ -2635,7 +2635,7 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 			},
 		},
 		preparedInputs: &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"},
-		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publish: func(_ context.Context, _ string, cmd threadcmd.Command) error {
 			publishedCommands = append(publishedCommands, cmd)
 			return nil
 		},
@@ -2683,7 +2683,7 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 	}
 
 	preparedInputs := &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"}
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := &threadActor{
 		ctx:    context.Background(),
 		logger: testActorLogger(),
@@ -2705,7 +2705,7 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 			},
 		},
 		preparedInputs: preparedInputs,
-		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publish: func(_ context.Context, _ string, cmd threadcmd.Command) error {
 			publishedCommands = append(publishedCommands, cmd)
 			return nil
 		},
@@ -2764,7 +2764,7 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	}
 
 	preparedInputs := &fakeDocActorPreparedInputClient{ref: "blob://prepared/warmup"}
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := &threadActor{
 		ctx:    context.Background(),
 		logger: testActorLogger(),
@@ -2784,7 +2784,7 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 			},
 		},
 		preparedInputs: preparedInputs,
-		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+		publish: func(_ context.Context, _ string, cmd threadcmd.Command) error {
 			publishedCommands = append(publishedCommands, cmd)
 			return nil
 		},
@@ -2885,20 +2885,20 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	}
 
 	var publishedSubject string
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := newActorRecoveryHarness(t, store, nil)
 	var logBuf bytes.Buffer
 	actor.logger = slog.New(slog.NewTextHandler(&logBuf, nil))
 	actor.docStore = docStore
-	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+	actor.publish = func(_ context.Context, subject string, cmd threadcmd.Command) error {
 		publishedSubject = subject
 		publishedCommands = append(publishedCommands, cmd)
 		return nil
 	}
 
-	cmd := agentcmd.Command{
+	cmd := threadcmd.Command{
 		CmdID:    "cmd_child_completed",
-		Kind:     agentcmd.KindThreadChildCompleted,
+		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
 			"spawn_group_id":"` + spawnGroupID + `",
@@ -2925,8 +2925,8 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 		t.Fatalf("Model = %q, want gpt-5.4-mini", docStore.baseUpdates[0].Model)
 	}
 
-	if publishedSubject != agentcmd.DispatchStartSubject {
-		t.Fatalf("publishedSubject = %q, want %q", publishedSubject, agentcmd.DispatchStartSubject)
+	if publishedSubject != threadcmd.DispatchStartSubject {
+		t.Fatalf("publishedSubject = %q, want %q", publishedSubject, threadcmd.DispatchStartSubject)
 	}
 	if len(publishedCommands) != 1 {
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
@@ -3017,7 +3017,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 			[]byte(`{"type":"response.completed","response":{"id":"resp_1"}}`),
 		},
 	}
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[int64][]docstore.Document{
@@ -3030,7 +3030,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 		},
 	}
 	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
-	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+	actor.publish = func(_ context.Context, _ string, cmd threadcmd.Command) error {
 		publishedCommands = append(publishedCommands, cmd)
 		return nil
 	}
@@ -3052,8 +3052,8 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
 	}
 	cmd := publishedCommands[0]
-	if cmd.Kind != agentcmd.KindThreadStart {
-		t.Fatalf("command kind = %q, want %q", cmd.Kind, agentcmd.KindThreadStart)
+	if cmd.Kind != threadcmd.KindThreadStart {
+		t.Fatalf("command kind = %q, want %q", cmd.Kind, threadcmd.KindThreadStart)
 	}
 }
 
@@ -3090,7 +3090,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 			[]byte(`{"type":"response.completed","response":{"id":"resp_1"}}`),
 		},
 	}
-	var publishedCommands []agentcmd.Command
+	var publishedCommands []threadcmd.Command
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadDocs = &fakeThreadDocumentStore{
 		documentsByThread: map[int64][]docstore.Document{
@@ -3107,7 +3107,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 		},
 	}
 	actor.preparedInputs = &fakeDocActorPreparedInputClient{ref: "blob://prepared/test"}
-	actor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+	actor.publish = func(_ context.Context, _ string, cmd threadcmd.Command) error {
 		publishedCommands = append(publishedCommands, cmd)
 		return nil
 	}
@@ -3185,8 +3185,8 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 			1: {ID: 1, Filename: "report.pdf"},
 		},
 	}
-	var queryStarts []agentcmd.Command
-	parentActor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+	var queryStarts []threadcmd.Command
+	parentActor.publish = func(_ context.Context, _ string, cmd threadcmd.Command) error {
 		queryStarts = append(queryStarts, cmd)
 		return nil
 	}
@@ -3200,7 +3200,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 	childActor := newActorRecoveryHarness(t, store, childConn)
 	childActor.threadID = warmupThreadID
 	childActor.workerID = "worker-child"
-	childActor.publish = func(_ context.Context, _ string, cmd agentcmd.Command) error {
+	childActor.publish = func(_ context.Context, _ string, cmd threadcmd.Command) error {
 		return parentActor.handleChildResult(cmd, "completed")
 	}
 
@@ -3540,18 +3540,18 @@ func TestOutputItemSemanticAttrsForDocumentQuery(t *testing.T) {
 	}
 }
 
-func TestOutputItemSemanticAttrsForSpawnSubagents(t *testing.T) {
+func TestOutputItemSemanticAttrsForSpawnThreads(t *testing.T) {
 	t.Parallel()
 
 	attrs := attrsMap(outputItemSemanticAttrs(json.RawMessage(`{
 		"type":"function_call",
 		"call_id":"call_spawn_123",
-		"name":"spawn_subagents",
+		"name":"spawn_threads",
 		"arguments":"{\"spawn_mode\":\"warm_branch\",\"children\":[{\"prompt\":\"one\"},{\"prompt\":\"two\"}]}"
 	}`)))
 
-	if attrs["call_kind"] != "spawn_subagents" {
-		t.Fatalf("call_kind = %v, want spawn_subagents", attrs["call_kind"])
+	if attrs["call_kind"] != "spawn_threads" {
+		t.Fatalf("call_kind = %v, want spawn_threads", attrs["call_kind"])
 	}
 	if attrs["child_count"] != 2 {
 		t.Fatalf("child_count = %v, want 2", attrs["child_count"])

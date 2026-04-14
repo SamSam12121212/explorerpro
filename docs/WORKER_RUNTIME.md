@@ -6,7 +6,7 @@ The worker owns thread execution.
 
 That includes:
 
-- command consumption from `AGENT_CMD`
+- command consumption from `THREAD_CMD`
 - thread actor lifecycle
 - ownership claim and lease renewal in Postgres
 - OpenAI socket management

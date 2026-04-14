@@ -201,7 +201,7 @@ We changed the contract so the child publishes its own completion summary direct
 
 Changed:
 
-- [`internal/agentcmd/command.go`](/Users/detachedhead/explorer/internal/agentcmd/command.go)
+- [`internal/threadcmd/command.go`](/Users/detachedhead/explorer/internal/threadcmd/command.go)
 - [`internal/worker/actor.go`](/Users/detachedhead/explorer/internal/worker/actor.go)
 
 What changed:
@@ -257,7 +257,7 @@ Owns:
 - spawn child results
 - thread-document links
 
-### JetStream `AGENT_CMD`
+### JetStream `THREAD_CMD`
 
 Owns:
 
@@ -309,7 +309,7 @@ Representative checks run during and after surgery included:
 - `go test ./internal/worker ./internal/httpserver ./internal/natsbootstrap ./internal/threadhistory`
 - `go test ./internal/httpserver ./internal/wsserver ./internal/worker ./internal/platform ./internal/postgresstore ./internal/natsbootstrap ./internal/threadhistory ./cmd/wsserver`
 - `go test ./internal/threadstore`
-- `go test ./internal/agentcmd ./internal/worker`
+- `go test ./internal/threadcmd ./internal/worker`
 - `npm run typecheck` in `frontend`
 - `rg -n --hidden --glob '!**/.git/**' 'redis|Redis|REDIS' .`
 - `rg -n --hidden --glob '!**/.git/**' 'stream_id|first_stream_id|last_stream_id|\\bStreamID\\b' .`

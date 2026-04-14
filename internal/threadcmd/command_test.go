@@ -1,4 +1,4 @@
-package agentcmd
+package threadcmd
 
 import (
 	"encoding/json"
@@ -30,8 +30,8 @@ func TestStartBody(t *testing.T) {
 			"model":"gpt-5.4",
 			"instructions":"be sharp",
 			"initial_input":[{"type":"message","role":"user"}],
-			"tools":[{"type":"function","name":"spawn_subagents"}],
-			"tool_choice":{"type":"function","name":"spawn_subagents"}
+			"tools":[{"type":"function","name":"spawn_threads"}],
+			"tool_choice":{"type":"function","name":"spawn_threads"}
 		}
 	}`))
 	if err != nil {
@@ -51,8 +51,8 @@ func TestStartBody(t *testing.T) {
 	if err := json.Unmarshal(body.Tools, &tools); err != nil {
 		t.Fatalf("json.Unmarshal(body.Tools) error = %v", err)
 	}
-	if len(tools) != 1 || tools[0]["name"] != "spawn_subagents" {
-		t.Fatalf("Tools = %v, want spawn_subagents", tools)
+	if len(tools) != 1 || tools[0]["name"] != "spawn_threads" {
+		t.Fatalf("Tools = %v, want spawn_threads", tools)
 	}
 
 	cmd, err = Decode([]byte(`{
@@ -127,7 +127,7 @@ func TestResumeBodyAcceptsPreparedInputRef(t *testing.T) {
 }
 
 func TestWorkerCommandWildcard(t *testing.T) {
-	if got := WorkerCommandWildcard("worker-a"); got != "agent.worker.worker-a.cmd.>" {
+	if got := WorkerCommandWildcard("worker-a"); got != "thread.worker.worker-a.cmd.>" {
 		t.Fatalf("WorkerCommandWildcard() = %q", got)
 	}
 }
