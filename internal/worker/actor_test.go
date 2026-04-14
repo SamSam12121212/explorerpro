@@ -38,6 +38,17 @@ func TestWrapRawItemAsArray(t *testing.T) {
 	}
 }
 
+func TestStableDocumentChildThreadIDIgnoresInvocationAndPhase(t *testing.T) {
+	t.Parallel()
+
+	warmupID := stableDocumentChildThreadID("thread_root", "call_1", "doc_1", "warmup")
+	queryID := stableDocumentChildThreadID("thread_root", "call_2", "doc_1", "query")
+
+	if warmupID != queryID {
+		t.Fatalf("stableDocumentChildThreadID() = %q and %q, want same stable id", warmupID, queryID)
+	}
+}
+
 func TestAggregateSpawnOutputItem(t *testing.T) {
 	raw, err := aggregateSpawnOutputItem(threadstore.SpawnGroupMeta{
 		ID:           "sg_123",
@@ -1925,15 +1936,15 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 		return nil
 	}
 
-	err := actor.publishChildTerminal(threadstore.ThreadMeta{
+	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
 		ID:                 "thread_child",
 		ParentThreadID:     "thread_parent",
 		ActiveSpawnGroupID: "sg_123",
 		LastResponseID:     "resp_child_1",
 		Status:             threadstore.ThreadStatusCompleted,
-	})
+	}, "completed")
 	if err != nil {
-		t.Fatalf("publishChildTerminal() error = %v", err)
+		t.Fatalf("publishChildInvocationResult() error = %v", err)
 	}
 
 	if publishedSubject != agentcmd.WorkerCommandSubject("worker-parent", agentcmd.KindThreadChildCompleted) {
@@ -1947,6 +1958,57 @@ func TestPublishChildTerminalIncludesAssistantText(t *testing.T) {
 
 	if body.AssistantText != "Child summary line one.\n\nChild summary line two." {
 		t.Fatalf("AssistantText = %q, want joined summary", body.AssistantText)
+	}
+}
+
+func TestPublishChildInvocationResultNormalizesIncompleteToFailed(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:            "thread_parent",
+		RootThreadID:  "thread_parent",
+		OwnerWorkerID: "worker-parent",
+	}
+
+	var (
+		publishedSubject string
+		publishedCmd     agentcmd.Command
+	)
+
+	actor := newActorRecoveryHarness(t, store, nil)
+	actor.publish = func(_ context.Context, subject string, cmd agentcmd.Command) error {
+		publishedSubject = subject
+		publishedCmd = cmd
+		return nil
+	}
+
+	resultStatus, ok := childInvocationResultStatus(threadstore.ThreadStatusIncomplete, "")
+	if !ok {
+		t.Fatal("expected childInvocationResultStatus to classify incomplete result")
+	}
+
+	err := actor.publishChildInvocationResult(threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		ParentThreadID:     "thread_parent",
+		ActiveSpawnGroupID: "sg_123",
+		LastResponseID:     "resp_child_1",
+		Status:             threadstore.ThreadStatusIncomplete,
+	}, resultStatus)
+	if err != nil {
+		t.Fatalf("publishChildInvocationResult() error = %v", err)
+	}
+
+	if publishedSubject != agentcmd.WorkerCommandSubject("worker-parent", agentcmd.KindThreadChildFailed) {
+		t.Fatalf("subject = %q, want worker child_failed subject", publishedSubject)
+	}
+
+	body, err := publishedCmd.ChildResultBody()
+	if err != nil {
+		t.Fatalf("ChildResultBody() error = %v", err)
+	}
+	if body.Status != "failed" {
+		t.Fatalf("body.Status = %q, want failed", body.Status)
 	}
 }
 
@@ -1992,6 +2054,63 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 	}
 	if results[0].AssistantText != "Direct child summary" {
 		t.Fatalf("AssistantText = %q, want %q", results[0].AssistantText, "Direct child summary")
+	}
+}
+
+func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:                 "thread_parent",
+		RootThreadID:       "thread_parent",
+		Status:             threadstore.ThreadStatusWaitingChildren,
+		Model:              "gpt-5.4",
+		LastResponseID:     "resp_parent_prev",
+		ActiveSpawnGroupID: "sg_waiting",
+	}
+	store.spawnGroups["sg_waiting"] = threadstore.SpawnGroupMeta{
+		ID:             "sg_waiting",
+		ParentThreadID: "thread_parent",
+		ParentCallID:   "call_parent",
+		Expected:       1,
+		Status:         threadstore.SpawnGroupStatusWaiting,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_parent_resume"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_parent_resume"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+
+	cmd := agentcmd.Command{
+		CmdID:    "cmd_child_completed",
+		Kind:     agentcmd.KindThreadChildCompleted,
+		ThreadID: "thread_parent",
+		Body: json.RawMessage(`{
+			"spawn_group_id":"sg_waiting",
+			"child_thread_id":"thread_child_1",
+			"child_response_id":"resp_child_1",
+			"assistant_text":"Direct child summary",
+			"status":"completed"
+		}`),
+	}
+
+	if err := actor.handleChildResult(cmd, "completed"); err != nil {
+		t.Fatalf("handleChildResult() error = %v", err)
+	}
+
+	final := store.threads["thread_parent"]
+	if final.Status != threadstore.ThreadStatusReady {
+		t.Fatalf("final.Status = %q, want ready", final.Status)
+	}
+	if final.ActiveSpawnGroupID != "" {
+		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	}
+	if final.LastResponseID != "resp_parent_resume" {
+		t.Fatalf("final.LastResponseID = %q, want resp_parent_resume", final.LastResponseID)
 	}
 }
 
@@ -2364,6 +2483,80 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	}
 	if body["previous_response_id"] != "resp_doc_old" {
 		t.Fatalf("previous_response_id = %v, want resp_doc_old", body["previous_response_id"])
+	}
+	if _, exists := body["prepared_input_ref"]; exists {
+		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
+	}
+}
+
+func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:           "thread_parent",
+		RootThreadID: "thread_parent",
+	}
+	store.threads["thread_doc_ready"] = threadstore.ThreadMeta{
+		ID:             "thread_doc_ready",
+		RootThreadID:   "thread_parent",
+		ParentThreadID: "thread_parent",
+		Status:         threadstore.ThreadStatusReady,
+		Model:          "gpt-5.4-mini",
+		LastResponseID: "resp_doc_ready",
+		MetadataJSON:   `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+		CreatedAt:      time.Date(2026, 4, 13, 11, 0, 0, 0, time.UTC),
+		UpdatedAt:      time.Date(2026, 4, 13, 11, 1, 0, 0, time.UTC),
+	}
+
+	var publishedCommands []agentcmd.Command
+	actor := &threadActor{
+		ctx:    context.Background(),
+		logger: testActorLogger(),
+		store:  store,
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[string][]docstore.Document{
+				"thread_parent": {{ID: "doc_1", Filename: "report.pdf"}},
+			},
+		},
+		docStore: &fakeDocActorDocStore{
+			docs: map[string]docstore.Document{
+				"doc_1": {
+					ID:         "doc_1",
+					Filename:   "report.pdf",
+					QueryModel: "gpt-5.4-nano",
+				},
+			},
+		},
+		preparedInputs: &fakeDocActorPreparedInputClient{ref: "blob://prepared/unused"},
+		publish: func(_ context.Context, _ string, cmd agentcmd.Command) error {
+			publishedCommands = append(publishedCommands, cmd)
+			return nil
+		},
+	}
+
+	meta := store.threads["thread_parent"]
+	if _, err := actor.startDocumentQueryGroup(meta, "call_1", docQueryRequest{
+		DocumentIDs: []string{"doc_1"},
+		Task:        "summarize",
+	}); err != nil {
+		t.Fatalf("startDocumentQueryGroup() error = %v", err)
+	}
+
+	if len(publishedCommands) != 1 {
+		t.Fatalf("publishedCommands = %d, want 1", len(publishedCommands))
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(publishedCommands[0].Body, &body); err != nil {
+		t.Fatalf("json.Unmarshal(body) error = %v", err)
+	}
+
+	if body["model"] != "gpt-5.4-mini" {
+		t.Fatalf("model = %v, want gpt-5.4-mini", body["model"])
+	}
+	if body["previous_response_id"] != "resp_doc_ready" {
+		t.Fatalf("previous_response_id = %v, want resp_doc_ready", body["previous_response_id"])
 	}
 	if _, exists := body["prepared_input_ref"]; exists {
 		t.Fatalf("prepared_input_ref should not be set, got %#v", body["prepared_input_ref"])
@@ -2743,6 +2936,105 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	cmd := publishedCommands[0]
 	if cmd.Kind != agentcmd.KindThreadStart {
 		t.Fatalf("command kind = %q, want %q", cmd.Kind, agentcmd.KindThreadStart)
+	}
+}
+
+func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:           "thread_parent",
+		RootThreadID: "thread_parent",
+		Status:       threadstore.ThreadStatusWaitingChildren,
+		Model:        "gpt-5.4",
+	}
+	store.threads["thread_child"] = threadstore.ThreadMeta{
+		ID:                 "thread_child",
+		RootThreadID:       "thread_parent",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_parent",
+		Status:             threadstore.ThreadStatusRunning,
+		Model:              "gpt-5.4-mini",
+		OwnerWorkerID:      "worker-local-1",
+		SocketGeneration:   1,
+		ActiveSpawnGroupID: "sg_waiting",
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_child_done"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_child_done"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadID = "thread_child"
+
+	if err := actor.streamUntilTerminal(store.threads["thread_child"]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	final := store.threads["thread_child"]
+	if final.Status != threadstore.ThreadStatusCompleted {
+		t.Fatalf("final.Status = %q, want completed", final.Status)
+	}
+	if final.ActiveSpawnGroupID != "" {
+		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	}
+	if len(store.releasedThreads) != 1 || store.releasedThreads[0] != "thread_child" {
+		t.Fatalf("releasedThreads = %#v, want [thread_child]", store.releasedThreads)
+	}
+}
+
+func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads["thread_parent"] = threadstore.ThreadMeta{
+		ID:            "thread_parent",
+		RootThreadID:  "thread_parent",
+		Status:        threadstore.ThreadStatusWaitingChildren,
+		Model:         "gpt-5.4",
+		OwnerWorkerID: "worker-parent",
+	}
+	store.threads["thread_doc_query"] = threadstore.ThreadMeta{
+		ID:                 "thread_doc_query",
+		RootThreadID:       "thread_parent",
+		ParentThreadID:     "thread_parent",
+		ParentCallID:       "call_parent",
+		Status:             threadstore.ThreadStatusRunning,
+		Model:              "gpt-5.4-mini",
+		OwnerWorkerID:      "worker-local-1",
+		SocketGeneration:   1,
+		ActiveSpawnGroupID: "sg_waiting",
+		MetadataJSON:       `{"document_id":"doc_1","spawn_mode":"document_query"}`,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.created","response":{"id":"resp_doc_done"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_doc_done"}}`),
+		},
+	}
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadID = "thread_doc_query"
+
+	if err := actor.streamUntilTerminal(store.threads["thread_doc_query"]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	final := store.threads["thread_doc_query"]
+	if final.Status != threadstore.ThreadStatusReady {
+		t.Fatalf("final.Status = %q, want ready", final.Status)
+	}
+	if final.ActiveSpawnGroupID != "" {
+		t.Fatalf("final.ActiveSpawnGroupID = %q, want empty", final.ActiveSpawnGroupID)
+	}
+	if final.LastResponseID != "resp_doc_done" {
+		t.Fatalf("final.LastResponseID = %q, want resp_doc_done", final.LastResponseID)
+	}
+	if len(store.releasedThreads) != 0 {
+		t.Fatalf("releasedThreads = %#v, want empty", store.releasedThreads)
 	}
 }
 

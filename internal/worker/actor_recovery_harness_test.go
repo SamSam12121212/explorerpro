@@ -68,7 +68,7 @@ func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Conte
 	found := false
 
 	for _, meta := range s.threads {
-		if meta.ParentThreadID != parentThreadID || meta.Status != threadstore.ThreadStatusCompleted || strings.TrimSpace(meta.LastResponseID) == "" {
+		if meta.ParentThreadID != parentThreadID || strings.TrimSpace(meta.LastResponseID) == "" {
 			continue
 		}
 
@@ -80,6 +80,9 @@ func (s *fakeActorStore) LoadLatestCompletedDocumentQueryLineage(_ context.Conte
 			s.t.Fatalf("json.Unmarshal(meta.MetadataJSON) error = %v", err)
 		}
 		if metadata["spawn_mode"] != "document_query" || metadata["document_id"] != documentID {
+			continue
+		}
+		if meta.Status != threadstore.ThreadStatusCompleted && meta.Status != threadstore.ThreadStatusReady {
 			continue
 		}
 

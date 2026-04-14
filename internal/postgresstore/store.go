@@ -1013,7 +1013,7 @@ SELECT
     model
 FROM threads
 WHERE parent_thread_id = $1
-  AND status = 'completed'
+  AND status IN ('completed', 'ready')
   AND last_response_id IS NOT NULL
   AND metadata_json ->> 'spawn_mode' = 'document_query'
   AND metadata_json ->> 'document_id' = $2

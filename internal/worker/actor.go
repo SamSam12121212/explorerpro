@@ -1011,7 +1011,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 		return false, fmt.Errorf("update document base lineage for %s: %w", documentID, err)
 	}
 
-	queryThreadID, startCmd, err := a.buildDocumentChildStartCommand(
+	queryThreadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(
 		parentMeta,
 		spawn.ID,
 		parentCallID,
@@ -1044,6 +1044,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 			"phase", "query",
 			"model", model,
 			"has_previous_response_id", true,
+			"reuse_existing_thread", reusedThread,
 		}, parentMeta)...,
 	)
 	return true, nil
@@ -2218,11 +2219,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			} else if waitingTool {
 				meta.Status = threadstore.ThreadStatusWaitingTool
 			} else {
-				if meta.ParentThreadID != "" {
-					meta.Status = threadstore.ThreadStatusCompleted
-				} else {
-					meta.Status = threadstore.ThreadStatusReady
-				}
+				meta.Status = successfulResponseThreadStatus(meta)
 			}
 		case openaiws.EventTypeResponseFailed:
 			if responseID != "" {
@@ -2275,8 +2272,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					"events_received", eventCount,
 				}, meta)...,
 			)
-			if shouldPublishChildTerminal(meta.Status, meta) {
-				if err := a.publishChildTerminal(meta); err != nil {
+			childResultStatus, ok := childInvocationResultStatus(meta.Status, childInvocationResultStatusForTerminalEvent(event.Type))
+			if shouldPublishChildInvocationResult(meta, childResultStatus, ok) {
+				if err := a.publishChildInvocationResult(meta, childResultStatus); err != nil {
 					return err
 				}
 			}
@@ -2284,6 +2282,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				if err := a.releaseTerminalChildResources(&meta); err != nil {
 					return err
 				}
+			}
+			if err := a.clearCompletedInvocationState(&meta); err != nil {
+				return err
 			}
 			if statusSupportsIdleSocket(meta.Status) {
 				a.startIdleLoop(meta)
@@ -2662,6 +2663,16 @@ func (a *threadActor) releaseTerminalChildResources(meta *threadstore.ThreadMeta
 	)
 
 	return nil
+}
+
+func (a *threadActor) clearCompletedInvocationState(meta *threadstore.ThreadMeta) error {
+	if !shouldClearCompletedInvocationState(*meta) {
+		return nil
+	}
+
+	meta.ActiveSpawnGroupID = ""
+	meta.UpdatedAt = time.Now().UTC()
+	return a.saveThreadMeta(*meta)
 }
 
 func (a *threadActor) currentSocketGeneration() uint64 {
@@ -3203,7 +3214,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			preparedInputRef = resp.PreparedInputRef
 		}
 
-		threadID, startCmd, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, parentCallID, docID, doc.Filename, model, phase, previousResponseID, preparedInputRef, req.Task, "")
+		threadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, parentCallID, docID, doc.Filename, model, phase, previousResponseID, preparedInputRef, req.Task, "")
 		if err != nil {
 			return "", err
 		}
@@ -3225,6 +3236,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 				"model", model,
 				"lineage_source", lineageSource,
 				"has_previous_response_id", previousResponseID != "",
+				"reuse_existing_thread", reusedThread,
 			}, parentMeta)...,
 		)
 	}
@@ -3258,7 +3270,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 	return spawnGroupID, nil
 }
 
-func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID, documentID, documentName, model, phase, previousResponseID, preparedInputRef, task, bootstrapChildThreadID string) (string, agentcmd.Command, error) {
+func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID, documentID, documentName, model, phase, previousResponseID, preparedInputRef, task, bootstrapChildThreadID string) (string, agentcmd.Command, bool, error) {
 	threadID := stableDocumentChildThreadID(parentMeta.ID, parentCallID, documentID, phase)
 	cmdID := stableDocumentChildCmdID(parentMeta.ID, parentCallID, documentID, phase)
 
@@ -3301,34 +3313,23 @@ func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.Thre
 
 	childMetadataJSON, err := json.Marshal(metadataMap)
 	if err != nil {
-		return "", agentcmd.Command{}, fmt.Errorf("marshal child metadata: %w", err)
+		return "", agentcmd.Command{}, false, fmt.Errorf("marshal child metadata: %w", err)
 	}
 
 	metadata, err := rawJSONToAny(childMetadataJSON)
 	if err != nil {
-		return "", agentcmd.Command{}, fmt.Errorf("decode child metadata: %w", err)
+		return "", agentcmd.Command{}, false, fmt.Errorf("decode child metadata: %w", err)
 	}
 	startBody["metadata"] = metadata
 
 	body, err := json.Marshal(startBody)
 	if err != nil {
-		return "", agentcmd.Command{}, fmt.Errorf("marshal child start body: %w", err)
+		return "", agentcmd.Command{}, false, fmt.Errorf("marshal child start body: %w", err)
 	}
 
-	if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
-		ID:                 threadID,
-		RootThreadID:       parentMeta.RootThreadID,
-		ParentThreadID:     parentMeta.ID,
-		ParentCallID:       parentCallID,
-		Depth:              parentMeta.Depth + 1,
-		Status:             threadstore.ThreadStatusNew,
-		Model:              model,
-		MetadataJSON:       string(childMetadataJSON),
-		ActiveSpawnGroupID: spawnGroupID,
-		CreatedAt:          time.Now().UTC(),
-		UpdatedAt:          time.Now().UTC(),
-	}); err != nil {
-		return "", agentcmd.Command{}, err
+	reusedThread, err := a.prepareDocumentChildThreadMeta(parentMeta, spawnGroupID, parentCallID, threadID, model, string(childMetadataJSON))
+	if err != nil {
+		return "", agentcmd.Command{}, false, err
 	}
 
 	causationID := parentMeta.LastResponseID
@@ -3343,7 +3344,69 @@ func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.Thre
 		RootThreadID: parentMeta.RootThreadID,
 		CausationID:  causationID,
 		Body:         body,
-	}, nil
+	}, reusedThread, nil
+}
+
+func (a *threadActor) prepareDocumentChildThreadMeta(parentMeta threadstore.ThreadMeta, spawnGroupID, parentCallID, threadID, model, metadataJSON string) (bool, error) {
+	now := time.Now().UTC()
+
+	existing, err := a.store.LoadThread(a.ctx, threadID)
+	if err != nil {
+		if !errors.Is(err, threadstore.ErrThreadNotFound) {
+			return false, err
+		}
+
+		if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
+			ID:                 threadID,
+			RootThreadID:       parentMeta.RootThreadID,
+			ParentThreadID:     parentMeta.ID,
+			ParentCallID:       parentCallID,
+			Depth:              parentMeta.Depth + 1,
+			Status:             threadstore.ThreadStatusNew,
+			Model:              model,
+			MetadataJSON:       metadataJSON,
+			ActiveSpawnGroupID: spawnGroupID,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	if !canReuseDocumentChildThread(existing.Status) {
+		return false, fmt.Errorf("document child thread %s is not reusable in status %s", threadID, existing.Status)
+	}
+
+	existing.RootThreadID = parentMeta.RootThreadID
+	existing.ParentThreadID = parentMeta.ID
+	existing.ParentCallID = parentCallID
+	existing.Depth = parentMeta.Depth + 1
+	existing.ActiveSpawnGroupID = spawnGroupID
+	existing.UpdatedAt = now
+	if existing.CreatedAt.IsZero() {
+		existing.CreatedAt = now
+	}
+
+	if err := a.store.SaveThread(a.ctx, existing); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func canReuseDocumentChildThread(status threadstore.ThreadStatus) bool {
+	switch status {
+	case threadstore.ThreadStatusNew,
+		threadstore.ThreadStatusReady,
+		threadstore.ThreadStatusCompleted,
+		threadstore.ThreadStatusFailed,
+		threadstore.ThreadStatusCancelled,
+		threadstore.ThreadStatusIncomplete:
+		return true
+	default:
+		return false
+	}
 }
 
 func stableDocumentSpawnGroupID(parentThreadID, parentCallID string) string {
@@ -3351,7 +3414,7 @@ func stableDocumentSpawnGroupID(parentThreadID, parentCallID string) string {
 }
 
 func stableDocumentChildThreadID(parentThreadID, parentCallID, documentID, phase string) string {
-	return stableDocumentDerivedID("thread_doc", parentThreadID, parentCallID, documentID, phase)
+	return stableDocumentDerivedID("thread_doc", parentThreadID, documentID)
 }
 
 func stableDocumentChildCmdID(parentThreadID, parentCallID, documentID, phase string) string {
@@ -3608,7 +3671,7 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 	return spawnGroupID, nil
 }
 
-func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
+func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, resultStatus string) error {
 	if a.publish == nil || meta.ParentThreadID == "" || meta.ActiveSpawnGroupID == "" {
 		return nil
 	}
@@ -3623,7 +3686,6 @@ func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
 		return err
 	}
 
-	status := string(meta.Status)
 	assistantText, err := a.loadLatestAssistantText(meta.ID)
 	if err != nil {
 		a.logger.Warn("failed to load child assistant summary",
@@ -3637,7 +3699,7 @@ func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
 		SpawnGroupID:    meta.ActiveSpawnGroupID,
 		ChildThreadID:   meta.ID,
 		ChildResponseID: meta.LastResponseID,
-		Status:          status,
+		Status:          resultStatus,
 		AssistantText:   assistantText,
 	})
 	if err != nil {
@@ -3645,7 +3707,7 @@ func (a *threadActor) publishChildTerminal(meta threadstore.ThreadMeta) error {
 	}
 
 	kind := agentcmd.KindThreadChildCompleted
-	if meta.Status != threadstore.ThreadStatusCompleted {
+	if resultStatus != "completed" {
 		kind = agentcmd.KindThreadChildFailed
 	}
 
@@ -3855,16 +3917,72 @@ func filterSubagentToolChoice(raw string) (string, error) {
 	return string(payload), nil
 }
 
-func shouldPublishChildTerminal(status threadstore.ThreadStatus, meta threadstore.ThreadMeta) bool {
-	if meta.ParentThreadID == "" || meta.ActiveSpawnGroupID == "" {
+func shouldReleaseTerminalChildResources(meta threadstore.ThreadMeta) bool {
+	return meta.ParentThreadID != "" && isTerminalThreadStatus(meta.Status)
+}
+
+func shouldPublishChildInvocationResult(meta threadstore.ThreadMeta, resultStatus string, ok bool) bool {
+	return ok && meta.ParentThreadID != "" && meta.ActiveSpawnGroupID != "" && strings.TrimSpace(resultStatus) != ""
+}
+
+func successfulResponseThreadStatus(meta threadstore.ThreadMeta) threadstore.ThreadStatus {
+	if meta.ParentThreadID == "" {
+		return threadstore.ThreadStatusReady
+	}
+	if isReusableDocumentQueryChild(meta) {
+		return threadstore.ThreadStatusReady
+	}
+	return threadstore.ThreadStatusCompleted
+}
+
+func childInvocationResultStatus(status threadstore.ThreadStatus, explicit string) (string, bool) {
+	if normalized := strings.TrimSpace(explicit); normalized != "" {
+		return normalized, true
+	}
+
+	switch status {
+	case threadstore.ThreadStatusCompleted:
+		return "completed", true
+	case threadstore.ThreadStatusCancelled:
+		return "cancelled", true
+	case threadstore.ThreadStatusFailed, threadstore.ThreadStatusIncomplete:
+		return "failed", true
+	default:
+		return "", false
+	}
+}
+
+func childInvocationResultStatusForTerminalEvent(eventType openaiws.EventType) string {
+	switch eventType {
+	case openaiws.EventTypeResponseCompleted:
+		return "completed"
+	case openaiws.EventTypeResponseFailed, openaiws.EventTypeResponseIncomplete:
+		return "failed"
+	default:
+		return ""
+	}
+}
+
+func isReusableDocumentQueryChild(meta threadstore.ThreadMeta) bool {
+	if strings.TrimSpace(meta.ParentThreadID) == "" {
 		return false
 	}
 
-	return isTerminalThreadStatus(status)
+	metadata, err := decodeThreadMetadataJSON(meta.MetadataJSON)
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(metadata["spawn_mode"]) == "document_query" &&
+		strings.TrimSpace(metadata["document_id"]) != ""
 }
 
-func shouldReleaseTerminalChildResources(meta threadstore.ThreadMeta) bool {
-	return meta.ParentThreadID != "" && isTerminalThreadStatus(meta.Status)
+func shouldClearCompletedInvocationState(meta threadstore.ThreadMeta) bool {
+	if strings.TrimSpace(meta.ActiveSpawnGroupID) == "" {
+		return false
+	}
+
+	return meta.Status == threadstore.ThreadStatusReady || isTerminalThreadStatus(meta.Status)
 }
 
 func isTerminalThreadStatus(status threadstore.ThreadStatus) bool {
