@@ -13,7 +13,7 @@ const (
 )
 
 type CloneCommand struct {
-	CmdID  string `json:"cmd_id"`
+	CmdID  int64  `json:"cmd_id"`
 	RepoID string `json:"repo_id"`
 	URL    string `json:"url"`
 	Ref    string `json:"ref"`
@@ -24,6 +24,9 @@ func DecodeClone(data []byte) (CloneCommand, error) {
 	var cmd CloneCommand
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		return CloneCommand{}, fmt.Errorf("decode clone command: %w", err)
+	}
+	if cmd.CmdID <= 0 {
+		return CloneCommand{}, fmt.Errorf("clone command missing cmd_id")
 	}
 	if strings.TrimSpace(cmd.RepoID) == "" {
 		return CloneCommand{}, fmt.Errorf("clone command missing repo_id")

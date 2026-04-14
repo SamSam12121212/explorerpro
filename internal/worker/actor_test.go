@@ -367,17 +367,17 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 
 	actor := newActorRecoveryHarness(t, store, nil)
 	got := actor.appendCommandLifecycleGraphAttrs([]any{
-		"cmd_id", "cmd_123",
+		"cmd_id", int64(123),
 		"kind", threadcmd.KindThreadStart,
 	}, threadcmd.Command{
-		CmdID:        "cmd_123",
+		CmdID:        123,
 		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_child"),
 		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
-		"cmd_id", "cmd_123",
+		"cmd_id", int64(123),
 		"kind", threadcmd.KindThreadStart,
 		"root_thread_id", tid("thread_root"),
 		"parent_thread_id", tid("thread_parent"),
@@ -394,17 +394,17 @@ func TestAppendCommandLifecycleGraphAttrs(t *testing.T) {
 func TestAppendCommandLifecycleGraphAttrsFallsBackToCommandRootThreadID(t *testing.T) {
 	actor := newActorRecoveryHarness(t, newFakeActorStore(t), nil)
 	got := actor.appendCommandLifecycleGraphAttrs([]any{
-		"cmd_id", "cmd_123",
+		"cmd_id", int64(123),
 		"kind", threadcmd.KindThreadResume,
 	}, threadcmd.Command{
-		CmdID:        "cmd_123",
+		CmdID:        123,
 		Kind:         threadcmd.KindThreadResume,
 		ThreadID:     tid("thread_missing"),
 		RootThreadID: tid("thread_root"),
 	})
 
 	want := []any{
-		"cmd_id", "cmd_123",
+		"cmd_id", int64(123),
 		"kind", threadcmd.KindThreadResume,
 		"root_thread_id", tid("thread_root"),
 		"depth", 0,
@@ -1395,7 +1395,7 @@ func TestHandleStartIncludesAvailableDocumentsInInstructions(t *testing.T) {
 	}
 
 	cmd := threadcmd.Command{
-		CmdID:        "cmd_start",
+		CmdID:        101,
 		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
@@ -1446,7 +1446,7 @@ func TestHandleStartCanonicalizesStoredResponseFields(t *testing.T) {
 	}
 
 	cmd := threadcmd.Command{
-		CmdID:        "cmd_start",
+		CmdID:        102,
 		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
@@ -1526,7 +1526,7 @@ func TestContinueWithInputItemsIncludesAvailableDocumentsInInstructions(t *testi
 		SocketGeneration: 1,
 	}
 
-	if err := actor.continueWithInputItems(meta, "cmd_resume", json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]`), "user_input"); err != nil {
+	if err := actor.continueWithInputItems(meta, 103, json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]`), "user_input"); err != nil {
 		t.Fatalf("continueWithInputItems() error = %v", err)
 	}
 
@@ -1584,7 +1584,7 @@ func TestHandleStartUsesPreparedInputRefForSend(t *testing.T) {
 	}
 
 	cmd := threadcmd.Command{
-		CmdID:        "cmd_start_prepared",
+		CmdID:        104,
 		Kind:         threadcmd.KindThreadStart,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
@@ -1694,7 +1694,7 @@ func TestHandleResumeUsesPreparedInputRefForSend(t *testing.T) {
 	}
 
 	cmd := threadcmd.Command{
-		CmdID:        "cmd_resume_prepared",
+		CmdID:        105,
 		Kind:         threadcmd.KindThreadResume,
 		ThreadID:     tid("thread_parent"),
 		RootThreadID: tid("thread_parent"),
@@ -1872,7 +1872,7 @@ func TestHandleDisconnectSocketClosesSessionAndReleasesOwnership(t *testing.T) {
 	actor.openAISocketID = "socket_live_1"
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_disconnect_1",
+		CmdID:    201,
 		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_idle"),
 	}
@@ -1913,7 +1913,7 @@ func TestHandleDisconnectSocketRejectsNonIdleThread(t *testing.T) {
 	actor.setMeta(store.threads[tid("thread_running")])
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_disconnect_2",
+		CmdID:    202,
 		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_running"),
 	}
@@ -1943,7 +1943,7 @@ func TestHandleDisconnectSocketNoopsWithoutSession(t *testing.T) {
 	actor.setMeta(store.threads[tid("thread_nosess")])
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_disconnect_3",
+		CmdID:    203,
 		Kind:     threadcmd.KindThreadDisconnectSocket,
 		ThreadID: tid("thread_nosess"),
 	}
@@ -2132,7 +2132,7 @@ func TestHandleChildResultUsesAssistantTextFromCommand(t *testing.T) {
 	actor := newActorRecoveryHarness(t, store, nil)
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_child_completed",
+		CmdID:    301,
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
@@ -2186,7 +2186,7 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 	actor := newActorRecoveryHarness(t, store, conn)
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_child_completed",
+		CmdID:    302,
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{
@@ -2901,7 +2901,7 @@ func TestHandleChildResultDocumentWarmupCompletionStoresBaseLineageAndSpawnsQuer
 	}
 
 	cmd := threadcmd.Command{
-		CmdID:    "cmd_child_completed",
+		CmdID:    303,
 		Kind:     threadcmd.KindThreadChildCompleted,
 		ThreadID: tid("thread_parent"),
 		Body: json.RawMessage(`{

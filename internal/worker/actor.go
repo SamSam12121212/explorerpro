@@ -61,13 +61,15 @@ type threadActorConfig struct {
 type actorStore interface {
 	ReserveThreadID(ctx context.Context) (int64, error)
 	ReserveSpawnGroupID(ctx context.Context) (int64, error)
+	ReserveCommandID(ctx context.Context, bus, kind string) (int64, error)
+	LoadOrCreateCommandID(ctx context.Context, bus, kind, dedupeKey string) (int64, error)
 	CreateThreadIfAbsent(ctx context.Context, meta threadstore.ThreadMeta) error
 	LoadThread(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error)
 	LoadReusableDocumentChildThread(ctx context.Context, parentThreadID, documentID int64) (threadstore.ThreadMeta, error)
 	LoadLatestCompletedDocumentQueryLineage(ctx context.Context, parentThreadID int64, documentID int64) (threadstore.DocumentQueryLineage, error)
 	SaveThread(ctx context.Context, meta threadstore.ThreadMeta) error
-	CommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error)
-	MarkCommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error)
+	CommandProcessed(ctx context.Context, threadID int64, cmdID int64) (bool, error)
+	MarkCommandProcessed(ctx context.Context, threadID int64, cmdID int64) (bool, error)
 	ClaimOwnership(ctx context.Context, threadID int64, workerID int64, leaseUntil time.Time) (threadstore.ClaimResult, error)
 	RenewOwnership(ctx context.Context, threadID int64, workerID int64, socketGeneration uint64, leaseUntil time.Time) (bool, error)
 	RotateOwnership(ctx context.Context, threadID int64, workerID int64, currentGeneration uint64, leaseUntil, socketExpiresAt time.Time) (uint64, bool, error)
@@ -1171,7 +1173,7 @@ func (a *threadActor) handleReconcile(cmd threadcmd.Command) error {
 	return a.recoverThread(meta, cmd.CmdID, true)
 }
 
-func (a *threadActor) recoverThread(meta threadstore.ThreadMeta, cmdID string, forceReconcile bool) error {
+func (a *threadActor) recoverThread(meta threadstore.ThreadMeta, cmdID int64, forceReconcile bool) error {
 	needsBarrierRecovery := meta.ActiveSpawnGroupID > 0 && meta.ActiveResponseID == "" &&
 		(meta.Status == threadstore.ThreadStatusWaitingChildren || meta.Status == threadstore.ThreadStatusRunning || meta.Status == threadstore.ThreadStatusReconciling)
 
@@ -1288,7 +1290,7 @@ func (a *threadActor) handleDisconnectSocket(cmd threadcmd.Command) error {
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
 
-func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID string) error {
+func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID int64) error {
 	if meta.ActiveSpawnGroupID <= 0 {
 		if statusSupportsIdleSocket(meta.Status) {
 			a.startIdleLoop(meta)
@@ -1385,7 +1387,7 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 	return a.continueWithInputItems(meta, cmdID, inputItems, "child_barrier_recovery")
 }
 
-func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID string) error {
+func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID int64) error {
 	if a.history == nil {
 		return fmt.Errorf("thread history store is not configured")
 	}
@@ -1624,7 +1626,9 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	a.cancel()
 }
 
-func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, eventID string, payload map[string]any, trigger string) error {
+func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, payload map[string]any, trigger string) error {
+	eventID := formatCommandIDLocal(cmdID)
+
 	logPayload, err := marshalResponseCreatePayload(payload)
 	if err != nil {
 		return fmt.Errorf("marshal response.create payload for log: %w", err)
@@ -1824,11 +1828,11 @@ func decodeResponseCreateInputItems(value any) []map[string]any {
 	return nil
 }
 
-func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, trigger string) error {
+func (a *threadActor) continueWithInputItems(meta threadstore.ThreadMeta, cmdID int64, inputItems json.RawMessage, trigger string) error {
 	return a.continueWithPreparedInput(meta, cmdID, inputItems, "", trigger)
 }
 
-func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID string, inputItems json.RawMessage, preparedInputRef string, trigger string) error {
+func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmdID int64, inputItems json.RawMessage, preparedInputRef string, trigger string) error {
 	payload, err := a.buildThreadResponseCreatePayload(meta, map[string]any{
 		"model":                meta.Model,
 		"instructions":         meta.Instructions,
@@ -3510,7 +3514,15 @@ func roundCallsToPendingCalls(calls []docQueryRoundCall) []docQueryCall {
 }
 
 func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID int64, parentCallID string, documentID int64, documentName, model, phase, previousResponseID, preparedInputRef, task string, bootstrapChildThreadID int64) (int64, threadcmd.Command, bool, error) {
-	cmdID := stableDocumentChildCmdID(parentMeta.ID, parentCallID, documentID, phase)
+	cmdID, err := a.store.LoadOrCreateCommandID(
+		a.ctx,
+		"thread",
+		string(threadcmd.KindThreadStart),
+		stableDocumentChildCommandDedupeKey(parentMeta.ID, parentCallID, documentID, phase),
+	)
+	if err != nil {
+		return 0, threadcmd.Command{}, false, err
+	}
 
 	startBody := map[string]any{
 		"model": model,
@@ -3668,8 +3680,8 @@ func canReuseDocumentChildThread(status threadstore.ThreadStatus) bool {
 	}
 }
 
-func stableDocumentChildCmdID(parentThreadID int64, parentCallID string, documentID int64, phase string) string {
-	return stableDocumentDerivedID("cmd_doc", formatThreadIDLocal(parentThreadID), parentCallID, formatDocumentIDLocal(documentID), phase, "start")
+func stableDocumentChildCommandDedupeKey(parentThreadID int64, parentCallID string, documentID int64, phase string) string {
+	return stableDocumentDerivedID("thread_cmd_doc", formatThreadIDLocal(parentThreadID), parentCallID, formatDocumentIDLocal(documentID), phase, "start")
 }
 
 func stableDocumentPreparedInputID(parentThreadID int64, parentCallID string, documentID int64, phase string) string {
@@ -3737,6 +3749,10 @@ func formatThreadIDLocal(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
+func formatCommandIDLocal(id int64) string {
+	return strconv.FormatInt(id, 10)
+}
+
 func parseMetadataDocumentID(raw string) (int64, error) {
 	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
@@ -3792,7 +3808,7 @@ func (a *threadActor) startSpawnGroup(parentMeta threadstore.ThreadMeta, parentC
 			return 0, err
 		}
 
-		cmdID, err := idgen.New("cmd")
+		cmdID, err := a.store.ReserveCommandID(a.ctx, "thread", string(threadcmd.KindThreadStart))
 		if err != nil {
 			return 0, err
 		}
@@ -3952,11 +3968,6 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 		return err
 	}
 
-	cmdID, err := idgen.New("cmd")
-	if err != nil {
-		return err
-	}
-
 	assistantText, err := a.loadLatestAssistantText(meta.ID)
 	if err != nil {
 		a.logger.Warn("failed to load child assistant summary",
@@ -3980,6 +3991,11 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 	kind := threadcmd.KindThreadChildCompleted
 	if resultStatus != "completed" {
 		kind = threadcmd.KindThreadChildFailed
+	}
+
+	cmdID, err := a.store.ReserveCommandID(a.ctx, "thread", string(kind))
+	if err != nil {
+		return err
 	}
 
 	subject := threadcmd.DispatchAdoptSubject

@@ -119,7 +119,7 @@ type SpawnGroupMeta struct {
 	Cancelled            int
 	Status               SpawnGroupStatus
 	AggregateSubmittedAt time.Time
-	AggregateCmdID       string
+	AggregateCmdID       int64
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }

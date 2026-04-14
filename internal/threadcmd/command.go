@@ -34,7 +34,7 @@ const (
 var durableSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
 type Command struct {
-	CmdID                    string          `json:"cmd_id"`
+	CmdID                    int64           `json:"cmd_id"`
 	Kind                     Kind            `json:"kind"`
 	ThreadID                 int64           `json:"thread_id"`
 	RootThreadID             int64           `json:"root_thread_id"`
@@ -198,7 +198,7 @@ func Decode(raw []byte) (Command, error) {
 		return Command{}, fmt.Errorf("decode command: %w", err)
 	}
 
-	if strings.TrimSpace(cmd.CmdID) == "" {
+	if cmd.CmdID <= 0 {
 		return Command{}, fmt.Errorf("command missing cmd_id")
 	}
 

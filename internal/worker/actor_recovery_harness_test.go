@@ -27,6 +27,8 @@ type fakeActorStore struct {
 	spawnResults           map[int64][]threadstore.SpawnChildResult
 	nextReservedThreadID   int64
 	nextReservedSpawnID    int64
+	nextReservedCommandID  int64
+	stableCommandIDs       map[string]int64
 
 	savedThreads        []threadstore.ThreadMeta
 	savedSpawnGroups    []threadstore.SpawnGroupMeta
@@ -49,6 +51,8 @@ func newFakeActorStore(t *testing.T) *fakeActorStore {
 		spawnResults:           map[int64][]threadstore.SpawnChildResult{},
 		nextReservedThreadID:   10000,
 		nextReservedSpawnID:    20000,
+		nextReservedCommandID:  30000,
+		stableCommandIDs:       map[string]int64{},
 		savedResponses:         map[string]json.RawMessage{},
 	}
 }
@@ -63,6 +67,23 @@ func (s *fakeActorStore) ReserveSpawnGroupID(_ context.Context) (int64, error) {
 	spawnGroupID := s.nextReservedSpawnID
 	s.nextReservedSpawnID++
 	return spawnGroupID, nil
+}
+
+func (s *fakeActorStore) ReserveCommandID(_ context.Context, _, _ string) (int64, error) {
+	commandID := s.nextReservedCommandID
+	s.nextReservedCommandID++
+	return commandID, nil
+}
+
+func (s *fakeActorStore) LoadOrCreateCommandID(_ context.Context, bus, kind, dedupeKey string) (int64, error) {
+	key := bus + "|" + kind + "|" + dedupeKey
+	if commandID, ok := s.stableCommandIDs[key]; ok {
+		return commandID, nil
+	}
+	commandID := s.nextReservedCommandID
+	s.nextReservedCommandID++
+	s.stableCommandIDs[key] = commandID
+	return commandID, nil
 }
 
 func (s *fakeActorStore) CreateThreadIfAbsent(_ context.Context, meta threadstore.ThreadMeta) error {
@@ -144,11 +165,11 @@ func (s *fakeActorStore) SaveThread(_ context.Context, meta threadstore.ThreadMe
 	return nil
 }
 
-func (s *fakeActorStore) CommandProcessed(_ context.Context, _ int64, _ string) (bool, error) {
+func (s *fakeActorStore) CommandProcessed(_ context.Context, _ int64, _ int64) (bool, error) {
 	return false, nil
 }
 
-func (s *fakeActorStore) MarkCommandProcessed(_ context.Context, _ int64, _ string) (bool, error) {
+func (s *fakeActorStore) MarkCommandProcessed(_ context.Context, _ int64, _ int64) (bool, error) {
 	return true, nil
 }
 
@@ -345,7 +366,7 @@ func TestActorRecoveryHarnessReconcileFromCheckpointReplaysLatestCreate(t *testi
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	err := actor.reconcileFromCheckpoint(store.threads[100], "cmd_reconcile")
+	err := actor.reconcileFromCheckpoint(store.threads[100], 4101)
 	if err != nil {
 		t.Fatalf("reconcileFromCheckpoint() error = %v", err)
 	}
@@ -425,7 +446,7 @@ func TestActorRecoveryHarnessReconcileFromPreparedInputRefCheckpoint(t *testing.
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.blob = blob
 
-	if err := actor.reconcileFromCheckpoint(store.threads[100], "cmd_reconcile"); err != nil {
+	if err := actor.reconcileFromCheckpoint(store.threads[100], 4102); err != nil {
 		t.Fatalf("reconcileFromCheckpoint() error = %v", err)
 	}
 
@@ -478,7 +499,7 @@ func TestActorRecoveryHarnessReconcileFromCheckpointMissingCheckpointLeavesThrea
 
 	actor := newActorRecoveryHarness(t, store, nil)
 
-	err := actor.recoverThread(store.threads[100], "cmd_reconcile", true)
+	err := actor.recoverThread(store.threads[100], 4103, true)
 	if err != nil {
 		t.Fatalf("recoverThread() error = %v", err)
 	}
@@ -526,7 +547,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenKeepsBarrierOpen(t *testing.T
 
 	actor := newActorRecoveryHarness(t, store, nil)
 
-	err := actor.recoverWaitingChildren(store.threads[100], "cmd_recover")
+	err := actor.recoverWaitingChildren(store.threads[100], 4104)
 	if err != nil {
 		t.Fatalf("recoverWaitingChildren() error = %v", err)
 	}
@@ -582,7 +603,7 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	}
 	actor := newActorRecoveryHarness(t, store, conn)
 
-	err := actor.recoverWaitingChildren(store.threads[100], "cmd_recover_waiting")
+	err := actor.recoverWaitingChildren(store.threads[100], 4105)
 	if err != nil {
 		t.Fatalf("recoverWaitingChildren() error = %v", err)
 	}
@@ -602,8 +623,8 @@ func TestActorRecoveryHarnessRecoverWaitingChildrenResumesParentAfterBarrierClos
 	if spawn.AggregateSubmittedAt.IsZero() {
 		t.Fatal("expected AggregateSubmittedAt to be set")
 	}
-	if spawn.AggregateCmdID != "cmd_recover_waiting" {
-		t.Fatalf("AggregateCmdID = %q, want cmd_recover_waiting", spawn.AggregateCmdID)
+	if spawn.AggregateCmdID != 4105 {
+		t.Fatalf("AggregateCmdID = %d, want 4105", spawn.AggregateCmdID)
 	}
 
 	if len(conn.writes) != 1 {

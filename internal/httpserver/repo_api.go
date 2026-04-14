@@ -7,21 +7,24 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
 	"explorer/internal/gitcmd"
 	"explorer/internal/idgen"
 	"explorer/internal/platform"
+	"explorer/internal/postgresstore"
 	"explorer/internal/repostore"
 
 	"github.com/nats-io/nats.go"
 )
 
 type repoAPI struct {
-	logger  *slog.Logger
-	runtime *platform.Runtime
-	store   *repostore.Store
+	logger   *slog.Logger
+	runtime  *platform.Runtime
+	store    *repostore.Store
+	commands *postgresstore.Store
 }
 
 type addRepoRequest struct {
@@ -31,9 +34,10 @@ type addRepoRequest struct {
 
 func newRepoAPI(logger *slog.Logger, runtime *platform.Runtime) *repoAPI {
 	return &repoAPI{
-		logger:  logger,
-		runtime: runtime,
-		store:   repostore.New(runtime.Postgres().Pool()),
+		logger:   logger,
+		runtime:  runtime,
+		store:    repostore.New(runtime.Postgres().Pool()),
+		commands: postgresstore.New(runtime.Postgres().Pool()),
 	}
 }
 
@@ -102,7 +106,7 @@ func (a *repoAPI) handleAddRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmdID, err := idgen.New("cmd")
+	cmdID, err := a.commands.ReserveCommandID(r.Context(), "git", gitcmd.CloneSubject)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -143,7 +147,7 @@ func (a *repoAPI) handleAddRepo(w http.ResponseWriter, r *http.Request) {
 		Header:  nats.Header{},
 		Data:    payload,
 	}
-	msg.Header.Set("Nats-Msg-Id", cmdID)
+	msg.Header.Set("Nats-Msg-Id", strconv.FormatInt(cmdID, 10))
 
 	if _, err := a.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
 		writeErrorJSON(w, http.StatusServiceUnavailable, fmt.Sprintf("publish clone command: %v", err))

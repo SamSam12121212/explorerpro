@@ -18,12 +18,16 @@ type fakeSweepStore struct {
 	pruneBatchResults      []int64
 	disconnectCalls        int
 	pruneCalls             int
+	nextReservedCommandID  int64
+	stableCommandIDs       map[string]int64
 }
 
 func newFakeSweepStore() *fakeSweepStore {
 	return &fakeSweepStore{
-		threads: map[int64]threadstore.ThreadMeta{},
-		owners:  map[int64]threadstore.OwnerRecord{},
+		threads:               map[int64]threadstore.ThreadMeta{},
+		owners:                map[int64]threadstore.OwnerRecord{},
+		nextReservedCommandID: 1000,
+		stableCommandIDs:      map[string]int64{},
 	}
 }
 
@@ -51,6 +55,17 @@ func (s *fakeSweepStore) LoadOwner(_ context.Context, threadID int64) (threadsto
 		return threadstore.OwnerRecord{}, threadstore.ErrThreadNotFound
 	}
 	return owner, nil
+}
+
+func (s *fakeSweepStore) LoadOrCreateCommandID(_ context.Context, bus, kind, dedupeKey string) (int64, error) {
+	key := bus + "|" + kind + "|" + dedupeKey
+	if commandID, ok := s.stableCommandIDs[key]; ok {
+		return commandID, nil
+	}
+	commandID := s.nextReservedCommandID
+	s.nextReservedCommandID++
+	s.stableCommandIDs[key] = commandID
+	return commandID, nil
 }
 
 func (s *fakeSweepStore) DisconnectExpiredOpenAISocketSessions(_ context.Context, _, _ time.Time, _ int) (int64, error) {

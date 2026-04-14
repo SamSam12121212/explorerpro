@@ -263,7 +263,7 @@ ON CONFLICT (id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) CommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error) {
+func (s *Store) CommandProcessed(ctx context.Context, threadID int64, cmdID int64) (bool, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, `
 SELECT EXISTS (
@@ -272,12 +272,12 @@ SELECT EXISTS (
     WHERE thread_id = $1 AND cmd_id = $2
 )
 `, threadID, cmdID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check processed command %d/%s: %w", threadID, cmdID, err)
+		return false, fmt.Errorf("check processed command %d/%d: %w", threadID, cmdID, err)
 	}
 	return exists, nil
 }
 
-func (s *Store) MarkCommandProcessed(ctx context.Context, threadID int64, cmdID string) (bool, error) {
+func (s *Store) MarkCommandProcessed(ctx context.Context, threadID int64, cmdID int64) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 INSERT INTO thread_processed_commands (
     thread_id,
@@ -291,7 +291,7 @@ INSERT INTO thread_processed_commands (
 ON CONFLICT (thread_id, cmd_id) DO NOTHING
 `, threadID, cmdID)
 	if err != nil {
-		return false, fmt.Errorf("mark processed command %d/%s: %w", threadID, cmdID, err)
+		return false, fmt.Errorf("mark processed command %d/%d: %w", threadID, cmdID, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
@@ -785,7 +785,7 @@ ON CONFLICT (id) DO NOTHING
 		meta.Cancelled,
 		string(meta.Status),
 		nullIfZeroTime(meta.AggregateSubmittedAt),
-		nullIfBlank(meta.AggregateCmdID),
+		nullIfZeroInt64(meta.AggregateCmdID),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -883,7 +883,7 @@ RETURNING
     cancelled,
     status,
     aggregate_submitted_at,
-    COALESCE(aggregate_cmd_id, ''),
+    COALESCE(aggregate_cmd_id, 0),
     created_at,
     updated_at
 `,
@@ -896,7 +896,7 @@ RETURNING
 		meta.Cancelled,
 		string(meta.Status),
 		nullIfZeroTime(meta.AggregateSubmittedAt),
-		nullIfBlank(meta.AggregateCmdID),
+		nullIfZeroInt64(meta.AggregateCmdID),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -979,7 +979,7 @@ ON CONFLICT (id) DO UPDATE SET
 		meta.Cancelled,
 		string(meta.Status),
 		nullIfZeroTime(meta.AggregateSubmittedAt),
-		nullIfBlank(meta.AggregateCmdID),
+		nullIfZeroInt64(meta.AggregateCmdID),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -1597,7 +1597,7 @@ SELECT
     cancelled,
     status,
     aggregate_submitted_at,
-    COALESCE(aggregate_cmd_id, ''),
+    COALESCE(aggregate_cmd_id, 0),
     created_at,
     updated_at
 FROM spawn_groups
@@ -1629,7 +1629,7 @@ SELECT
     cancelled,
     status,
     aggregate_submitted_at,
-    COALESCE(aggregate_cmd_id, ''),
+    COALESCE(aggregate_cmd_id, 0),
     created_at,
     updated_at
 FROM spawn_groups
@@ -1745,7 +1745,7 @@ SELECT
     cancelled,
     status,
     aggregate_submitted_at,
-    COALESCE(aggregate_cmd_id, ''),
+    COALESCE(aggregate_cmd_id, 0),
     created_at,
     updated_at
 FROM spawn_groups

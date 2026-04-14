@@ -62,6 +62,7 @@ type serviceSweepStore interface {
 	ListThreadIDsByStatus(ctx context.Context, status threadstore.ThreadStatus) ([]int64, error)
 	LoadThread(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error)
 	LoadOwner(ctx context.Context, threadID int64) (threadstore.OwnerRecord, error)
+	LoadOrCreateCommandID(ctx context.Context, bus, kind, dedupeKey string) (int64, error)
 	DisconnectExpiredOpenAISocketSessions(ctx context.Context, disconnectedAt, expiresAt time.Time, limit int) (int64, error)
 	PruneExpiredOpenAISocketSessions(ctx context.Context, now time.Time, limit int) (int64, error)
 }
@@ -409,7 +410,7 @@ func (s *Service) publishCommand(ctx context.Context, subject string, cmd thread
 		Header:  nats.Header{},
 		Data:    payload,
 	}
-	msg.Header.Set("Nats-Msg-Id", cmd.CmdID)
+	msg.Header.Set("Nats-Msg-Id", strconv.FormatInt(cmd.CmdID, 10))
 
 	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
 		return fmt.Errorf("publish command to %s: %w", subject, err)
@@ -540,7 +541,7 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 		subject = threadcmd.WorkerCommandSubject(s.workerID, kind)
 	}
 
-	cmd, err := buildRecoveryCommand(meta, owner, kind)
+	cmd, err := s.buildRecoveryCommand(ctx, meta, owner, kind)
 	if err != nil {
 		return err
 	}
@@ -564,7 +565,7 @@ func recoveryKindForThread(meta threadstore.ThreadMeta) threadcmd.Kind {
 	return threadcmd.KindThreadAdopt
 }
 
-func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRecord, kind threadcmd.Kind) (threadcmd.Command, error) {
+func (s *Service) buildRecoveryCommand(ctx context.Context, meta threadstore.ThreadMeta, owner threadstore.OwnerRecord, kind threadcmd.Kind) (threadcmd.Command, error) {
 	bodyStruct := map[string]any{
 		"previous_worker_id":  owner.WorkerID,
 		"required_generation": owner.SocketGeneration,
@@ -575,12 +576,10 @@ func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRe
 		return threadcmd.Command{}, fmt.Errorf("marshal recovery body: %w", err)
 	}
 
-	cmdID := fmt.Sprintf("recovery_%s_%s_%d_%s",
-		strings.ReplaceAll(string(kind), ".", "_"),
-		strconv.FormatInt(meta.ID, 10),
-		maxUint64(meta.SocketGeneration, owner.SocketGeneration),
-		strings.ReplaceAll(string(meta.Status), ".", "_"),
-	)
+	cmdID, err := s.sweepStore.LoadOrCreateCommandID(ctx, "thread", string(kind), recoveryCommandDedupeKey(meta, owner, kind))
+	if err != nil {
+		return threadcmd.Command{}, err
+	}
 
 	return threadcmd.Command{
 		CmdID:                    cmdID,
@@ -591,6 +590,15 @@ func buildRecoveryCommand(meta threadstore.ThreadMeta, owner threadstore.OwnerRe
 		CreatedAt:                time.Now().UTC().Format(time.RFC3339),
 		Body:                     body,
 	}, nil
+}
+
+func recoveryCommandDedupeKey(meta threadstore.ThreadMeta, owner threadstore.OwnerRecord, kind threadcmd.Kind) string {
+	return fmt.Sprintf("recovery_%s_%s_%d_%s",
+		strings.ReplaceAll(string(kind), ".", "_"),
+		strconv.FormatInt(meta.ID, 10),
+		maxUint64(meta.SocketGeneration, owner.SocketGeneration),
+		strings.ReplaceAll(string(meta.Status), ".", "_"),
+	)
 }
 
 func (s *Service) scheduleSocketRotations(ctx context.Context) {
@@ -624,7 +632,7 @@ func (s *Service) scheduleSocketRotations(ctx context.Context) {
 				continue
 			}
 
-			cmd, err := buildRotateCommand(meta, now)
+			cmd, err := s.buildRotateCommand(ctx, meta, now)
 			if err != nil {
 				s.logger.Warn("failed to build rotate command", "thread_id", threadID, "error", err)
 				continue
@@ -664,7 +672,7 @@ func shouldRotateSocket(meta threadstore.ThreadMeta, workerID int64, now time.Ti
 	return !meta.SocketExpiresAt.After(now.Add(socketRotateLead))
 }
 
-func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (threadcmd.Command, error) {
+func (s *Service) buildRotateCommand(ctx context.Context, meta threadstore.ThreadMeta, now time.Time) (threadcmd.Command, error) {
 	body, err := json.Marshal(threadcmd.RotateSocketBody{
 		Reason:      "pre_expiry_rotation",
 		ScheduledAt: now.Format(time.RFC3339),
@@ -673,8 +681,13 @@ func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (threadcmd.C
 		return threadcmd.Command{}, fmt.Errorf("marshal rotate body: %w", err)
 	}
 
+	cmdID, err := s.sweepStore.LoadOrCreateCommandID(ctx, "thread", string(threadcmd.KindThreadRotateSocket), rotateCommandDedupeKey(meta))
+	if err != nil {
+		return threadcmd.Command{}, err
+	}
+
 	return threadcmd.Command{
-		CmdID:                    fmt.Sprintf("rotate_%d_%d", meta.ID, meta.SocketGeneration),
+		CmdID:                    cmdID,
 		Kind:                     threadcmd.KindThreadRotateSocket,
 		ThreadID:                 meta.ID,
 		RootThreadID:             defaultRootThreadID(meta),
@@ -684,4 +697,8 @@ func buildRotateCommand(meta threadstore.ThreadMeta, now time.Time) (threadcmd.C
 		CreatedAt:                now.Format(time.RFC3339),
 		Body:                     body,
 	}, nil
+}
+
+func rotateCommandDedupeKey(meta threadstore.ThreadMeta) string {
+	return fmt.Sprintf("rotate_%d_%d", meta.ID, meta.SocketGeneration)
 }

@@ -11,8 +11,9 @@ import (
 const logTimestampFormat = "2006-01-02 15:04:05"
 
 // NewHandler returns a text-based slog handler that renders a bare timestamp
-// prefix, omits level noise, renders msg/cmd_id without keys, and keeps
-// thread ids explicit for troubleshooting.
+// prefix, omits level noise, renders msg without a key, promotes cmd_id to the
+// more explicit command_id label, and keeps thread ids explicit for
+// troubleshooting.
 func NewHandler(w io.Writer, level slog.Leveler) slog.Handler {
 	return slog.NewTextHandler(&bareIDLogWriter{dst: w}, &slog.HandlerOptions{
 		Level:       level,
@@ -63,10 +64,13 @@ func rewriteBareIDTokens(line string) string {
 	line = stripLeadingQuotedTime(line)
 	line = strings.ReplaceAll(line, " time=", " ")
 	line = strings.ReplaceAll(line, " msg=", " ")
-	line = strings.ReplaceAll(line, " cmd_id=", " ")
+	line = strings.ReplaceAll(line, " cmd_id=", " command_id=")
 	line = strings.TrimPrefix(line, "time=")
 	line = strings.TrimPrefix(line, "msg=")
-	return strings.TrimPrefix(line, "cmd_id=")
+	if strings.HasPrefix(line, "cmd_id=") {
+		return "command_id=" + strings.TrimPrefix(line, "cmd_id=")
+	}
+	return line
 }
 
 func stripLeadingQuotedTime(line string) string {

@@ -7,7 +7,7 @@ import (
 
 func TestDecodeDefaultsRootThreadID(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_123",
+		"cmd_id":123,
 		"kind":"thread.start",
 		"thread_id":123,
 		"body":{"model":"gpt-5.4","initial_input":[{"type":"message"}]}
@@ -23,7 +23,7 @@ func TestDecodeDefaultsRootThreadID(t *testing.T) {
 
 func TestStartBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_123",
+		"cmd_id":123,
 		"kind":"thread.start",
 		"thread_id":123,
 		"body":{
@@ -56,7 +56,7 @@ func TestStartBody(t *testing.T) {
 	}
 
 	cmd, err = Decode([]byte(`{
-		"cmd_id":"cmd_branch",
+		"cmd_id":124,
 		"kind":"thread.start",
 		"thread_id":456,
 		"body":{
@@ -81,7 +81,7 @@ func TestStartBody(t *testing.T) {
 
 func TestStartBodyAcceptsPreparedInputRef(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_prepared",
+		"cmd_id":125,
 		"kind":"thread.start",
 		"thread_id":789,
 		"body":{
@@ -105,7 +105,7 @@ func TestStartBodyAcceptsPreparedInputRef(t *testing.T) {
 
 func TestResumeBodyAcceptsPreparedInputRef(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_resume_prepared",
+		"cmd_id":126,
 		"kind":"thread.resume",
 		"thread_id":123,
 		"body":{
@@ -134,7 +134,7 @@ func TestWorkerCommandWildcard(t *testing.T) {
 
 func TestSubmitToolOutputBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_456",
+		"cmd_id":456,
 		"kind":"thread.submit_tool_output",
 		"thread_id":123,
 		"body":{
@@ -162,7 +162,7 @@ func TestSubmitToolOutputBody(t *testing.T) {
 
 func TestRotateSocketBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_rotate",
+		"cmd_id":457,
 		"kind":"thread.rotate_socket",
 		"thread_id":123,
 		"body":{
@@ -186,7 +186,7 @@ func TestRotateSocketBody(t *testing.T) {
 
 func TestChildResultBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_789",
+		"cmd_id":789,
 		"kind":"thread.child_completed",
 		"thread_id":100,
 		"body":{
@@ -254,7 +254,7 @@ func TestInputKind(t *testing.T) {
 func TestLogAttrs(t *testing.T) {
 	t.Run("start command", func(t *testing.T) {
 		cmd, err := Decode([]byte(`{
-			"cmd_id":"cmd_start",
+			"cmd_id":900,
 			"kind":"thread.start",
 			"thread_id":123,
 			"root_thread_id":999,
@@ -269,8 +269,8 @@ func TestLogAttrs(t *testing.T) {
 		}
 
 		attrs := attrsToMap(LogAttrs(cmd))
-		if attrs["cmd_id"] != "cmd_start" {
-			t.Fatalf("cmd_id = %v, want cmd_start", attrs["cmd_id"])
+		if attrs["cmd_id"] != int64(900) {
+			t.Fatalf("cmd_id = %v, want 900", attrs["cmd_id"])
 		}
 		if attrs["root_thread_id"] != int64(999) {
 			t.Fatalf("root_thread_id = %v, want 999", attrs["root_thread_id"])
@@ -285,7 +285,7 @@ func TestLogAttrs(t *testing.T) {
 
 	t.Run("child result command", func(t *testing.T) {
 		cmd, err := Decode([]byte(`{
-			"cmd_id":"cmd_child",
+			"cmd_id":901,
 			"kind":"thread.child_completed",
 			"thread_id":100,
 			"root_thread_id":999,
@@ -331,7 +331,7 @@ func attrsToMap(attrs []any) map[string]any {
 
 func TestReconcileBody(t *testing.T) {
 	cmd, err := Decode([]byte(`{
-		"cmd_id":"cmd_recover",
+		"cmd_id":902,
 		"kind":"thread.reconcile",
 		"thread_id":123,
 		"body":{

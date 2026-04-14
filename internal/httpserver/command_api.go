@@ -15,7 +15,6 @@ import (
 
 	"explorer/internal/config"
 	"explorer/internal/docstore"
-	"explorer/internal/idgen"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threadcmd"
@@ -55,7 +54,6 @@ type createThreadRequest struct {
 }
 
 type submitCommandRequest struct {
-	CmdID                    string          `json:"cmd_id,omitempty"`
 	Kind                     threadcmd.Kind  `json:"kind"`
 	RootThreadID             int64           `json:"root_thread_id,omitempty"`
 	CausationID              string          `json:"causation_id,omitempty"`
@@ -241,7 +239,7 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	cmdID, err := idgen.New("cmd")
+	cmdID, err := a.store.ReserveCommandID(r.Context(), "thread", string(threadcmd.KindThreadStart))
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -405,13 +403,10 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	cmdID := strings.TrimSpace(req.CmdID)
-	if cmdID == "" {
-		cmdID, err = idgen.New("cmd")
-		if err != nil {
-			writeErrorJSON(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	cmdID, err := a.store.ReserveCommandID(r.Context(), "thread", string(req.Kind))
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 
 	rootThreadID := req.RootThreadID
@@ -820,7 +815,7 @@ func (a *commandAPI) publishCommand(ctx context.Context, subject string, cmd thr
 		Header:  nats.Header{},
 		Data:    payload,
 	}
-	msg.Header.Set("Nats-Msg-Id", cmd.CmdID)
+	msg.Header.Set("Nats-Msg-Id", strconv.FormatInt(cmd.CmdID, 10))
 
 	if _, err := a.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
 		return fmt.Errorf("publish command to %s: %w", subject, err)

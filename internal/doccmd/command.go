@@ -25,7 +25,7 @@ const (
 )
 
 type SplitCommand struct {
-	CmdID      string `json:"cmd_id"`
+	CmdID      int64  `json:"cmd_id"`
 	DocumentID int64  `json:"document_id"`
 	SourceRef  string `json:"source_ref"`
 	DPI        int    `json:"dpi,omitempty"`
@@ -66,6 +66,9 @@ func DecodeSplit(data []byte) (SplitCommand, error) {
 	var cmd SplitCommand
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		return SplitCommand{}, fmt.Errorf("decode split command: %w", err)
+	}
+	if cmd.CmdID <= 0 {
+		return SplitCommand{}, fmt.Errorf("split command missing cmd_id")
 	}
 	if cmd.DocumentID <= 0 {
 		return SplitCommand{}, fmt.Errorf("split command missing document_id")

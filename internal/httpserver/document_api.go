@@ -14,8 +14,8 @@ import (
 
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
-	"explorer/internal/idgen"
 	"explorer/internal/platform"
+	"explorer/internal/postgresstore"
 
 	"github.com/nats-io/nats.go"
 )
@@ -30,9 +30,10 @@ var allowedDocumentQueryModels = map[string]struct{}{
 }
 
 type documentAPI struct {
-	logger  *slog.Logger
-	runtime *platform.Runtime
-	store   *docstore.Store
+	logger   *slog.Logger
+	runtime  *platform.Runtime
+	store    *docstore.Store
+	commands *postgresstore.Store
 }
 
 type updateDocumentRequest struct {
@@ -42,9 +43,10 @@ type updateDocumentRequest struct {
 
 func newDocumentAPI(logger *slog.Logger, runtime *platform.Runtime) *documentAPI {
 	return &documentAPI{
-		logger:  logger,
-		runtime: runtime,
-		store:   docstore.New(runtime.Postgres().Pool()),
+		logger:   logger,
+		runtime:  runtime,
+		store:    docstore.New(runtime.Postgres().Pool()),
+		commands: postgresstore.New(runtime.Postgres().Pool()),
 	}
 }
 
@@ -162,7 +164,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	cmdID, err := idgen.New("cmd")
+	cmdID, err := a.commands.ReserveCommandID(r.Context(), "doc", doccmd.SplitSubject)
 	if err != nil {
 		writeErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -209,7 +211,7 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 		Header:  nats.Header{},
 		Data:    cmdPayload,
 	}
-	msg.Header.Set("Nats-Msg-Id", cmdID)
+	msg.Header.Set("Nats-Msg-Id", strconv.FormatInt(cmdID, 10))
 
 	if _, err := a.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
 		writeErrorJSON(w, http.StatusServiceUnavailable, fmt.Sprintf("publish split command: %v", err))
