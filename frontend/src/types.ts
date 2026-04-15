@@ -179,20 +179,19 @@ export interface ThreadStreamItemsDeltaMessage {
   page?: ThreadItemsResponse["page"];
 }
 
-export interface ThreadStreamEventsDeltaMessage {
-  type: "thread.events.delta";
-  thread_id: number;
-  events?: Record<string, unknown>[];
-}
-
 export interface ThreadStreamHeartbeatMessage {
   type: "thread.heartbeat";
   thread_id: number;
   time?: string;
 }
 
+export interface ThreadStreamPayload {
+  type: string;
+  thread_id: number;
+  [key: string]: unknown;
+}
+
 export type ThreadStreamMessage =
   | ThreadStreamSnapshotMessage
   | ThreadStreamItemsDeltaMessage
-  | ThreadStreamEventsDeltaMessage
   | ThreadStreamHeartbeatMessage;

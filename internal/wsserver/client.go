@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -320,16 +321,18 @@ func (c *client) loadAttachedDocuments(ctx context.Context, threadID int64) ([]m
 }
 
 func (c *client) writeStreamEventLocked(threadID int64, raw json.RawMessage) error {
-	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return clientPayloadError{err: err}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return clientPayloadError{err: fmt.Errorf("expected JSON object payload")}
 	}
 
-	return c.writeJSONLocked(map[string]any{
-		"type":      "thread.events.delta",
-		"thread_id": threadID,
-		"events":    []any{decoded},
-	})
+	threadField := fmt.Sprintf(`"thread_id":%d,`, threadID)
+	out := make([]byte, 0, len(trimmed)+len(threadField))
+	out = append(out, '{')
+	out = append(out, threadField...)
+	out = append(out, trimmed[1:]...)
+
+	return c.writeRawLocked(out)
 }
 
 func (c *client) writeHeartbeat() error {
@@ -347,6 +350,12 @@ func (c *client) writeJSONLocked(payload any) error {
 	writeCtx, cancel := context.WithTimeout(c.ctx, writeTimeout)
 	defer cancel()
 	return wsjson.Write(writeCtx, c.conn, payload)
+}
+
+func (c *client) writeRawLocked(data []byte) error {
+	writeCtx, cancel := context.WithTimeout(c.ctx, writeTimeout)
+	defer cancel()
+	return c.conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (c *client) close(code websocket.StatusCode, reason string) {

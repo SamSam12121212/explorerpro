@@ -14,7 +14,9 @@ import type {
   ThreadCreateResponse,
   ThreadItemsResponse,
   ThreadResponse,
-  ThreadStreamMessage,
+  ThreadStreamItemsDeltaMessage,
+  ThreadStreamPayload,
+  ThreadStreamSnapshotMessage,
   UploadedImage,
 } from "./types";
 
@@ -267,31 +269,25 @@ function isReasoningItemEvent(event: Record<string, unknown>): boolean {
   return typeof item === "object" && item !== null && (item as Record<string, unknown>).type === "reasoning";
 }
 
-function deriveThinkingState(events?: Record<string, unknown>[]) {
-  let nextThinking: boolean | null = null;
-
-  for (const event of events ?? []) {
-    const type = event.type;
-    if (typeof type !== "string") {
-      continue;
-    }
-
-    if (reasoningEventTypes.has(type)) {
-      nextThinking = true;
-      continue;
-    }
-
-    if ((type === "response.output_item.added" || type === "response.output_item.done") && isReasoningItemEvent(event)) {
-      nextThinking = true;
-      continue;
-    }
-
-    if (stopThinkingEventTypes.has(type)) {
-      nextThinking = false;
-    }
+function deriveThinkingFromEvent(event: Record<string, unknown>): boolean | null {
+  const type = event.type;
+  if (typeof type !== "string") {
+    return null;
   }
 
-  return nextThinking;
+  if (reasoningEventTypes.has(type)) {
+    return true;
+  }
+
+  if ((type === "response.output_item.added" || type === "response.output_item.done") && isReasoningItemEvent(event)) {
+    return true;
+  }
+
+  if (stopThinkingEventTypes.has(type)) {
+    return false;
+  }
+
+  return null;
 }
 
 function deriveThinkingStateFromItems(items?: ThreadItemsResponse["items"]) {
@@ -584,22 +580,23 @@ class ChatStore {
     }
   };
 
-  private readonly logThreadStreamMessage = (payload: ThreadStreamMessage) => {
-    switch (payload.type) {
-      case "thread.events.delta":
-        for (const event of payload.events ?? []) {
-          const type = typeof event.type === "string" ? event.type : "unknown";
-          if (type === "response.output_item.added" || type === "response.output_item.done") {
-            console.log(`[ws debug] ${type}`, event);
-          }
-        }
-        break;
-      default:
-        break;
+  private readonly logThreadStreamMessage = (payload: ThreadStreamPayload) => {
+    if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
+      console.log(`[ws debug] ${payload.type}`, payload);
     }
   };
 
-  private readonly handleThreadStreamMessage = (payload: ThreadStreamMessage) => {
+  private readonly handleOpenAIEvent = (payload: ThreadStreamPayload) => {
+    const nextThinking = deriveThinkingFromEvent(payload as Record<string, unknown>);
+    if (nextThinking !== null) {
+      this.setState((current) => ({
+        ...current,
+        thinking: nextThinking,
+      }));
+    }
+  };
+
+  private readonly handleThreadStreamMessage = (payload: ThreadStreamPayload) => {
     this.logThreadStreamMessage(payload);
 
     if (!this.state.threadId || payload.thread_id !== this.state.threadId) {
@@ -608,13 +605,14 @@ class ChatStore {
 
     switch (payload.type) {
       case "thread.snapshot":
-        this.handleThreadSnapshot(payload);
+        this.handleThreadSnapshot(payload as ThreadStreamSnapshotMessage);
         break;
       case "thread.items.delta": {
-        const nextThinking = deriveThinkingStateFromItems(payload.items);
+        const delta = payload as ThreadStreamItemsDeltaMessage;
+        const nextThinking = deriveThinkingStateFromItems(delta.items);
         const nextMessages = buildMessagesFromItems({
-          items: payload.items,
-          page: payload.page,
+          items: delta.items,
+          page: delta.page,
         });
 
         this.setState((current) => ({
@@ -626,19 +624,10 @@ class ChatStore {
         }));
         break;
       }
-      case "thread.events.delta": {
-        const nextThinking = deriveThinkingState(payload.events);
-        if (nextThinking !== null) {
-          this.setState((current) => ({
-            ...current,
-            thinking: nextThinking,
-          }));
-        }
-        break;
-      }
       case "thread.heartbeat":
         break;
       default:
+        this.handleOpenAIEvent(payload);
         break;
     }
   };

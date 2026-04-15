@@ -1,8 +1,8 @@
 import { WebSocket as PartySocketWebSocket } from "partysocket";
 import { buildStreamWebSocketUrl } from "../api";
-import type { ThreadStreamMessage } from "../types";
+import type { ThreadStreamPayload } from "../types";
 
-type MessageListener = (payload: ThreadStreamMessage) => void;
+type MessageListener = (payload: ThreadStreamPayload) => void;
 type Status = "online" | "degraded";
 type StatusListener = (status: Status) => void;
 
@@ -11,7 +11,7 @@ class AppStreamManager {
   private closingSocket: PartySocketWebSocket | null = null;
   private readonly messageListeners = new Set<MessageListener>();
   private readonly statusListeners = new Set<StatusListener>();
-  private readonly pendingMessages: ThreadStreamMessage[] = [];
+  private readonly pendingMessages: ThreadStreamPayload[] = [];
   private currentStatus: Status | null = null;
 
   subscribe(listener: MessageListener) {
@@ -62,7 +62,7 @@ class AppStreamManager {
     }
   }
 
-  private notifyMessage(payload: ThreadStreamMessage) {
+  private notifyMessage(payload: ThreadStreamPayload) {
     if (this.messageListeners.size === 0) {
       this.pendingMessages.push(payload);
       if (this.pendingMessages.length > 256) {
@@ -82,7 +82,7 @@ class AppStreamManager {
 
   private readonly handleMessage = (event: MessageEvent) => {
     try {
-      const payload = JSON.parse(event.data as string) as ThreadStreamMessage;
+      const payload = JSON.parse(event.data as string) as ThreadStreamPayload;
       this.notifyMessage(payload);
     } catch {
       /* swallow invalid websocket payloads */
