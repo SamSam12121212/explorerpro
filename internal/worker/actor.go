@@ -16,10 +16,10 @@ import (
 	"explorer/internal/blobstore"
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
+	"explorer/internal/eventrelay"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadcmd"
-	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
@@ -1702,7 +1702,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, pa
 	}
 
 	if a.publishEvent != nil {
-		if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", threadevents.EventTypeClientResponse, rawEvent); err != nil {
+		if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", eventrelay.EventTypeClientResponse, rawEvent); err != nil {
 			return err
 		}
 	}
@@ -2561,7 +2561,7 @@ func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
 		meta.ID,
 		meta.SocketGeneration,
 		fmt.Sprintf("snapshot-%d", meta.UpdatedAt.UnixNano()),
-		threadevents.EventTypeThreadSnapshot,
+		eventrelay.EventTypeThreadSnapshot,
 		payload,
 	); err != nil {
 		a.logger.Warn("failed to publish thread snapshot event", "error", err)
@@ -2584,7 +2584,7 @@ func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
 		a.threadID,
 		a.currentSocketGeneration(),
 		fmt.Sprintf("item-%d", item.Seq),
-		threadevents.EventTypeThreadItem,
+		eventrelay.EventTypeThreadItem,
 		payload,
 	); err != nil {
 		a.logger.Warn("failed to publish thread item event", "seq", item.Seq, "error", err)

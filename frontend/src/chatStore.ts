@@ -581,9 +581,7 @@ class ChatStore {
   };
 
   private readonly logThreadStreamMessage = (payload: ThreadStreamPayload) => {
-    if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
-      console.log(`[ws debug] ${payload.type}`, payload);
-    }
+    console.log(`[ws] ${payload.type}`, payload);
   };
 
   private readonly handleOpenAIEvent = (payload: ThreadStreamPayload) => {

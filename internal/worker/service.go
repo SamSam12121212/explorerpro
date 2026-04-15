@@ -14,13 +14,13 @@ import (
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
+	"explorer/internal/eventrelay"
 	"explorer/internal/natsbootstrap"
 	"explorer/internal/openaiws"
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threadcmd"
 	"explorer/internal/threaddocstore"
-	"explorer/internal/threadevents"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
@@ -52,6 +52,7 @@ type Service struct {
 	docClient    *documenthandler.Client
 	docStore     docActorDocStore
 	sweepStore   serviceSweepStore
+	relay        *eventrelay.Client
 	publishFn    func(ctx context.Context, subject string, cmd threadcmd.Command) error
 
 	actorsMu sync.Mutex
@@ -82,6 +83,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
 	docs := docstore.New(runtime.Postgres().Pool())
 	docClient := documenthandler.NewClient(runtime.NATS().Conn())
+	relay := eventrelay.NewClient(logger, cfg.EventRelayAddr)
 
 	return &Service{
 		cfg:          cfg,
@@ -95,6 +97,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		docClient:    docClient,
 		docStore:     docs,
 		sweepStore:   store,
+		relay:        relay,
 		actors:       map[int64]*threadActor{},
 	}, nil
 }
@@ -115,12 +118,14 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	if err := natsbootstrap.EnsureThreadCommandStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
-	if err := natsbootstrap.EnsureThreadEventsStream(s.runtime.NATS().JetStream()); err != nil {
-		return err
-	}
 	if err := natsbootstrap.EnsureThreadHistoryStream(s.runtime.NATS().JetStream()); err != nil {
 		return err
 	}
+
+	if err := s.relay.Connect(ctx); err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, s.relay.Close()) }()
 
 	dispatchCh := make(chan *nats.Msg, 256)
 	workerCh := make(chan *nats.Msg, 256)
@@ -368,31 +373,7 @@ func rawJSONToAny(raw json.RawMessage) (any, error) {
 }
 
 func (s *Service) publishThreadEvent(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error {
-	env := threadevents.EventEnvelope{
-		ThreadID:         threadID,
-		EventType:        eventType,
-		SocketGeneration: socketGeneration,
-		Timestamp:        time.Now().UTC().Format(time.RFC3339Nano),
-		Payload:          raw,
-	}
-
-	data, err := threadevents.Encode(env)
-	if err != nil {
-		return fmt.Errorf("encode thread event for %d: %w", threadID, err)
-	}
-
-	msg := &nats.Msg{
-		Subject: threadevents.Subject(threadID),
-		Header:  nats.Header{},
-		Data:    data,
-	}
-	msg.Header.Set("Nats-Msg-Id", threadevents.MsgID(threadID, socketGeneration, key))
-
-	if _, err := s.runtime.NATS().JetStream().PublishMsg(msg, nats.Context(ctx)); err != nil {
-		return fmt.Errorf("publish thread event for %d (%s): %w", threadID, eventType, err)
-	}
-
-	return nil
+	return s.relay.Send(ctx, threadID, eventType, raw)
 }
 
 func (s *Service) publishCommand(ctx context.Context, subject string, cmd threadcmd.Command) error {

@@ -12,13 +12,11 @@ import (
 
 	"explorer/internal/config"
 	"explorer/internal/logutil"
-	"explorer/internal/natsbootstrap"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
 	"explorer/internal/wsserver"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -33,39 +31,17 @@ func run() error {
 	logger := slog.New(logutil.NewHandler(os.Stdout, logLevel))
 
 	port := envOr("PORT", "8081")
-	natsURL := envOr("NATS_URL", "nats://localhost:4222")
-	natsName := envOr("NATS_CLIENT_NAME", "explorer-wsserver")
+	relayAddr := envOr("EVENT_RELAY_ADDR", ":9090")
 	postgresDSN := envOr("POSTGRES_DSN", "postgres://explorer:explorer@localhost:5432/explorer?sslmode=disable")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	nc, err := nats.Connect(
-		natsURL,
-		nats.Name(natsName),
-		nats.Timeout(5*time.Second),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-	)
-	if err != nil {
-		return fmt.Errorf("connect nats: %w", err)
-	}
-	defer nc.Close()
-
-	js, err := nc.JetStream()
-	if err != nil {
-		return fmt.Errorf("create jetstream context: %w", err)
-	}
-
-	if err := natsbootstrap.EnsureThreadEventsStream(js); err != nil {
-		return fmt.Errorf("ensure thread events stream: %w", err)
-	}
-
 	poolCfg, err := pgxpool.ParseConfig(postgresDSN)
 	if err != nil {
 		return fmt.Errorf("parse postgres config: %w", err)
 	}
+	poolCfg.ConnConfig.ConnectTimeout = 5 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return fmt.Errorf("create postgres pool: %w", err)
@@ -80,16 +56,16 @@ func run() error {
 	docs := threaddocstore.New(pool)
 
 	srv := wsserver.New(wsserver.Config{
-		Port:   port,
-		Logger: logger,
-		JS:     js,
-		Store:  store,
-		Docs:   docs,
+		Port:      port,
+		RelayAddr: relayAddr,
+		Logger:    logger,
+		Store:     store,
+		Docs:      docs,
 	})
 
 	logger.Info("wsserver starting",
 		"port", port,
-		"nats", natsURL,
+		"relay_addr", relayAddr,
 	)
 
 	return srv.ListenAndServe(ctx)

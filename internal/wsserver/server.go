@@ -10,31 +10,34 @@ import (
 	"strings"
 	"time"
 
+	"explorer/internal/eventrelay"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
-
-	"github.com/nats-io/nats.go"
 )
 
 type Config struct {
-	Port   string
-	Logger *slog.Logger
-	JS     nats.JetStreamContext
-	Store  *postgresstore.Store
-	Docs   *threaddocstore.Store
+	Port      string
+	RelayAddr string
+	Logger    *slog.Logger
+	Store     *postgresstore.Store
+	Docs      *threaddocstore.Store
 }
 
 type Server struct {
 	cfg    Config
 	hub    *eventHub
+	relay  *eventrelay.Server
 	logger *slog.Logger
 	mux    *http.ServeMux
 }
 
 func New(cfg Config) *Server {
+	hub := newEventHub(cfg.Logger)
+
 	s := &Server{
 		cfg:    cfg,
-		hub:    newEventHub(cfg.Logger, cfg.JS),
+		hub:    hub,
+		relay:  eventrelay.NewServer(cfg.Logger, hub.HandleFrame),
 		logger: cfg.Logger,
 		mux:    http.NewServeMux(),
 	}
@@ -47,16 +50,17 @@ func New(cfg Config) *Server {
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	if err := s.hub.Start(ctx); err != nil {
-		return err
-	}
+	relayErrCh := make(chan error, 1)
+	go func() {
+		relayErrCh <- s.relay.ListenAndServe(ctx, s.cfg.RelayAddr)
+	}()
 
 	srv := &http.Server{
 		Addr:              ":" + s.cfg.Port,
 		Handler:           s.mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // unlimited for websocket
+		WriteTimeout:      0,
 		IdleTimeout:       120 * time.Second,
 	}
 
@@ -67,10 +71,28 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	s.logger.Info("wsserver listening", "port", s.cfg.Port)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("wsserver listen: %w", err)
+	s.logger.Info("wsserver listening", "port", s.cfg.Port, "relay", s.cfg.RelayAddr)
+
+	httpErrCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			httpErrCh <- fmt.Errorf("wsserver listen: %w", err)
+		}
+		close(httpErrCh)
+	}()
+
+	select {
+	case err := <-relayErrCh:
+		if err != nil {
+			return fmt.Errorf("event relay: %w", err)
+		}
+	case err := <-httpErrCh:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
 	}
+
 	return nil
 }
 

@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"explorer/internal/docstore"
+	"explorer/internal/eventrelay"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threaddocstore"
-	"explorer/internal/threadevents"
 	"explorer/internal/threadstore"
 
 	"github.com/coder/websocket"
@@ -137,17 +137,17 @@ func (c *client) run() {
 	}
 }
 
-func (c *client) handleEvent(env threadevents.EventEnvelope) error {
+func (c *client) handleEvent(f eventrelay.Frame) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	switch env.EventType {
-	case threadevents.EventTypeThreadItem:
-		return c.writeStreamItemLocked(env.ThreadID, env.Payload)
-	case threadevents.EventTypeThreadSnapshot:
-		return c.writeStreamSnapshotLocked(env.ThreadID, env.Payload)
+	switch f.EventType {
+	case eventrelay.EventTypeThreadItem:
+		return c.writeStreamItemLocked(f.ThreadID, f.Payload)
+	case eventrelay.EventTypeThreadSnapshot:
+		return c.writeStreamSnapshotLocked(f.ThreadID, f.Payload)
 	default:
-		return c.writeStreamEventLocked(env.ThreadID, env.Payload)
+		return c.writeStreamEventLocked(f.ThreadID, f.Payload)
 	}
 }
 

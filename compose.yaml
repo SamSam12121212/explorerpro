@@ -88,6 +88,7 @@ services:
       NATS_CLIENT_NAME: explorer-worker
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
       BLOB_STORAGE_DIR: /data/blob-storage
+      EVENT_RELAY_ADDR: wsserver:9090
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
       OPENAI_RESPONSES_WS_URL: "${OPENAI_RESPONSES_WS_URL:-wss://api.openai.com/v1/responses}"
@@ -100,6 +101,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+      wsserver:
+        condition: service_started
     restart: unless-stopped
 
   wsserver:
@@ -111,14 +114,11 @@ services:
       SERVICE_NAME: explorer-wsserver
       LOG_LEVEL: "${LOG_LEVEL:-info}"
       PORT: "8081"
-      NATS_URL: nats://nats:4222
-      NATS_CLIENT_NAME: explorer-wsserver
+      EVENT_RELAY_ADDR: ":9090"
       POSTGRES_DSN: "postgres://${POSTGRES_USER:-explorer}:${POSTGRES_PASSWORD:-explorer}@postgres:5432/${POSTGRES_DB:-explorer}?sslmode=disable"
     depends_on:
       postgres:
         condition: service_healthy
-      nats:
-        condition: service_started
     restart: unless-stopped
 
   git:

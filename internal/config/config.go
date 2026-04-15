@@ -42,6 +42,7 @@ type Config struct {
 	Postgres        PostgresConfig
 	Blob            BlobConfig
 	OpenAI          OpenAIConfig
+	EventRelayAddr  string
 }
 
 type HTTPConfig struct {
@@ -116,6 +117,7 @@ func Load() (Config, error) {
 			PingInterval:       defaultOpenAIPingInterval,
 			MaxMessageBytes:    defaultOpenAIMaxMessageBytes,
 		},
+		EventRelayAddr: getEnv("EVENT_RELAY_ADDR", "wsserver:9090"),
 	}
 
 	var err error

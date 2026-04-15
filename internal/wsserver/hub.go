@@ -1,102 +1,41 @@
 package wsserver
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
-	"explorer/internal/threadevents"
-
-	"github.com/nats-io/nats.go"
+	"explorer/internal/eventrelay"
 )
-
-const wsEventAckWait = 30 * time.Second
 
 type eventHub struct {
 	logger *slog.Logger
-	js     nats.JetStreamContext
 
 	mu            sync.RWMutex
 	clients       map[int64]map[*client]struct{}
 	globalClients map[*client]struct{}
 }
 
-func newEventHub(logger *slog.Logger, js nats.JetStreamContext) *eventHub {
+func newEventHub(logger *slog.Logger) *eventHub {
 	return &eventHub{
 		logger:        logger,
-		js:            js,
 		clients:       map[int64]map[*client]struct{}{},
 		globalClients: map[*client]struct{}{},
 	}
 }
 
-func (h *eventHub) Start(ctx context.Context) error {
-	if h == nil || h.js == nil {
-		return fmt.Errorf("ws event hub is not configured")
-	}
-
-	eventsCh := make(chan *nats.Msg, 256)
-	if _, err := h.js.ChanSubscribe(
-		threadevents.SubjectWildcard,
-		eventsCh,
-		nats.BindStream(threadevents.StreamName),
-		nats.Durable(threadevents.ConsumerName),
-		nats.ManualAck(),
-		nats.AckExplicit(),
-		nats.AckWait(wsEventAckWait),
-		nats.DeliverAll(),
-	); err != nil {
-		return fmt.Errorf("subscribe thread events stream: %w", err)
-	}
-
-	go h.consume(ctx, eventsCh)
-	return nil
-}
-
-func (h *eventHub) consume(ctx context.Context, eventsCh <-chan *nats.Msg) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg, ok := <-eventsCh:
-			if !ok {
-				return
-			}
-			h.handleMessage(msg)
-		}
-	}
-}
-
-func (h *eventHub) handleMessage(msg *nats.Msg) {
-	env, err := threadevents.Decode(msg.Data)
-	if err != nil {
-		h.logger.Warn("failed to decode thread event envelope", "subject", msg.Subject, "error", err)
-		h.ack(msg)
-		return
-	}
-
-	for _, recipient := range h.recipients(env.ThreadID) {
-		if err := recipient.handleEvent(env); err != nil {
+func (h *eventHub) HandleFrame(f eventrelay.Frame) {
+	for _, recipient := range h.recipients(f.ThreadID) {
+		if err := recipient.handleEvent(f); err != nil {
 			var payloadErr clientPayloadError
 			if errors.As(err, &payloadErr) {
-				h.logger.Warn("failed to decode live thread payload", "thread_id", env.ThreadID, "event_type", env.EventType, "error", err)
+				h.logger.Warn("failed to decode live thread payload", "thread_id", f.ThreadID, "event_type", f.EventType, "error", err)
 				continue
 			}
 			recipient.logStreamError(err)
 			recipient.close(websocketCloseStatus(err), "stream closed")
-			h.unregister(env.ThreadID, recipient)
+			h.unregister(f.ThreadID, recipient)
 		}
-	}
-
-	h.ack(msg)
-}
-
-func (h *eventHub) ack(msg *nats.Msg) {
-	if err := msg.Ack(); err != nil {
-		h.logger.Warn("failed to ack thread event", "subject", msg.Subject, "error", err)
 	}
 }
 
