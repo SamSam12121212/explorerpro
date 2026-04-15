@@ -23,6 +23,8 @@ export function useThread(): ThreadStore {
       setPendingImages: service.setPendingImages,
       sendMessage: service.sendMessage,
       loadThread: service.loadThread,
+      archiveThread: service.archiveThread,
+      deleteThread: service.deleteThread,
       resetConversation: service.resetConversation,
       addPendingFiles: service.addPendingFiles,
       attachDocument: service.attachDocument,

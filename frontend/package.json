@@ -15,7 +15,6 @@
     "@embedpdf/engines": "^2.14.0",
     "@embedpdf/pdfium": "^2.14.0",
     "@embedpdf/react-pdf-viewer": "^2.14.0",
-    "@radix-ui/react-tooltip": "^1.2.8",
     "partysocket": "1.1.5",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

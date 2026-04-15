@@ -30,6 +30,10 @@ func (s fakeEventHistoryStore) ListEvents(_ context.Context, threadID int64, opt
 	return s.events, nil
 }
 
+func (s fakeEventHistoryStore) PurgeThread(_ context.Context, _ int64) error {
+	return s.err
+}
+
 func TestNormalizeResponseInput(t *testing.T) {
 	t.Parallel()
 
@@ -107,6 +111,13 @@ func TestParseThreadRoute(t *testing.T) {
 	}
 	if _, ok := parseThreadRoute("/threads/123/items/extra"); ok {
 		t.Fatal("expected invalid items path to fail")
+	}
+	route, ok = parseThreadRoute("/threads/123/archive")
+	if !ok {
+		t.Fatal("expected archive path to parse")
+	}
+	if route.ThreadID != 123 || route.Resource != "archive" {
+		t.Fatalf("unexpected archive route: %+v", route)
 	}
 	route, ok = parseThreadRoute("/threads/123/spawn-groups/123")
 	if !ok {

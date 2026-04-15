@@ -91,6 +91,7 @@ INSERT INTO threads (
     child_kind,
     document_id,
     document_phase,
+    archived_at,
     created_at,
     updated_at
 ) VALUES (
@@ -117,7 +118,8 @@ INSERT INTO threads (
     $21,
     $22,
     $23,
-    $24
+    $24,
+    $25
 )
 ON CONFLICT (id) DO NOTHING
 `,
@@ -143,6 +145,7 @@ ON CONFLICT (id) DO NOTHING
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
+		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -178,6 +181,7 @@ INSERT INTO threads (
     child_kind,
     document_id,
     document_phase,
+    archived_at,
     created_at,
     updated_at
 ) VALUES (
@@ -204,7 +208,8 @@ INSERT INTO threads (
     $21,
     $22,
     $23,
-    $24
+    $24,
+    $25
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -228,6 +233,7 @@ ON CONFLICT (id) DO UPDATE SET
     child_kind = EXCLUDED.child_kind,
     document_id = EXCLUDED.document_id,
     document_phase = EXCLUDED.document_phase,
+    archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
     updated_at = EXCLUDED.updated_at
 `,
@@ -253,6 +259,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
+		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -1109,6 +1116,7 @@ SELECT
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
+    archived_at,
     created_at,
     updated_at
 FROM threads
@@ -1119,6 +1127,7 @@ WHERE id = $1
 	var status string
 	var socketGeneration int64
 	var socketExpiresAt *time.Time
+	var archivedAt *time.Time
 	if err := row.Scan(
 		&meta.ID,
 		&meta.RootThreadID,
@@ -1142,6 +1151,7 @@ WHERE id = $1
 		&meta.ChildKind,
 		&meta.DocumentID,
 		&meta.DocumentPhase,
+		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	); err != nil {
@@ -1155,6 +1165,9 @@ WHERE id = $1
 	meta.SocketGeneration = uint64(maxInt64(socketGeneration))
 	if socketExpiresAt != nil {
 		meta.SocketExpiresAt = socketExpiresAt.UTC()
+	}
+	if archivedAt != nil {
+		meta.ArchivedAt = archivedAt.UTC()
 	}
 	return meta, nil
 }
@@ -1184,6 +1197,7 @@ SELECT
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
+    archived_at,
     created_at,
     updated_at
 FROM threads
@@ -1197,6 +1211,7 @@ LIMIT 1
 	var status string
 	var socketGeneration int64
 	var socketExpiresAt *time.Time
+	var archivedAt *time.Time
 	if err := row.Scan(
 		&meta.ID,
 		&meta.RootThreadID,
@@ -1220,6 +1235,7 @@ LIMIT 1
 		&meta.ChildKind,
 		&meta.DocumentID,
 		&meta.DocumentPhase,
+		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	); err != nil {
@@ -1233,6 +1249,9 @@ LIMIT 1
 	meta.SocketGeneration = uint64(maxInt64(socketGeneration))
 	if socketExpiresAt != nil {
 		meta.SocketExpiresAt = socketExpiresAt.UTC()
+	}
+	if archivedAt != nil {
+		meta.ArchivedAt = archivedAt.UTC()
 	}
 	return meta, nil
 }
@@ -1297,6 +1316,7 @@ SELECT
     COALESCE(t.child_kind, ''),
     COALESCE(t.document_id, 0),
     COALESCE(t.document_phase, ''),
+    t.archived_at,
     t.created_at,
     t.updated_at,
     COALESCE(first_item.payload_json, '{}'::jsonb)::text,
@@ -1322,6 +1342,7 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) AS latest_item ON true
 WHERE t.parent_thread_id IS NULL
+  AND t.archived_at IS NULL
 ORDER BY t.updated_at DESC, t.id DESC
 LIMIT $1
 `, limit)
@@ -1337,6 +1358,7 @@ LIMIT $1
 			status            string
 			socketGeneration  int64
 			socketExpiresAt   *time.Time
+			archivedAt        *time.Time
 			firstPayloadText  string
 			latestPayloadText string
 			latestDirection   string
@@ -1365,6 +1387,7 @@ LIMIT $1
 			&meta.ChildKind,
 			&meta.DocumentID,
 			&meta.DocumentPhase,
+			&archivedAt,
 			&meta.CreatedAt,
 			&meta.UpdatedAt,
 			&firstPayloadText,
@@ -1379,6 +1402,9 @@ LIMIT $1
 		meta.SocketGeneration = uint64(maxInt64(socketGeneration))
 		if socketExpiresAt != nil {
 			meta.SocketExpiresAt = socketExpiresAt.UTC()
+		}
+		if archivedAt != nil {
+			meta.ArchivedAt = archivedAt.UTC()
 		}
 
 		entry := ThreadListEntry{
@@ -1398,6 +1424,130 @@ LIMIT $1
 	}
 
 	return entries, nil
+}
+
+func (s *Store) ArchiveRootThread(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return threadstore.ThreadMeta{}, fmt.Errorf("begin archive thread tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	meta, err := s.loadThreadForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return threadstore.ThreadMeta{}, err
+	}
+	if meta.ParentThreadID > 0 {
+		return threadstore.ThreadMeta{}, threadstore.ErrThreadNotRoot
+	}
+
+	if meta.ArchivedAt.IsZero() {
+		now := time.Now().UTC()
+		if _, err := tx.Exec(ctx, `
+UPDATE threads
+SET archived_at = $2,
+    updated_at = $2
+WHERE id = $1
+`, threadID, now); err != nil {
+			return threadstore.ThreadMeta{}, fmt.Errorf("archive thread %d: %w", threadID, err)
+		}
+		meta.ArchivedAt = now
+		meta.UpdatedAt = now
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return threadstore.ThreadMeta{}, fmt.Errorf("commit archive thread tx: %w", err)
+	}
+
+	return meta, nil
+}
+
+func (s *Store) DeleteRootThread(ctx context.Context, threadID int64) ([]int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin delete thread tx: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	meta, err := s.loadThreadForUpdate(ctx, tx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if meta.ParentThreadID > 0 {
+		return nil, threadstore.ErrThreadNotRoot
+	}
+
+	busy, err := s.threadTreeBusyTx(ctx, tx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if busy {
+		return nil, threadstore.ErrThreadBusy
+	}
+
+	threadIDs, err := s.threadTreeIDsTx(ctx, tx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if len(threadIDs) == 0 {
+		return nil, threadstore.ErrThreadNotFound
+	}
+
+	responseIDs, err := s.threadResponseIDsTx(ctx, tx, threadIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM spawn_group_children
+WHERE child_thread_id = ANY($1::bigint[])
+   OR spawn_group_id IN (
+        SELECT id
+        FROM spawn_groups
+        WHERE parent_thread_id = ANY($1::bigint[])
+   )
+`, threadIDs); err != nil {
+		return nil, fmt.Errorf("delete spawn group children for thread %d: %w", threadID, err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM spawn_groups
+WHERE parent_thread_id = ANY($1::bigint[])
+`, threadIDs); err != nil {
+		return nil, fmt.Errorf("delete spawn groups for thread %d: %w", threadID, err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM thread_response_links
+WHERE thread_id = ANY($1::bigint[])
+   OR response_id = ANY($2::text[])
+`, threadIDs, responseIDs); err != nil {
+		return nil, fmt.Errorf("delete thread response links for thread %d: %w", threadID, err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM responses
+WHERE source_thread_id = ANY($1::bigint[])
+`, threadIDs); err != nil {
+		return nil, fmt.Errorf("delete responses for thread %d: %w", threadID, err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM threads
+WHERE id = ANY($1::bigint[])
+`, threadIDs); err != nil {
+		return nil, fmt.Errorf("delete thread tree %d: %w", threadID, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit delete thread tx: %w", err)
+	}
+
+	return threadIDs, nil
 }
 
 func (s *Store) ListItems(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.ItemRecord, error) {
@@ -1910,6 +2060,96 @@ func normalizeLimit(limit int64) int64 {
 	return limit
 }
 
+func (s *Store) threadTreeIDsTx(ctx context.Context, tx pgx.Tx, threadID int64) ([]int64, error) {
+	rows, err := tx.Query(ctx, `
+WITH RECURSIVE subtree AS (
+    SELECT id
+    FROM threads
+    WHERE id = $1
+    UNION ALL
+    SELECT child.id
+    FROM threads AS child
+    JOIN subtree AS parent ON child.parent_thread_id = parent.id
+)
+SELECT id
+FROM subtree
+ORDER BY id ASC
+`, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("list thread tree ids for %d: %w", threadID, err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan thread tree id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate thread tree ids for %d: %w", threadID, err)
+	}
+
+	return ids, nil
+}
+
+func (s *Store) threadResponseIDsTx(ctx context.Context, tx pgx.Tx, threadIDs []int64) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+SELECT id
+FROM responses
+WHERE source_thread_id = ANY($1::bigint[])
+ORDER BY id ASC
+`, threadIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list response ids for thread tree: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan response id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate response ids for thread tree: %w", err)
+	}
+
+	return ids, nil
+}
+
+func (s *Store) threadTreeBusyTx(ctx context.Context, tx pgx.Tx, threadID int64) (bool, error) {
+	var busy bool
+	if err := tx.QueryRow(ctx, `
+WITH RECURSIVE subtree AS (
+    SELECT id
+    FROM threads
+    WHERE id = $1
+    UNION ALL
+    SELECT child.id
+    FROM threads AS child
+    JOIN subtree AS parent ON child.parent_thread_id = parent.id
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM threads AS t
+    LEFT JOIN thread_owners AS o ON o.thread_id = t.id
+    WHERE t.id IN (SELECT id FROM subtree)
+      AND (
+          t.status IN ('new', 'running', 'reconciling', 'waiting_tool', 'waiting_children')
+          OR (o.thread_id IS NOT NULL AND o.lease_until > now())
+      )
+)
+`, threadID).Scan(&busy); err != nil {
+		return false, fmt.Errorf("check busy thread tree %d: %w", threadID, err)
+	}
+	return busy, nil
+}
+
 func scanItemRows(rows pgxRows) ([]threadstore.ItemRecord, error) {
 	var items []threadstore.ItemRecord
 	for rows.Next() {
@@ -1971,6 +2211,7 @@ INSERT INTO threads (
     child_kind,
     document_id,
     document_phase,
+    archived_at,
     created_at,
     updated_at
 ) VALUES (
@@ -1997,7 +2238,8 @@ INSERT INTO threads (
     $21,
     $22,
     $23,
-    $24
+    $24,
+    $25
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -2021,6 +2263,7 @@ ON CONFLICT (id) DO UPDATE SET
     child_kind = EXCLUDED.child_kind,
     document_id = EXCLUDED.document_id,
     document_phase = EXCLUDED.document_phase,
+    archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
     updated_at = EXCLUDED.updated_at
 `,
@@ -2046,6 +2289,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfBlank(meta.ChildKind),
 		nullIfZeroInt64(meta.DocumentID),
 		nullIfBlank(meta.DocumentPhase),
+		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
 	)
@@ -2080,6 +2324,7 @@ SELECT
     COALESCE(child_kind, ''),
     COALESCE(document_id, 0),
     COALESCE(document_phase, ''),
+    archived_at,
     created_at,
     updated_at
 FROM threads
@@ -2091,6 +2336,7 @@ FOR UPDATE
 	var status string
 	var socketGeneration int64
 	var socketExpiresAt *time.Time
+	var archivedAt *time.Time
 	if err := row.Scan(
 		&meta.ID,
 		&meta.RootThreadID,
@@ -2114,6 +2360,7 @@ FOR UPDATE
 		&meta.ChildKind,
 		&meta.DocumentID,
 		&meta.DocumentPhase,
+		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	); err != nil {
@@ -2127,6 +2374,9 @@ FOR UPDATE
 	meta.SocketGeneration = uint64(maxInt64(socketGeneration))
 	if socketExpiresAt != nil {
 		meta.SocketExpiresAt = socketExpiresAt.UTC()
+	}
+	if archivedAt != nil {
+		meta.ArchivedAt = archivedAt.UTC()
 	}
 	return meta, nil
 }

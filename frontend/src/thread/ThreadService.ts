@@ -1,5 +1,5 @@
 import { appStreamManager } from "../stream/appStream";
-import { apiGet, apiPost, checkHealthApi, uploadImage } from "../api";
+import { apiDelete, apiGet, apiPost, checkHealthApi, uploadImage } from "../api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "../constants";
 import type {
   AttachedDocument,
@@ -225,15 +225,50 @@ export class ThreadService {
       }));
     } catch (error) {
       this.lastThreadStatus = null;
+      writePersistedActiveThreadId(null);
+      const message = error instanceof Error ? error.message : "Failed to load thread";
+      if (message.toLowerCase().includes("not found")) {
+        this.setState((s) => ({
+          ...initialState,
+          apiStatus: s.apiStatus,
+          threads: s.threads,
+          threadsLoading: s.threadsLoading,
+        }));
+        return;
+      }
       this.setState((s) => ({
         ...s,
-        messages: [{ id: crypto.randomUUID(), role: "error", text: error instanceof Error ? error.message : "Failed to load thread" }],
+        messages: [{ id: crypto.randomUUID(), role: "error", text: message }],
         phase: "error",
         thinking: false,
         threadId: null,
         attachedDocuments: [],
       }));
     }
+  };
+
+  archiveThread = async (threadId: number) => {
+    await apiPost(`/threads/${threadId.toString()}/archive`, {});
+    if (threadId === this.state.threadId) {
+      this.resetConversation();
+    }
+    this.setState((s) => ({
+      ...s,
+      threads: s.threads.filter((thread) => thread.id !== threadId),
+    }));
+    void this.fetchThreadList();
+  };
+
+  deleteThread = async (threadId: number) => {
+    await apiDelete(`/threads/${threadId.toString()}`);
+    if (threadId === this.state.threadId) {
+      this.resetConversation();
+    }
+    this.setState((s) => ({
+      ...s,
+      threads: s.threads.filter((thread) => thread.id !== threadId),
+    }));
+    void this.fetchThreadList();
   };
 
   sendMessage = async (text: string, images: UploadedImage[], documents: AttachedDocument[]) => {

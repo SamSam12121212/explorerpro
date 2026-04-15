@@ -92,7 +92,6 @@ function AppLayout() {
           label={panelVisibility.left ? "Hide left panel" : "Show left panel"}
           onClick={() => { togglePanelVisibility("left"); }}
           pressed={panelVisibility.left}
-          tooltipSide="bottom"
         >
           <LuPanelLeft size={18} />
         </IconActionButton>
@@ -100,7 +99,6 @@ function AppLayout() {
           label={panelVisibility.middle ? "Hide middle panel" : "Show middle panel"}
           onClick={() => { togglePanelVisibility("middle"); }}
           pressed={panelVisibility.middle}
-          tooltipSide="bottom"
         >
           <LuColumns3 size={18} />
         </IconActionButton>
@@ -108,16 +106,12 @@ function AppLayout() {
           label={panelVisibility.right ? "Hide right panel" : "Show right panel"}
           onClick={() => { togglePanelVisibility("right"); }}
           pressed={panelVisibility.right}
-          tooltipAlign="end"
-          tooltipSide="bottom"
         >
           <LuPanelRight size={18} />
         </IconActionButton>
         <IconActionButton
           label="New chat"
           onClick={resetConversation}
-          tooltipAlign="end"
-          tooltipSide="bottom"
         >
           <LuSquarePen size={18} />
         </IconActionButton>

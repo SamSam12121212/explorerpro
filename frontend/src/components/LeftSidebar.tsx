@@ -22,6 +22,8 @@ export function LeftSidebar() {
     attachedDocuments,
     pendingDocuments,
     loadThread,
+    archiveThread,
+    deleteThread,
     attachDocument,
   } = useThread();
 
@@ -90,6 +92,8 @@ export function LeftSidebar() {
         {activeTab === "threads" ? (
           <ThreadSidebar
             activeThreadId={threadId}
+            onArchiveThread={archiveThread}
+            onDeleteThread={deleteThread}
             onSelectThread={handleSelectThread}
             threads={threads}
           />

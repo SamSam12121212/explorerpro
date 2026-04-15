@@ -40,6 +40,8 @@ export interface ThreadActions {
   setPendingImages: (updater: UploadedImage[] | ((current: UploadedImage[]) => UploadedImage[])) => void;
   sendMessage: (text: string, images: UploadedImage[], documents: AttachedDocument[]) => Promise<void>;
   loadThread: (threadId: number) => Promise<void>;
+  archiveThread: (threadId: number) => Promise<void>;
+  deleteThread: (threadId: number) => Promise<void>;
   resetConversation: () => void;
   addPendingFiles: (files: File[]) => Promise<void>;
   attachDocument: (document: AttachedDocument) => void;

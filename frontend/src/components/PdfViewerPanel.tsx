@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   PDFViewer,
+  type Command,
+  type IconsConfig,
   type PluginRegistry,
   type ThemeConfig,
   type ToolbarItem,
@@ -14,20 +16,133 @@ import { DEFAULT_MODEL, DEFAULT_REASONING, MODEL_OPTIONS, REASONING_OPTIONS } fr
 import type { DocumentEntry, DocumentResponse, ReasoningEffort } from "../types";
 
 const MAIN_TOOLBAR_ID = "main-toolbar";
+const SIDEBAR_PANEL_ID = "sidebar-panel";
+const PAGE_SETTINGS_MENU_ID = "page-settings-menu";
+const ZOOM_MENU_ID = "zoom-menu";
+const SIDEBAR_BUTTON_ID = "sidebar-button";
+const PAGE_SETTINGS_BUTTON_ID = "page-settings-button";
+const ZOOM_MENU_BUTTON_ID = "zoom-menu-button";
+const SIDEBAR_COMMAND_ID = "explorer:toggle-pdf-sidebar";
+const PAGE_SETTINGS_COMMAND_ID = "explorer:toggle-pdf-page-settings";
+const ZOOM_MENU_COMMAND_ID = "explorer:toggle-pdf-zoom-menu";
 const DETAILS_COMMAND_ID = "explorer-toggle-document-details";
 const DETAILS_BUTTON_ID = "explorer-document-details-button";
-const DETAILS_DIVIDER_ID = "explorer-document-details-divider";
-const GROUP_ITEM_IDS_TO_HIDE = new Map([
-  ["left-group", new Set(["document-menu-button", "divider-1"])],
-  ["right-group", new Set(["search-button", "comment-button"])],
-]);
+const SIDEBAR_ICON_ID = "explorer-pdf-sidebar-icon";
+const PAGE_SETTINGS_ICON_ID = "explorer-pdf-page-settings-icon";
+const ZOOM_ICON_ID = "explorer-pdf-zoom-icon";
+const DETAILS_ICON_ID = "explorer-pdf-details-icon";
+
+const PDF_VIEWER_ICONS: IconsConfig = {
+  [SIDEBAR_ICON_ID]: {
+    viewBox: "-1 -1 26 26",
+    paths: [
+      { d: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", stroke: "primary" },
+      { d: "M9 3v18", stroke: "primary" },
+    ],
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    strokeWidth: 2,
+  },
+  [PAGE_SETTINGS_ICON_ID]: {
+    viewBox: "-1 -1 26 26",
+    paths: [
+      { d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", stroke: "primary" },
+      { d: "M14 2v4a2 2 0 0 0 2 2h4", stroke: "primary" },
+      { d: "M8 12h8", stroke: "primary" },
+      { d: "M10 11v2", stroke: "primary" },
+      { d: "M8 17h8", stroke: "primary" },
+      { d: "M14 16v2", stroke: "primary" },
+    ],
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    strokeWidth: 2,
+  },
+  [ZOOM_ICON_ID]: {
+    viewBox: "-1 -1 26 26",
+    paths: [
+      { d: "M11 19a8 8 0 1 0 0-16a8 8 0 0 0 0 16z", stroke: "primary" },
+      { d: "M21 21l-4.35-4.35", stroke: "primary" },
+      { d: "M11 8v6", stroke: "primary" },
+      { d: "M8 11h6", stroke: "primary" },
+    ],
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    strokeWidth: 2,
+  },
+  [DETAILS_ICON_ID]: {
+    viewBox: "-1 -1 26 26",
+    paths: [
+      { d: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", stroke: "primary" },
+      { d: "M15 3v18", stroke: "primary" },
+    ],
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    strokeWidth: 2,
+  },
+};
+
+const MAIN_TOOLBAR_ITEMS: ToolbarItem[] = [
+  {
+    type: "group",
+    id: "explorer-pdf-toolbar-left",
+    alignment: "start",
+    gap: 2,
+    items: [
+      {
+        type: "command-button",
+        id: SIDEBAR_BUTTON_ID,
+        commandId: SIDEBAR_COMMAND_ID,
+        variant: "icon",
+        categories: ["panel", "panel-sidebar"],
+      },
+      {
+        type: "command-button",
+        id: PAGE_SETTINGS_BUTTON_ID,
+        commandId: PAGE_SETTINGS_COMMAND_ID,
+        variant: "icon",
+        categories: ["page", "page-settings"],
+      },
+      {
+        type: "command-button",
+        id: ZOOM_MENU_BUTTON_ID,
+        commandId: ZOOM_MENU_COMMAND_ID,
+        variant: "icon",
+        categories: ["zoom", "zoom-menu"],
+      },
+    ],
+  },
+  {
+    type: "spacer",
+    id: "explorer-pdf-toolbar-spacer",
+    flex: true,
+  },
+  {
+    type: "group",
+    id: "explorer-pdf-toolbar-right",
+    alignment: "end",
+    gap: 2,
+    items: [
+      {
+        type: "command-button",
+        id: DETAILS_BUTTON_ID,
+        commandId: DETAILS_COMMAND_ID,
+        variant: "icon",
+      },
+    ],
+  },
+];
+
+const PDF_TOOLBAR_ICON_PROPS = {
+  primaryColor: "var(--explorer-color-text-disabled)",
+};
+
 const PDF_VIEWER_THEME: ThemeConfig = {
   preference: "dark",
   dark: {
     background: {
       app: "var(--explorer-color-app-bg)",
-      surface: "var(--explorer-color-surface)",
-      surfaceAlt: "var(--explorer-color-surface-alt)",
+      surface: "var(--explorer-color-app-bg)",
+      surfaceAlt: "var(--explorer-color-app-bg)",
       elevated: "var(--explorer-color-elevated)",
       overlay: "var(--explorer-color-overlay)",
       input: "var(--explorer-color-input)",
@@ -80,19 +195,6 @@ const PDF_VIEWER_THEME: ThemeConfig = {
   },
 };
 
-const DETAILS_BUTTON: ToolbarItem = {
-  type: "command-button",
-  id: DETAILS_BUTTON_ID,
-  commandId: DETAILS_COMMAND_ID,
-  variant: "text",
-};
-
-const DETAILS_DIVIDER: ToolbarItem = {
-  type: "divider",
-  id: DETAILS_DIVIDER_ID,
-  orientation: "vertical",
-};
-
 function buildToolbarPatch(schema: UISchema): Partial<UISchema> | null {
   const mainToolbar = Object.hasOwn(schema.toolbars, MAIN_TOOLBAR_ID)
     ? schema.toolbars[MAIN_TOOLBAR_ID]
@@ -101,56 +203,79 @@ function buildToolbarPatch(schema: UISchema): Partial<UISchema> | null {
     return null;
   }
 
-  let changed = false;
-  const nextItems: ToolbarItem[] = [];
-  for (const item of mainToolbar.items) {
-    if (item.type !== "group") {
-      nextItems.push(item);
-      continue;
-    }
-
-    const hiddenItemIds = GROUP_ITEM_IDS_TO_HIDE.get(item.id);
-    const filteredItems = hiddenItemIds
-      ? item.items.filter((child) => !hiddenItemIds.has(child.id))
-      : item.items;
-
-    let nextGroupItems = filteredItems;
-    if (item.id === "right-group") {
-      const hasDetailsButton = filteredItems.some((child) => child.id === DETAILS_BUTTON_ID);
-      if (!hasDetailsButton) {
-        nextGroupItems = [...filteredItems, DETAILS_DIVIDER, DETAILS_BUTTON];
-      }
-    }
-
-    if (nextGroupItems.length !== item.items.length) {
-      changed = true;
-    } else {
-      for (let index = 0; index < nextGroupItems.length; index += 1) {
-        if (nextGroupItems[index]?.id !== item.items[index]?.id) {
-          changed = true;
-          break;
-        }
-      }
-    }
-
-    nextItems.push({ ...item, items: nextGroupItems } satisfies ToolbarItem);
-  }
-
-  if (!changed) {
-    return null;
-  }
-
   return {
     toolbars: {
       [MAIN_TOOLBAR_ID]: {
         ...mainToolbar,
-        items: nextItems,
+        responsive: { breakpoints: {} },
+        items: MAIN_TOOLBAR_ITEMS,
       },
     },
   };
 }
 
+function buildToolbarCommands(onToggleDetails: () => void): Command[] {
+  return [
+    {
+      id: SIDEBAR_COMMAND_ID,
+      label: "Sidebar",
+      icon: SIDEBAR_ICON_ID,
+      iconProps: PDF_TOOLBAR_ICON_PROPS,
+      categories: ["panel", "panel-sidebar"],
+      action: ({ registry, documentId }) => {
+        const ui = registry.getPlugin<UIPlugin>("ui")?.provides();
+        ui?.forDocument(documentId).toggleSidebar("left", "main", SIDEBAR_PANEL_ID);
+      },
+    },
+    {
+      id: PAGE_SETTINGS_COMMAND_ID,
+      label: "Page settings",
+      icon: PAGE_SETTINGS_ICON_ID,
+      iconProps: PDF_TOOLBAR_ICON_PROPS,
+      categories: ["page", "page-settings"],
+      action: ({ registry, documentId }) => {
+        const ui = registry.getPlugin<UIPlugin>("ui")?.provides();
+        ui?.forDocument(documentId).toggleMenu(
+          PAGE_SETTINGS_MENU_ID,
+          PAGE_SETTINGS_COMMAND_ID,
+          PAGE_SETTINGS_BUTTON_ID,
+        );
+      },
+    },
+    {
+      id: ZOOM_MENU_COMMAND_ID,
+      label: "Zoom",
+      icon: ZOOM_ICON_ID,
+      iconProps: PDF_TOOLBAR_ICON_PROPS,
+      categories: ["zoom", "zoom-menu"],
+      action: ({ registry, documentId }) => {
+        const ui = registry.getPlugin<UIPlugin>("ui")?.provides();
+        ui?.forDocument(documentId).toggleMenu(
+          ZOOM_MENU_ID,
+          ZOOM_MENU_COMMAND_ID,
+          ZOOM_MENU_BUTTON_ID,
+        );
+      },
+    },
+    {
+      id: DETAILS_COMMAND_ID,
+      label: "Details",
+      icon: DETAILS_ICON_ID,
+      iconProps: PDF_TOOLBAR_ICON_PROPS,
+      action: onToggleDetails,
+    },
+  ];
+}
+
 function handleViewerReady(registry: PluginRegistry, onToggleDetails: () => void) {
+  const commandsPlugin = registry.getPlugin<CommandsPlugin>("commands");
+  if (commandsPlugin !== null) {
+    const commands = commandsPlugin.provides();
+    for (const command of buildToolbarCommands(onToggleDetails)) {
+      commands.registerCommand(command);
+    }
+  }
+
   const uiPlugin = registry.getPlugin<UIPlugin>("ui");
   if (uiPlugin !== null) {
     const ui = uiPlugin.provides();
@@ -158,15 +283,6 @@ function handleViewerReady(registry: PluginRegistry, onToggleDetails: () => void
     if (patch) {
       ui.mergeSchema(patch);
     }
-  }
-
-  const commandsPlugin = registry.getPlugin<CommandsPlugin>("commands");
-  if (commandsPlugin !== null) {
-    commandsPlugin.provides().registerCommand({
-      id: DETAILS_COMMAND_ID,
-      label: "Details",
-      action: onToggleDetails,
-    });
   }
 }
 
@@ -277,6 +393,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
           className="absolute inset-0 h-full w-full"
           config={{
             src: `/documents/${documentId}/source`,
+            icons: PDF_VIEWER_ICONS,
             theme: PDF_VIEWER_THEME,
             disabledCategories: [
               "annotation",

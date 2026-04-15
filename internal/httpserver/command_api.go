@@ -37,6 +37,7 @@ type commandAPI struct {
 
 type eventHistoryStore interface {
 	ListEvents(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.EventRecord, error)
+	PurgeThread(ctx context.Context, threadID int64) error
 }
 
 type createThreadRequest struct {
@@ -112,11 +113,14 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 
 	switch route.Resource {
 	case "":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			a.handleGetThread(w, r, route.ThreadID)
+		case http.MethodDelete:
+			a.handleDeleteThread(w, r, route.ThreadID)
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodDelete)
 		}
-		a.handleGetThread(w, r, route.ThreadID)
 	case "commands":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -135,6 +139,12 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		a.handleListEvents(w, r, route.ThreadID)
+	case "archive":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		a.handleArchiveThread(w, r, route.ThreadID)
 	case "responses":
 		if route.ResourceID == "" {
 			http.NotFound(w, r)
@@ -349,7 +359,7 @@ func (a *commandAPI) handleListThreads(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request, threadID int64) {
-	meta, err := a.store.LoadThread(r.Context(), threadID)
+	meta, err := a.loadThreadForRead(r.Context(), threadID)
 	if err != nil {
 		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
@@ -468,6 +478,60 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusAccepted, response)
+}
+
+func (a *commandAPI) handleArchiveThread(w http.ResponseWriter, r *http.Request, threadID int64) {
+	meta, err := a.store.ArchiveRootThread(r.Context(), threadID)
+	if err != nil {
+		switch {
+		case errors.Is(err, threadstore.ErrThreadNotFound):
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+		case errors.Is(err, threadstore.ErrThreadNotRoot):
+			writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+		default:
+			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("archive thread %d: %v", threadID, err))
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "archived",
+		"thread": presentThreadMeta(meta),
+	})
+}
+
+func (a *commandAPI) handleDeleteThread(w http.ResponseWriter, r *http.Request, threadID int64) {
+	threadIDs, err := a.store.DeleteRootThread(r.Context(), threadID)
+	if err != nil {
+		switch {
+		case errors.Is(err, threadstore.ErrThreadNotFound):
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+		case errors.Is(err, threadstore.ErrThreadNotRoot):
+			writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+		case errors.Is(err, threadstore.ErrThreadBusy):
+			writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is still active and cannot be deleted", threadID))
+		default:
+			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("delete thread %d: %v", threadID, err))
+		}
+		return
+	}
+
+	var purgeErrs []error
+	for _, id := range threadIDs {
+		if err := a.history.PurgeThread(r.Context(), id); err != nil {
+			purgeErrs = append(purgeErrs, err)
+		}
+	}
+	if err := errors.Join(purgeErrs...); err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("purge deleted thread history: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":               "deleted",
+		"thread_id":            threadID,
+		"deleted_thread_count": len(threadIDs),
+	})
 }
 
 func (a *commandAPI) handleGetThread(w http.ResponseWriter, r *http.Request, threadID int64) {
@@ -738,7 +802,14 @@ func (a *commandAPI) handleListSpawnGroupResults(w http.ResponseWriter, r *http.
 }
 
 func (a *commandAPI) loadThreadForRead(ctx context.Context, threadID int64) (threadstore.ThreadMeta, error) {
-	return a.store.LoadThread(ctx, threadID)
+	meta, err := a.store.LoadThread(ctx, threadID)
+	if err != nil {
+		return threadstore.ThreadMeta{}, err
+	}
+	if meta.ParentThreadID == 0 && !meta.ArchivedAt.IsZero() {
+		return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
+	}
+	return meta, nil
 }
 
 func (a *commandAPI) loadSpawnGroupForRead(ctx context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error) {
@@ -1219,6 +1290,9 @@ func presentThreadMeta(meta threadstore.ThreadMeta) map[string]any {
 		"active_spawn_group_id": meta.ActiveSpawnGroupID,
 		"created_at":            meta.CreatedAt.UTC().Format(time.RFC3339),
 		"updated_at":            meta.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if !meta.ArchivedAt.IsZero() {
+		response["archived_at"] = meta.ArchivedAt.UTC().Format(time.RFC3339)
 	}
 
 	if !meta.SocketExpiresAt.IsZero() {

@@ -193,6 +193,27 @@ func (s *Store) ListEvents(ctx context.Context, threadID int64, options threadst
 	return s.scanBackward(ctx, subject, maxSeq, limit)
 }
 
+func (s *Store) PurgeThread(ctx context.Context, threadID int64) error {
+	if s == nil || s.js == nil {
+		return fmt.Errorf("thread history store is not configured")
+	}
+	if threadID <= 0 {
+		return fmt.Errorf("thread history purge missing thread id")
+	}
+
+	var errs []error
+	for _, subject := range []string{
+		CheckpointSubject(threadID),
+		EventSubject(threadID),
+	} {
+		if err := s.js.PurgeStream(StreamName, &nats.StreamPurgeRequest{Subject: subject}, nats.Context(ctx)); err != nil {
+			errs = append(errs, fmt.Errorf("purge thread history subject %s: %w", subject, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 func (s *Store) scanForward(ctx context.Context, subject string, startSeq uint64, limit int64) ([]threadstore.EventRecord, error) {
 	if limit <= 0 {
 		return []threadstore.EventRecord{}, nil

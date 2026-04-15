@@ -7,6 +7,8 @@ import (
 )
 
 var ErrThreadNotFound = errors.New("thread not found")
+var ErrThreadBusy = errors.New("thread busy")
+var ErrThreadNotRoot = errors.New("thread is not a root thread")
 
 type ThreadStatus string
 
@@ -47,6 +49,7 @@ type ThreadMeta struct {
 	ChildKind          string
 	DocumentID         int64
 	DocumentPhase      string
+	ArchivedAt         time.Time
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
