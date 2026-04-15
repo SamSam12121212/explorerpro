@@ -40,6 +40,7 @@ func New(cfg Config) *Server {
 	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /connect", s.handleGlobalConnect)
 	s.mux.HandleFunc("GET /threads/{thread_id}/connect", s.handleConnect)
 
 	return s
@@ -93,6 +94,16 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		docs:      s.cfg.Docs,
 		threadID:  threadID,
 		afterItem: afterItem,
+	})
+
+	client.serve(w, r, s.hub)
+}
+
+func (s *Server) handleGlobalConnect(w http.ResponseWriter, r *http.Request) {
+	client := newClient(clientConfig{
+		logger: s.logger.With("scope", "global"),
+		store:  s.cfg.Store,
+		docs:   s.cfg.Docs,
 	})
 
 	client.serve(w, r, s.hub)

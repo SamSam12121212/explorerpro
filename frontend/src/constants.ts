@@ -6,7 +6,8 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { value: "gpt-5.4-nano", label: "GPT-5.4 Nano" },
 ];
 
-export const DEFAULT_MODEL = "gpt-5.4";
+export const DEFAULT_MODEL = "gpt-5.4-mini";
+export const DEFAULT_REASONING = "medium";
 export const COLLECTIONS_CHANGED_EVENT = "explorer:collections-changed";
 
 export const DEFAULT_INSTRUCTIONS = [

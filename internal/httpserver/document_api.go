@@ -21,12 +21,21 @@ import (
 )
 
 const maxDocUploadBytes = 50 << 20
-const defaultDocumentQueryModel = "gpt-5.4"
+const defaultDocumentQueryModel = "gpt-5.4-mini"
+const defaultDocumentQueryReasoning = "medium"
 
 var allowedDocumentQueryModels = map[string]struct{}{
 	"gpt-5.4":      {},
 	"gpt-5.4-mini": {},
 	"gpt-5.4-nano": {},
+}
+
+var allowedDocumentReasoningEfforts = map[string]struct{}{
+	"none":   {},
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"xhigh":  {},
 }
 
 type documentAPI struct {
@@ -38,6 +47,7 @@ type documentAPI struct {
 
 type updateDocumentRequest struct {
 	QueryModel        string `json:"query_model"`
+	QueryReasoning    string `json:"query_reasoning"`
 	ClearBaseResponse bool   `json:"clear_base_response"`
 }
 
@@ -178,14 +188,15 @@ func (a *documentAPI) handleUploadDocument(w http.ResponseWriter, r *http.Reques
 
 	now := time.Now().UTC()
 	doc := docstore.Document{
-		ID:         docID,
-		Filename:   filename,
-		SourceRef:  sourceRef,
-		Status:     "pending",
-		DPI:        doccmd.DefaultDPI,
-		QueryModel: defaultDocumentQueryModel,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:             docID,
+		Filename:       filename,
+		SourceRef:      sourceRef,
+		Status:         "pending",
+		DPI:            doccmd.DefaultDPI,
+		QueryModel:     defaultDocumentQueryModel,
+		QueryReasoning: defaultDocumentQueryReasoning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	if err := a.store.Create(r.Context(), doc); err != nil {
@@ -259,7 +270,13 @@ func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	doc, err := a.store.UpdateSettings(r.Context(), docID, queryModel, req.ClearBaseResponse)
+	queryReasoning, err := normalizeDocumentQueryReasoning(req.QueryReasoning)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	doc, err := a.store.UpdateSettings(r.Context(), docID, queryModel, queryReasoning, req.ClearBaseResponse)
 	if errors.Is(err, docstore.ErrDocumentNotFound) {
 		writeErrorJSON(w, http.StatusNotFound, "document not found")
 		return
@@ -338,15 +355,16 @@ func (a *documentAPI) handleGetManifest(w http.ResponseWriter, r *http.Request, 
 
 func presentDocument(d docstore.Document) map[string]any {
 	entry := map[string]any{
-		"id":          d.ID,
-		"filename":    d.Filename,
-		"source_ref":  d.SourceRef,
-		"status":      d.Status,
-		"page_count":  d.PageCount,
-		"dpi":         d.DPI,
-		"query_model": d.QueryModel,
-		"created_at":  d.CreatedAt.UTC().Format(time.RFC3339),
-		"updated_at":  d.UpdatedAt.UTC().Format(time.RFC3339),
+		"id":              d.ID,
+		"filename":        d.Filename,
+		"source_ref":      d.SourceRef,
+		"status":          d.Status,
+		"page_count":      d.PageCount,
+		"dpi":             d.DPI,
+		"query_model":     d.QueryModel,
+		"query_reasoning": d.QueryReasoning,
+		"created_at":      d.CreatedAt.UTC().Format(time.RFC3339),
+		"updated_at":      d.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	if d.Error != "" {
 		entry["error"] = d.Error
@@ -359,6 +377,9 @@ func presentDocument(d docstore.Document) map[string]any {
 	}
 	if d.BaseModel != "" {
 		entry["base_model"] = d.BaseModel
+	}
+	if d.BaseReasoning != "" {
+		entry["base_reasoning"] = d.BaseReasoning
 	}
 	if d.BaseInitializedAt != nil {
 		entry["base_initialized_at"] = d.BaseInitializedAt.UTC().Format(time.RFC3339)
@@ -375,6 +396,17 @@ func normalizeDocumentQueryModel(raw string) (string, error) {
 		return "", fmt.Errorf("unsupported query_model %q", model)
 	}
 	return model, nil
+}
+
+func normalizeDocumentQueryReasoning(raw string) (string, error) {
+	reasoning := strings.TrimSpace(raw)
+	if reasoning == "" {
+		return "", fmt.Errorf("query_reasoning is required")
+	}
+	if _, ok := allowedDocumentReasoningEfforts[reasoning]; !ok {
+		return "", fmt.Errorf("unsupported query_reasoning %q", reasoning)
+	}
+	return reasoning, nil
 }
 
 func parseDocumentID(raw string) (int64, error) {

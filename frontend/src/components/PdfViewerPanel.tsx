@@ -10,8 +10,8 @@ import {
 import type { CommandsPlugin } from "@embedpdf/plugin-commands";
 import { LuRotateCcw, LuX } from "react-icons/lu";
 import { apiGet, apiPatch } from "../api";
-import { DEFAULT_MODEL, MODEL_OPTIONS } from "../constants";
-import type { DocumentEntry, DocumentResponse } from "../types";
+import { DEFAULT_MODEL, DEFAULT_REASONING, MODEL_OPTIONS, REASONING_OPTIONS } from "../constants";
+import type { DocumentEntry, DocumentResponse, ReasoningEffort } from "../types";
 
 const MAIN_TOOLBAR_ID = "main-toolbar";
 const DETAILS_COMMAND_ID = "explorer-toggle-document-details";
@@ -191,6 +191,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [document, setDocument] = useState<DocumentEntry | null>(null);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [selectedReasoning, setSelectedReasoning] = useState<ReasoningEffort>(DEFAULT_REASONING as ReasoningEffort);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -210,6 +211,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
         }
         setDocument(response.document);
         setSelectedModel(response.document.query_model || DEFAULT_MODEL);
+        setSelectedReasoning((response.document.query_reasoning || DEFAULT_REASONING) as ReasoningEffort);
       } catch (err) {
         if (cancelled) {
           return;
@@ -217,6 +219,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
         setError(err instanceof Error ? err.message : "Failed to load document details");
         setDocument(null);
         setSelectedModel(DEFAULT_MODEL);
+        setSelectedReasoning(DEFAULT_REASONING as ReasoningEffort);
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -232,11 +235,16 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
 
   const hasBaseResponse = Boolean(document?.base_response_id);
   const currentModel = document?.query_model ?? DEFAULT_MODEL;
-  const modelChanged = currentModel !== selectedModel;
+  const currentReasoning = (document?.query_reasoning ?? DEFAULT_REASONING) as ReasoningEffort;
+  const settingsChanged = currentModel !== selectedModel || currentReasoning !== selectedReasoning;
   const baseModelMismatch =
     Boolean(document?.base_response_id) &&
     Boolean(document?.base_model) &&
     document?.base_model !== selectedModel;
+  const baseReasoningMismatch =
+    Boolean(document?.base_response_id) &&
+    Boolean(document?.base_reasoning) &&
+    document?.base_reasoning !== selectedReasoning;
 
   async function saveDocumentSettings(clearBaseResponse: boolean) {
     setSaving(true);
@@ -245,12 +253,14 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     try {
       const response = await apiPatch<DocumentResponse>(`/documents/${documentId}`, {
         query_model: selectedModel,
+        query_reasoning: selectedReasoning,
         clear_base_response: clearBaseResponse,
       });
       setDocument(response.document);
       setSelectedModel(response.document.query_model);
+      setSelectedReasoning((response.document.query_reasoning || DEFAULT_REASONING) as ReasoningEffort);
       setStatusMessage(
-        clearBaseResponse ? "Base response cleared." : "Document model updated.",
+        clearBaseResponse ? "Base response cleared." : "Document settings updated.",
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update document");
@@ -352,13 +362,14 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
 
                 <section className="border-t border-[#242424] pt-6">
                   <p className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-[#666]">
-                    Query Model
+                    Query Settings
                   </p>
+                  <span className="mt-2 block text-xs text-[#8a8a8a]">
+                    New document threads start with these settings. Threads that already have
+                    document lineage keep using the settings they started with.
+                  </span>
                   <label className="mt-3 block">
-                    <span className="mb-2 block text-xs text-[#8a8a8a]">
-                      New document threads start with this model. Threads that already have
-                      document lineage keep using the model they started with.
-                    </span>
+                    <span className="mb-1 block text-xs text-[#8a8a8a]">Model</span>
                     <select
                       className="w-full border-b border-[#333] bg-transparent px-0 py-2 text-sm text-[#e6e6e6] outline-none transition focus:border-[#007acc]"
                       disabled={saving}
@@ -375,15 +386,33 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
                     ))}
                     </select>
                   </label>
+                  <label className="mt-3 block">
+                    <span className="mb-1 block text-xs text-[#8a8a8a]">Reasoning</span>
+                    <select
+                      className="w-full border-b border-[#333] bg-transparent px-0 py-2 text-sm text-[#e6e6e6] outline-none transition focus:border-[#007acc]"
+                      disabled={saving}
+                      onChange={(event) => {
+                        setSelectedReasoning(event.target.value as ReasoningEffort);
+                        setStatusMessage("");
+                      }}
+                      value={selectedReasoning}
+                    >
+                      {REASONING_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button
                     className="mt-4 inline-flex items-center justify-center text-xs font-semibold uppercase tracking-[0.16em] text-[#67b7ff] transition hover:text-[#8fc9ff] disabled:cursor-not-allowed disabled:opacity-40"
-                    disabled={saving || !modelChanged}
+                    disabled={saving || !settingsChanged}
                     onClick={() => {
                       void saveDocumentSettings(false);
                     }}
                     type="button"
                   >
-                    {saving ? "Saving…" : "Save Model"}
+                    {saving ? "Saving…" : "Save Settings"}
                   </button>
                 </section>
 
@@ -429,6 +458,14 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
                     </div>
                     <div>
                       <p className="text-xs uppercase tracking-[0.14em] text-[#666]">
+                        Base Reasoning
+                      </p>
+                      <p className="mt-1 text-[#d8d8d8]">
+                        {document.base_reasoning ?? "Not initialized"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.14em] text-[#666]">
                         Initialized At
                       </p>
                       <p className="mt-1 text-[#d8d8d8]">
@@ -437,11 +474,13 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
                     </div>
                   </div>
 
-                  {baseModelMismatch && (
+                  {(baseModelMismatch || baseReasoningMismatch) && (
                     <p className="mt-3 text-xs leading-5 text-[#d3b171]">
-                      The saved shared base response was created with {document.base_model}. New
-                      threads will rebuild a fresh base response for {selectedModel}, while
-                      existing thread-local lineages stay on their current model.
+                      The saved shared base response was created with{" "}
+                      {[document.base_model, document.base_reasoning].filter(Boolean).join(" / ")}. New
+                      threads will rebuild a fresh base response for{" "}
+                      {[selectedModel, selectedReasoning].join(" / ")}, while
+                      existing thread-local lineages stay on their current settings.
                     </p>
                   )}
                   <p className="mt-3 text-xs leading-5 text-[#8a8a8a]">

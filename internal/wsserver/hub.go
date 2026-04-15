@@ -19,15 +19,17 @@ type eventHub struct {
 	logger *slog.Logger
 	js     nats.JetStreamContext
 
-	mu      sync.RWMutex
-	clients map[int64]map[*client]struct{}
+	mu            sync.RWMutex
+	clients       map[int64]map[*client]struct{}
+	globalClients map[*client]struct{}
 }
 
 func newEventHub(logger *slog.Logger, js nats.JetStreamContext) *eventHub {
 	return &eventHub{
-		logger:  logger,
-		js:      js,
-		clients: map[int64]map[*client]struct{}{},
+		logger:        logger,
+		js:            js,
+		clients:       map[int64]map[*client]struct{}{},
+		globalClients: map[*client]struct{}{},
 	}
 }
 
@@ -102,6 +104,13 @@ func (h *eventHub) register(threadID int64, c *client) func() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if threadID <= 0 {
+		h.globalClients[c] = struct{}{}
+		return func() {
+			h.unregister(threadID, c)
+		}
+	}
+
 	if h.clients[threadID] == nil {
 		h.clients[threadID] = map[*client]struct{}{}
 	}
@@ -115,6 +124,11 @@ func (h *eventHub) register(threadID int64, c *client) func() {
 func (h *eventHub) unregister(threadID int64, c *client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if threadID <= 0 {
+		delete(h.globalClients, c)
+		return
+	}
 
 	recipients := h.clients[threadID]
 	if recipients == nil {
@@ -131,12 +145,15 @@ func (h *eventHub) recipients(threadID int64) []*client {
 	defer h.mu.RUnlock()
 
 	recipients := h.clients[threadID]
-	if len(recipients) == 0 {
+	if len(recipients) == 0 && len(h.globalClients) == 0 {
 		return nil
 	}
 
-	out := make([]*client, 0, len(recipients))
+	out := make([]*client, 0, len(recipients)+len(h.globalClients))
 	for recipient := range recipients {
+		out = append(out, recipient)
+	}
+	for recipient := range h.globalClients {
 		out = append(out, recipient)
 	}
 	return out

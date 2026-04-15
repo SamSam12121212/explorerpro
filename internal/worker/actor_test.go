@@ -2286,6 +2286,7 @@ type docBaseLineageUpdate struct {
 	DocumentID int64
 	ResponseID string
 	Model      string
+	Reasoning  string
 }
 
 func (s *fakeDocActorDocStore) Get(_ context.Context, id int64) (docstore.Document, error) {
@@ -2296,16 +2297,18 @@ func (s *fakeDocActorDocStore) Get(_ context.Context, id int64) (docstore.Docume
 	return doc, nil
 }
 
-func (s *fakeDocActorDocStore) UpdateBaseLineage(_ context.Context, id int64, baseResponseID, baseModel string) error {
+func (s *fakeDocActorDocStore) UpdateBaseLineage(_ context.Context, id int64, baseResponseID, baseModel, baseReasoning string) error {
 	s.baseUpdates = append(s.baseUpdates, docBaseLineageUpdate{
 		DocumentID: id,
 		ResponseID: baseResponseID,
 		Model:      baseModel,
+		Reasoning:  baseReasoning,
 	})
 
 	if doc, ok := s.docs[id]; ok {
 		doc.BaseResponseID = baseResponseID
 		doc.BaseModel = baseModel
+		doc.BaseReasoning = baseReasoning
 		s.docs[id] = doc
 	}
 

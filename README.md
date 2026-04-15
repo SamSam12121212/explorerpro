@@ -1,5 +1,3 @@
-# ExplorerPRO
-
 A runtime built on the OpenAI Responses API with [WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode), Go, NATS + JetStream and Postgres. Not considered production-ready and has loads of bugs.
 
 No provider abstraction layer which has not yet been planned. Azure OpenAI also does not work.
@@ -13,7 +11,7 @@ In the current setup, your data is not processed under ZDR settings, so potentia
 - IDs throughout the app have been switched from uuid like strings to integers for now. It makes it easier during early development to review logs, paths, etc. If in the future a requirement for non-db generated ids, we can switch back. But whilst making the core worker stable, its easier to keep ids as integers.
 - React Compiler is being used and there are strict linter enforcement rules enabled for it.
 - We are staying as close to the Responses API event shape throughout the app frontend, backend, storage as it is easier to reason about. Some AI agents will try and veer you away to an abstracton of it, but if so, refuse.
-- Sometimes AI agents will recommend npm packages that have not been maintained for years, so always check that. If it does recommend a old popular project, which is stale, look for an active popular fork, or something else entirely.
+- Sometimes AI agents will recommend npm packages that have not been maintained for years, so always check that. If it does recommend an old popular project, which is stale, look for an active popular fork, or something else entirely.
 
 ## Aims
 

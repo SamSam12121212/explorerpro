@@ -101,7 +101,7 @@ type threadDocumentStore interface {
 
 type docActorDocStore interface {
 	Get(ctx context.Context, id int64) (docstore.Document, error)
-	UpdateBaseLineage(ctx context.Context, id int64, baseResponseID, baseModel string) error
+	UpdateBaseLineage(ctx context.Context, id int64, baseResponseID, baseModel, baseReasoning string) error
 }
 
 type docActorPreparedInputClient interface {
@@ -1016,8 +1016,9 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 		parentCallID = primaryDocQueryRoundCallID(spawn.ParentCallID)
 	}
 	model := defaultString(strings.TrimSpace(childMeta.Model), strings.TrimSpace(parentMeta.Model))
+	reasoning := extractReasoningEffort(defaultString(childMeta.ReasoningJSON, parentMeta.ReasoningJSON))
 
-	if err := a.docStore.UpdateBaseLineage(a.ctx, documentIDValue, body.ChildResponseID, model); err != nil {
+	if err := a.docStore.UpdateBaseLineage(a.ctx, documentIDValue, body.ChildResponseID, model, reasoning); err != nil {
 		return false, fmt.Errorf("update document base lineage for %s: %w", documentID, err)
 	}
 
@@ -1028,6 +1029,7 @@ func (a *threadActor) handleDocumentWarmupChildResult(parentMeta threadstore.Thr
 		documentIDValue,
 		childMetadata["document_name"],
 		model,
+		reasoning,
 		"query",
 		body.ChildResponseID,
 		"",
@@ -3034,6 +3036,18 @@ func decodeSpawnRequestForLog(arguments string) (spawnRequest, bool) {
 	return req, len(req.Children) > 0
 }
 
+func extractReasoningEffort(reasoningJSON string) string {
+	trimmed := strings.TrimSpace(reasoningJSON)
+	if trimmed == "" {
+		return ""
+	}
+	var param shared.ReasoningParam
+	if err := json.Unmarshal([]byte(trimmed), &param); err != nil {
+		return ""
+	}
+	return string(param.Effort)
+}
+
 func responseCreateReasoningEffort(payload map[string]any) string {
 	switch reasoning := payload["reasoning"].(type) {
 	case map[string]any:
@@ -3308,6 +3322,11 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			model = parentMeta.Model
 		}
 
+		reasoning := doc.QueryReasoning
+		if reasoning == "" {
+			reasoning = extractReasoningEffort(parentMeta.ReasoningJSON)
+		}
+
 		previousResponseID := ""
 		lineageSource := "warmup"
 		lineage, err := a.store.LoadLatestCompletedDocumentQueryLineage(a.ctx, parentMeta.ID, work.DocumentID)
@@ -3321,7 +3340,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 				model = lineage.Model
 			}
 		}
-		if previousResponseID == "" && doc.BaseResponseID != "" && doc.BaseModel == model {
+		if previousResponseID == "" && doc.BaseResponseID != "" && doc.BaseModel == model && doc.BaseReasoning == reasoning {
 			previousResponseID = doc.BaseResponseID
 			lineageSource = "document_base"
 		}
@@ -3346,7 +3365,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 			preparedInputRef = resp.PreparedInputRef
 		}
 
-		threadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, roundCallID, work.DocumentID, doc.Filename, model, phase, previousResponseID, preparedInputRef, task, 0)
+		threadID, startCmd, reusedThread, err := a.buildDocumentChildStartCommand(parentMeta, spawnGroupID, roundCallID, work.DocumentID, doc.Filename, model, reasoning, phase, previousResponseID, preparedInputRef, task, 0)
 		if err != nil {
 			return 0, err
 		}
@@ -3513,7 +3532,7 @@ func roundCallsToPendingCalls(calls []docQueryRoundCall) []docQueryCall {
 	return pending
 }
 
-func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID int64, parentCallID string, documentID int64, documentName, model, phase, previousResponseID, preparedInputRef, task string, bootstrapChildThreadID int64) (int64, threadcmd.Command, bool, error) {
+func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.ThreadMeta, spawnGroupID int64, parentCallID string, documentID int64, documentName, model, reasoning, phase, previousResponseID, preparedInputRef, task string, bootstrapChildThreadID int64) (int64, threadcmd.Command, bool, error) {
 	cmdID, err := a.store.LoadOrCreateCommandID(
 		a.ctx,
 		"thread",
@@ -3527,6 +3546,9 @@ func (a *threadActor) buildDocumentChildStartCommand(parentMeta threadstore.Thre
 	startBody := map[string]any{
 		"model": model,
 		"store": true,
+	}
+	if reasoning != "" {
+		startBody["reasoning"] = map[string]any{"effort": reasoning}
 	}
 	if strings.TrimSpace(preparedInputRef) != "" {
 		startBody["prepared_input_ref"] = preparedInputRef

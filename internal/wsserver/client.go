@@ -87,29 +87,33 @@ func (c *client) serve(w http.ResponseWriter, r *http.Request, hub *eventHub) {
 	c.conn = conn
 	defer c.close(websocket.StatusNormalClosure, "stream closed")
 
-	meta, err := c.loadThread(ctx)
-	if err != nil {
-		c.cfg.logger.Warn("failed to load thread", "error", err)
-		return
-	}
+	if c.cfg.threadID > 0 {
+		meta, err := c.loadThread(ctx)
+		if err != nil {
+			c.cfg.logger.Warn("failed to load thread", "error", err)
+			return
+		}
 
-	if err := c.writeSnapshot(ctx, meta); err != nil {
-		c.cfg.logger.Warn("failed to write initial snapshot", "error", err)
-		return
-	}
+		if err := c.writeSnapshot(ctx, meta); err != nil {
+			c.cfg.logger.Warn("failed to write initial snapshot", "error", err)
+			return
+		}
 
-	if err := c.writeItemsDelta(ctx); err != nil {
-		c.logStreamError(err)
-		return
+		if err := c.writeItemsDelta(ctx); err != nil {
+			c.logStreamError(err)
+			return
+		}
 	}
 
 	unregister := hub.register(c.cfg.threadID, c)
 	defer unregister()
 
-	// Close the registration gap with one last catch-up pass before we idle on heartbeats.
-	if err := c.writeItemsDelta(ctx); err != nil {
-		c.logStreamError(err)
-		return
+	if c.cfg.threadID > 0 {
+		// Close the registration gap with one last catch-up pass before we idle on heartbeats.
+		if err := c.writeItemsDelta(ctx); err != nil {
+			c.logStreamError(err)
+			return
+		}
 	}
 
 	c.run()
@@ -138,11 +142,11 @@ func (c *client) handleEvent(env threadevents.EventEnvelope) error {
 
 	switch env.EventType {
 	case threadevents.EventTypeThreadItem:
-		return c.writeStreamItemLocked(env.Payload)
+		return c.writeStreamItemLocked(env.ThreadID, env.Payload)
 	case threadevents.EventTypeThreadSnapshot:
-		return c.writeStreamSnapshotLocked(env.Payload)
+		return c.writeStreamSnapshotLocked(env.ThreadID, env.Payload)
 	default:
-		return c.writeStreamEventLocked(env.Payload)
+		return c.writeStreamEventLocked(env.ThreadID, env.Payload)
 	}
 }
 
@@ -243,7 +247,7 @@ type streamSnapshotPayload struct {
 	UpdatedAt          string `json:"updated_at,omitempty"`
 }
 
-func (c *client) writeStreamItemLocked(raw json.RawMessage) error {
+func (c *client) writeStreamItemLocked(threadID int64, raw json.RawMessage) error {
 	var item streamItemPayload
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return clientPayloadError{err: err}
@@ -255,16 +259,18 @@ func (c *client) writeStreamItemLocked(raw json.RawMessage) error {
 		item.Cursor = cursor
 	}
 
-	if after := parseCursor(c.afterItem); after > 0 && item.Seq <= after {
-		return nil
+	pageAfter := ""
+	if c.cfg.threadID > 0 {
+		if after := parseCursor(c.afterItem); after > 0 && item.Seq <= after {
+			return nil
+		}
+		pageAfter = c.afterItem
+		c.afterItem = cursor
 	}
-
-	pageAfter := c.afterItem
-	c.afterItem = cursor
 
 	return c.writeJSONLocked(map[string]any{
 		"type":      "thread.items.delta",
-		"thread_id": c.cfg.threadID,
+		"thread_id": threadID,
 		"items":     []streamItemPayload{item},
 		"page": map[string]any{
 			"limit":        itemsBatchLimit,
@@ -276,25 +282,25 @@ func (c *client) writeStreamItemLocked(raw json.RawMessage) error {
 	})
 }
 
-func (c *client) writeStreamSnapshotLocked(raw json.RawMessage) error {
+func (c *client) writeStreamSnapshotLocked(threadID int64, raw json.RawMessage) error {
 	var snapshot streamSnapshotPayload
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		return clientPayloadError{err: err}
 	}
 
-	threadID := snapshot.ID
-	if threadID <= 0 {
-		threadID = c.cfg.threadID
+	resolvedThreadID := snapshot.ID
+	if resolvedThreadID <= 0 {
+		resolvedThreadID = threadID
 	}
 
-	attachedDocuments, err := c.loadAttachedDocuments(c.ctx, threadID)
+	attachedDocuments, err := c.loadAttachedDocuments(c.ctx, resolvedThreadID)
 	if err != nil {
 		return err
 	}
 
 	return c.writeJSONLocked(map[string]any{
 		"type":               "thread.snapshot",
-		"thread_id":          threadID,
+		"thread_id":          resolvedThreadID,
 		"thread":             snapshot,
 		"attached_documents": attachedDocuments,
 	})
@@ -313,7 +319,7 @@ func (c *client) loadAttachedDocuments(ctx context.Context, threadID int64) ([]m
 	return presentAttachedDocuments(documents), nil
 }
 
-func (c *client) writeStreamEventLocked(raw json.RawMessage) error {
+func (c *client) writeStreamEventLocked(threadID int64, raw json.RawMessage) error {
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return clientPayloadError{err: err}
@@ -321,7 +327,7 @@ func (c *client) writeStreamEventLocked(raw json.RawMessage) error {
 
 	return c.writeJSONLocked(map[string]any{
 		"type":      "thread.events.delta",
-		"thread_id": c.cfg.threadID,
+		"thread_id": threadID,
 		"events":    []any{decoded},
 	})
 }

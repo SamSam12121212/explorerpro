@@ -90,8 +90,10 @@ export interface DocumentEntry {
   page_count: number;
   dpi: number;
   query_model: string;
+  query_reasoning: string;
   base_response_id?: string;
   base_model?: string;
+  base_reasoning?: string;
   base_initialized_at?: string;
   created_at: string;
   updated_at: string;

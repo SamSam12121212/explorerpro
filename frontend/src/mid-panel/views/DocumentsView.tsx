@@ -151,7 +151,7 @@ export function DocumentsView({
             key={document.id}
             onClick={() => {
               if (document.status === "ready") {
-                void navigate(`/doc/${document.id}`);
+                void navigate(`/doc/${document.id.toString()}`);
               }
             }}
           >
