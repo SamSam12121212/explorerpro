@@ -22,7 +22,6 @@ export function LeftSidebar() {
     attachedDocuments,
     pendingDocuments,
     loadThread,
-    resetConversation,
     attachDocument,
   } = useThread();
 
@@ -65,7 +64,7 @@ export function LeftSidebar() {
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
-      <div className="flex items-center justify-center gap-1 border-b border-[#333] px-2 py-1.5">
+      <div className="shell-bar justify-center gap-1 px-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -91,7 +90,6 @@ export function LeftSidebar() {
         {activeTab === "threads" ? (
           <ThreadSidebar
             activeThreadId={threadId}
-            onNewChat={resetConversation}
             onSelectThread={handleSelectThread}
             threads={threads}
           />

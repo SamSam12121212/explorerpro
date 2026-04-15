@@ -4,6 +4,7 @@
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
   --font-mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  --explorer-shell-bar-height: 44px;
   --explorer-color-app-bg: #1e1e1e;
   --explorer-color-surface: #252525;
   --explorer-color-surface-alt: #2a2a2a;
@@ -94,6 +95,27 @@
 }
 
 @layer components {
+  .shell-bar {
+    @apply flex items-center;
+    height: var(--explorer-shell-bar-height);
+    background: var(--explorer-color-app-bg);
+  }
+
+  .icon-action-tooltip {
+    max-width: calc(100vw - 16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 1.1rem;
+    background: rgba(249, 249, 249, 0.98);
+    color: #101010;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1;
+    padding: 0.7rem 1rem;
+    user-select: none;
+    animation: tooltip-in 140ms ease-out;
+  }
+
   /* Resize handle between panels */
   .resize-handle {
     @apply relative flex w-2 shrink-0 items-stretch justify-center outline-none;
@@ -135,6 +157,18 @@
   35% {
     transform: translateY(-0.2rem);
     opacity: 1;
+  }
+}
+
+@keyframes tooltip-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
