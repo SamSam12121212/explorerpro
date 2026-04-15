@@ -1,40 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import { LuChevronDown, LuFileText, LuImage, LuPaperclip, LuSend } from "react-icons/lu";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
-import type {
-  AttachedDocument,
-  ChatMessage,
-  MessageRole,
-  ReasoningEffort,
-  UploadedImage,
-} from "../../types";
-
-interface ChatPanelProps {
-  busy: boolean;
-  draft: string;
-  messages: ChatMessage[];
-  model: string;
-  attachedDocuments: AttachedDocument[];
-  pendingDocuments: AttachedDocument[];
-  pendingImages: UploadedImage[];
-  reasoningEffort: ReasoningEffort;
-  sendMessage: (
-    text: string,
-    images: UploadedImage[],
-    documents: AttachedDocument[],
-  ) => Promise<void>;
-  setPendingDocuments: Dispatch<SetStateAction<AttachedDocument[]>>;
-  setDraft: (value: string) => void;
-  setModel: (value: string) => void;
-  setPendingImages: Dispatch<SetStateAction<UploadedImage[]>>;
-  setReasoningEffort: (value: ReasoningEffort) => void;
-  submitDisabled: boolean;
-  thinking: boolean;
-  threadId: number | null;
-  uploadCount: number;
-  addPendingFiles: (files: File[]) => Promise<void>;
-}
+import type { MessageRole, ReasoningEffort } from "../../types";
+import { useThread } from "../../thread";
 
 function bubbleClass(role: MessageRole) {
   const base = "max-w-[92%] px-4 py-3 text-sm leading-relaxed";
@@ -50,27 +18,29 @@ function bubbleClass(role: MessageRole) {
   }
 }
 
-export function ChatPanel({
-  busy,
-  draft,
-  messages,
-  model,
-  attachedDocuments,
-  pendingDocuments,
-  pendingImages,
-  reasoningEffort,
-  sendMessage,
-  setPendingDocuments,
-  setDraft,
-  setModel,
-  setPendingImages,
-  setReasoningEffort,
-  submitDisabled,
-  thinking,
-  threadId,
-  uploadCount,
-  addPendingFiles,
-}: ChatPanelProps) {
+export function ChatPanel() {
+  const {
+    busy,
+    draft,
+    messages,
+    model,
+    attachedDocuments,
+    pendingDocuments,
+    pendingImages,
+    reasoningEffort,
+    sendMessage,
+    setPendingDocuments,
+    setDraft,
+    setModel,
+    setPendingImages,
+    setReasoningEffort,
+    submitDisabled,
+    thinking,
+    threadId,
+    uploadCount,
+    addPendingFiles,
+  } = useThread();
+
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);

@@ -3,19 +3,10 @@ import { LuFileText, LuFolder, LuGitFork, LuMessageSquare } from "react-icons/lu
 import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
 import { ReposView } from "../mid-panel/views/ReposView";
-import { ThreadSidebar, type ThreadEntry } from "./ThreadSidebar";
-import type { AttachedDocument } from "../types";
+import { ThreadSidebar } from "./ThreadSidebar";
+import { useThread } from "../thread";
 
 type Tab = "threads" | "collections" | "documents" | "repos";
-
-interface LeftSidebarProps {
-  threads: ThreadEntry[];
-  activeThreadId: number | null;
-  onSelectThread: (id: number) => void;
-  onNewChat: () => void;
-  onAttachDocument: (document: AttachedDocument) => void;
-  attachedDocumentIds: number[];
-}
 
 const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
   { id: "threads", icon: LuMessageSquare, label: "Threads" },
@@ -24,14 +15,17 @@ const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
   { id: "repos", icon: LuGitFork, label: "Repos" },
 ];
 
-export function LeftSidebar({
-  threads,
-  activeThreadId,
-  onSelectThread,
-  onNewChat,
-  onAttachDocument,
-  attachedDocumentIds,
-}: LeftSidebarProps) {
+export function LeftSidebar() {
+  const {
+    threads,
+    threadId,
+    attachedDocuments,
+    pendingDocuments,
+    loadThread,
+    resetConversation,
+    attachDocument,
+  } = useThread();
+
   const location = useLocation();
   const navigate = useNavigate();
   const activeTab: Tab = location.pathname.startsWith("/collections")
@@ -59,9 +53,18 @@ export function LeftSidebar({
     }
   };
 
+  const handleSelectThread = (id: number) => {
+    if (id === threadId) return;
+    void loadThread(id);
+  };
+
+  const attachedDocumentIds = [
+    ...attachedDocuments.map((d) => d.id),
+    ...pendingDocuments.map((d) => d.id),
+  ];
+
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
-      {/* Icon toolbar */}
       <div className="flex items-center justify-center gap-1 border-b border-[#333] px-2 py-1.5">
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -84,13 +87,12 @@ export function LeftSidebar({
         })}
       </div>
 
-      {/* View content */}
       <div className="min-h-0 flex-1">
         {activeTab === "threads" ? (
           <ThreadSidebar
-            activeThreadId={activeThreadId}
-            onNewChat={onNewChat}
-            onSelectThread={onSelectThread}
+            activeThreadId={threadId}
+            onNewChat={resetConversation}
+            onSelectThread={handleSelectThread}
             threads={threads}
           />
         ) : activeTab === "collections" ? (
@@ -98,7 +100,7 @@ export function LeftSidebar({
         ) : activeTab === "documents" ? (
           <DocumentsView
             attachedDocumentIds={attachedDocumentIds}
-            onAttachDocument={onAttachDocument}
+            onAttachDocument={attachDocument}
           />
         ) : (
           <ReposView />

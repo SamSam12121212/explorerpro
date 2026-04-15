@@ -79,7 +79,10 @@ export async function checkHealthApi(): Promise<"online" | "degraded"> {
 export function sendKeepaliveApiPost(path: string, body: unknown) {
   const payload = JSON.stringify(body);
 
-  if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.sendBeacon === "function"
+  ) {
     try {
       const blob = new Blob([payload], { type: "application/json" });
       if (navigator.sendBeacon(path, blob)) {

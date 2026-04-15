@@ -1,9 +1,4 @@
-export interface ThreadEntry {
-  id: number;
-  label: string;
-  previewText: string;
-  updatedAt: string;
-}
+import type { ThreadEntry } from "../thread";
 
 interface ThreadSidebarProps {
   threads: ThreadEntry[];
