@@ -2107,6 +2107,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	prevStatus := meta.Status
 	eventCount := 0
 	deltaLogs := map[openaiws.EventType]*deltaLogState{}
+	suppressLiveDeltas := meta.ParentThreadID > 0
 
 	for {
 		event, err := session.Receive(a.ctx)
@@ -2121,8 +2122,9 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 		eventCount++
 		responseID := event.ResolvedResponseID()
+		isDelta := event.Type.IsDelta()
 
-		if strings.HasSuffix(string(event.Type), ".delta") {
+		if isDelta {
 			state := deltaLogs[event.Type]
 			if state == nil {
 				state = &deltaLogState{}
@@ -2148,10 +2150,10 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			a.flushDeltaLogForDoneEvent(deltaLogs, meta, responseID, event.Type)
 			a.logOpenAIEvent(meta, responseID, "event_type", event.Type)
 		}
-		if !strings.HasSuffix(string(event.Type), ".delta") {
+		if !isDelta {
 			a.touchOpenAISocket(session, threadstore.OpenAISocketTouch{})
 		}
-		if !strings.HasSuffix(string(event.Type), ".delta") {
+		if !isDelta {
 			if a.history == nil {
 				return fmt.Errorf("thread history store is not configured")
 			}
@@ -2167,7 +2169,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			}
 		}
 
-		if a.publishEvent != nil {
+		if a.publishEvent != nil && (!suppressLiveDeltas || !isDelta) {
 			if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), event.Raw); err != nil {
 				return err
 			}

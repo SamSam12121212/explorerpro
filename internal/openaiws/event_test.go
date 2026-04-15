@@ -2,6 +2,17 @@ package openaiws
 
 import "testing"
 
+func TestEventTypeIsDelta(t *testing.T) {
+	t.Parallel()
+
+	if !EventTypeResponseOutputTextDelta.IsDelta() {
+		t.Fatal("output text delta should report IsDelta")
+	}
+	if EventTypeResponseCompleted.IsDelta() {
+		t.Fatal("completed event should not report IsDelta")
+	}
+}
+
 func TestDecodeServerEventReasoningSummaryDelta(t *testing.T) {
 	t.Parallel()
 

@@ -3336,12 +3336,12 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 	}
 }
 
-func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
+func TestStreamUntilTerminalPublishesRootDeltaEventsButKeepsThemOutOfHistory(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeActorStore(t)
-	store.threads[tid("thread_parent")] = threadstore.ThreadMeta{
-		ID:               tid("thread_parent"),
+	store.threads[tid("thread_root")] = threadstore.ThreadMeta{
+		ID:               tid("thread_root"),
 		Status:           threadstore.ThreadStatusRunning,
 		OwnerWorkerID:    tid("worker-local-1"),
 		SocketGeneration: 1,
@@ -3362,7 +3362,7 @@ func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_parent")]); err != nil {
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3395,6 +3395,61 @@ func TestStreamUntilTerminalKeepsDeltaEventsOutOfHistory(t *testing.T) {
 	}
 	if !foundCompleted {
 		t.Fatalf("historyEvents = %#v, want response.completed entry", store.historyEvents)
+	}
+}
+
+func TestStreamUntilTerminalSuppressesChildDeltaLiveEvents(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads[tid("thread_child")] = threadstore.ThreadMeta{
+		ID:               tid("thread_child"),
+		ParentThreadID:   tid("thread_parent"),
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    tid("worker-local-1"),
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.output_text.delta","response":{"id":"resp_1"},"delta":"hello"}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		},
+	}
+
+	var publishedEventTypes []string
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.publishEvent = func(_ context.Context, _ int64, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+		publishedEventTypes = append(publishedEventTypes, eventType)
+		return nil
+	}
+
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.output_text.delta" {
+			t.Fatalf("child delta event should not publish live: %#v", publishedEventTypes)
+		}
+	}
+
+	foundCompleted := false
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.completed" {
+			foundCompleted = true
+			break
+		}
+	}
+	if !foundCompleted {
+		t.Fatalf("publishedEventTypes = %#v, want response.completed entry", publishedEventTypes)
+	}
+
+	for _, entry := range store.historyEvents {
+		if entry.EventType == "response.output_text.delta" {
+			t.Fatalf("delta event leaked into history: %#v", entry)
+		}
 	}
 }
 

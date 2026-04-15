@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type EventType string
@@ -37,6 +38,10 @@ func (t EventType) IsTerminal() bool {
 	default:
 		return false
 	}
+}
+
+func (t EventType) IsDelta() bool {
+	return strings.HasSuffix(string(t), ".delta")
 }
 
 type ClientEvent struct {
