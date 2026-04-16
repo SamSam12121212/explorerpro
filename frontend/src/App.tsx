@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   LuColumns3,
   LuPanelLeft,
@@ -7,7 +8,11 @@ import {
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { IconActionButton } from "./components/IconActionButton";
 import { usePanelVisibilitySettings } from "./panelVisibility";
-import { LeftSidebar } from "./components/LeftSidebar";
+import {
+  LeftSidebar,
+  getInitialLeftSidebarTab,
+  type LeftSidebarTab,
+} from "./components/LeftSidebar";
 import { MidPanelHost } from "./components/MidPanelHost";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { ThreadProvider, useThread } from "./thread";
@@ -48,6 +53,9 @@ export default function App() {
 function AppLayout() {
   const { resetConversation } = useThread();
   const { panelVisibility, togglePanelVisibility } = usePanelVisibilitySettings();
+  const [leftSidebarTab, setLeftSidebarTab] = useState<LeftSidebarTab>(() =>
+    getInitialLeftSidebarTab(window.location.pathname),
+  );
   const visiblePanelIds: PanelId[] = [];
   if (panelVisibility.left) visiblePanelIds.push(LEFT_PANEL_ID);
   if (panelVisibility.middle) visiblePanelIds.push(MIDDLE_PANEL_ID);
@@ -63,7 +71,7 @@ function AppLayout() {
       defaultSize: "18%",
       id: LEFT_PANEL_ID,
       minSize: "14px",
-      node: <LeftSidebar />,
+      node: <LeftSidebar activeTab={leftSidebarTab} onTabChange={setLeftSidebarTab} />,
     });
   }
 
