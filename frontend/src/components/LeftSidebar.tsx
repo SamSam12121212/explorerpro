@@ -1,4 +1,3 @@
-import { useLocation, useNavigate } from "react-router";
 import { LuFileText, LuFolder, LuGitFork, LuMessageSquare } from "react-icons/lu";
 import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
@@ -6,16 +5,28 @@ import { ReposView } from "../mid-panel/views/ReposView";
 import { ThreadSidebar } from "./ThreadSidebar";
 import { useThread } from "../thread";
 
-type Tab = "threads" | "collections" | "documents" | "repos";
+export type LeftSidebarTab = "threads" | "collections" | "documents" | "repos";
 
-const tabs: { id: Tab; icon: typeof LuMessageSquare; label: string }[] = [
+export function getInitialLeftSidebarTab(pathname: string): LeftSidebarTab {
+  if (pathname.startsWith("/collections")) return "collections";
+  if (pathname.startsWith("/documents") || pathname.startsWith("/doc/")) return "documents";
+  if (pathname.startsWith("/repos")) return "repos";
+  return "threads";
+}
+
+const tabs: { id: LeftSidebarTab; icon: typeof LuMessageSquare; label: string }[] = [
   { id: "threads", icon: LuMessageSquare, label: "Threads" },
   { id: "collections", icon: LuFolder, label: "Collections" },
   { id: "documents", icon: LuFileText, label: "Documents" },
   { id: "repos", icon: LuGitFork, label: "Repos" },
 ];
 
-export function LeftSidebar() {
+interface LeftSidebarProps {
+  activeTab: LeftSidebarTab;
+  onTabChange: (tab: LeftSidebarTab) => void;
+}
+
+export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
   const {
     threads,
     threadId,
@@ -26,33 +37,6 @@ export function LeftSidebar() {
     deleteThread,
     attachDocument,
   } = useThread();
-
-  const location = useLocation();
-  const navigate = useNavigate();
-  const activeTab: Tab = location.pathname.startsWith("/collections")
-    ? "collections"
-    : location.pathname.startsWith("/documents") || location.pathname.startsWith("/doc/")
-      ? "documents"
-      : location.pathname.startsWith("/repos")
-        ? "repos"
-        : "threads";
-
-  const handleTabChange = (tab: Tab) => {
-    switch (tab) {
-      case "collections":
-        void navigate("/collections");
-        return;
-      case "documents":
-        void navigate("/documents");
-        return;
-      case "repos":
-        void navigate("/repos");
-        return;
-      case "threads":
-      default:
-        void navigate("/");
-    }
-  };
 
   const handleSelectThread = (id: number) => {
     if (id === threadId) return;
@@ -78,7 +62,7 @@ export function LeftSidebar() {
                   : "text-[#666] hover:text-[#b2b2b2]"
               }`}
               key={tab.id}
-              onClick={() => { handleTabChange(tab.id); }}
+              onClick={() => { onTabChange(tab.id); }}
               title={tab.label}
               type="button"
             >
