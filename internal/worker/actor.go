@@ -2517,13 +2517,14 @@ func injectThreadFields(meta threadstore.ThreadMeta, raw json.RawMessage) json.R
 	if len(trimmed) < 2 || trimmed[0] != '{' {
 		return raw
 	}
-	prefix := fmt.Sprintf(`"thread_id":%d,"root_thread_id":%d,"parent_thread_id":%d,`,
+	prefix := fmt.Sprintf(`"thread_id":%d,"root_thread_id":%d,"parent_thread_id":%d`,
 		meta.ID, meta.RootThreadID, meta.ParentThreadID)
 	inner := bytes.TrimSpace(trimmed[1 : len(trimmed)-1])
-	out := make([]byte, 0, len(trimmed)+len(prefix))
+	out := make([]byte, 0, len(trimmed)+len(prefix)+2)
 	out = append(out, '{')
 	out = append(out, prefix...)
 	if len(inner) > 0 {
+		out = append(out, ',')
 		out = append(out, inner...)
 	}
 	out = append(out, '}')
