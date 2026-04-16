@@ -3462,9 +3462,9 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	}
 
 	deltaLogs := map[openaiws.EventType]*deltaLogState{
-		openaiws.EventType("response.function_call_arguments.delta"): {
-			firstRaw:      `{"type":"response.function_call_arguments.delta","delta":"{"}`,
-			lastRaw:       `{"type":"response.function_call_arguments.delta","delta":"}"}`,
+		openaiws.EventTypeResponseOutputTextDelta: {
+			firstRaw:      `{"type":"response.output_text.delta","delta":"hel"}`,
+			lastRaw:       `{"type":"response.output_text.delta","delta":"lo"}`,
 			firstLogged:   true,
 			suppressedAny: true,
 		},
@@ -3473,13 +3473,13 @@ func TestFlushDeltaLogForDoneEventLogsOnlySuppressedLastDelta(t *testing.T) {
 	actor.flushDeltaLogForDoneEvent(deltaLogs, threadstore.ThreadMeta{
 		RootThreadID: tid("thread_root"),
 		Depth:        0,
-	}, "resp_123", openaiws.EventTypeResponseFunctionArgsDone)
+	}, "resp_123", openaiws.EventTypeResponseOutputTextDone)
 
 	if len(deltaLogs) != 0 {
 		t.Fatalf("deltaLogs still has %d entries, want 0", len(deltaLogs))
 	}
 	logs := logBuf.String()
-	if !strings.Contains(logs, `event_type=response.function_call_arguments.delta`) {
+	if !strings.Contains(logs, `event_type=response.output_text.delta`) {
 		t.Fatalf("logs = %q, want flushed delta event type", logs)
 	}
 	if !strings.Contains(logs, `root_thread_id=`+strconv.FormatInt(tid("thread_root"), 10)) {
@@ -3572,6 +3572,70 @@ func TestStreamUntilTerminalDropsReasoningDeltas(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("publishedEventTypes = %#v, want response.output_text.delta still published", publishedEventTypes)
+	}
+}
+
+func TestStreamUntilTerminalDropsToolCallDeltas(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads[tid("thread_root")] = threadstore.ThreadMeta{
+		ID:               tid("thread_root"),
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    tid("worker-local-1"),
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.output_item.added","response":{"id":"resp_1"},"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"some_user_tool","arguments":""}}`),
+			[]byte(`{"type":"response.function_call_arguments.delta","response":{"id":"resp_1"},"item_id":"fc_1","delta":"{\"k\":"}`),
+			[]byte(`{"type":"response.function_call_arguments.delta","response":{"id":"resp_1"},"item_id":"fc_1","delta":"\"v\"}"}`),
+			[]byte(`{"type":"response.function_call_arguments.done","response":{"id":"resp_1"},"item_id":"fc_1","arguments":"{\"k\":\"v\"}"}`),
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"some_user_tool","arguments":"{\"k\":\"v\"}"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		},
+	}
+
+	var publishedEventTypes []string
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.publishEvent = func(_ context.Context, _ int64, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+		publishedEventTypes = append(publishedEventTypes, eventType)
+		return nil
+	}
+
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.function_call_arguments.delta" {
+			t.Fatalf("tool-call delta event should not publish: %#v", publishedEventTypes)
+		}
+	}
+
+	for _, entry := range store.historyEvents {
+		if entry.EventType == "response.function_call_arguments.delta" {
+			t.Fatalf("tool-call delta event should not be in history: %#v", entry)
+		}
+	}
+
+	// The added / arguments.done / output_item.done envelope around the call
+	// must still survive — the FE needs these to render the tool invocation.
+	var hasAdded, hasArgsDone, hasItemDone bool
+	for _, eventType := range publishedEventTypes {
+		switch eventType {
+		case "response.output_item.added":
+			hasAdded = true
+		case "response.function_call_arguments.done":
+			hasArgsDone = true
+		case "response.output_item.done":
+			hasItemDone = true
+		}
+	}
+	if !hasAdded || !hasArgsDone || !hasItemDone {
+		t.Fatalf("publishedEventTypes = %#v, want output_item.added + function_call_arguments.done + output_item.done", publishedEventTypes)
 	}
 }
 

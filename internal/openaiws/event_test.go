@@ -13,6 +13,23 @@ func TestEventTypeIsDelta(t *testing.T) {
 	}
 }
 
+func TestEventTypeIsToolCallDelta(t *testing.T) {
+	t.Parallel()
+
+	if !EventTypeResponseFunctionCallArgumentsDelta.IsToolCallDelta() {
+		t.Fatal("function_call_arguments.delta should report IsToolCallDelta")
+	}
+	if EventTypeResponseFunctionArgsDone.IsToolCallDelta() {
+		t.Fatal("function_call_arguments.done is not a delta")
+	}
+	if EventTypeResponseReasoningTextDelta.IsToolCallDelta() {
+		t.Fatal("reasoning delta is not a tool-call delta")
+	}
+	if EventTypeResponseOutputTextDelta.IsToolCallDelta() {
+		t.Fatal("output text delta is not a tool-call delta")
+	}
+}
+
 func TestDecodeServerEventReasoningSummaryDelta(t *testing.T) {
 	t.Parallel()
 

@@ -2123,7 +2123,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		eventCount++
 		responseID := event.ResolvedResponseID()
 
-		if event.Type.IsReasoningDelta() {
+		if event.Type.IsReasoningDelta() || event.Type.IsToolCallDelta() {
 			continue
 		}
 
