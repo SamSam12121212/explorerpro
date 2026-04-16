@@ -1,4 +1,5 @@
-import { useLocation, useNavigate } from "react-router";
+import { useState } from "react";
+import { useLocation } from "react-router";
 import { LuFileText, LuFolder, LuGitFork, LuMessageSquare } from "react-icons/lu";
 import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
@@ -28,8 +29,7 @@ export function LeftSidebar() {
   } = useThread();
 
   const location = useLocation();
-  const navigate = useNavigate();
-  const activeTab: Tab = location.pathname.startsWith("/collections")
+  const initialTab: Tab = location.pathname.startsWith("/collections")
     ? "collections"
     : location.pathname.startsWith("/documents") || location.pathname.startsWith("/doc/")
       ? "documents"
@@ -37,22 +37,7 @@ export function LeftSidebar() {
         ? "repos"
         : "threads";
 
-  const handleTabChange = (tab: Tab) => {
-    switch (tab) {
-      case "collections":
-        void navigate("/collections");
-        return;
-      case "documents":
-        void navigate("/documents");
-        return;
-      case "repos":
-        void navigate("/repos");
-        return;
-      case "threads":
-      default:
-        void navigate("/");
-    }
-  };
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   const handleSelectThread = (id: number) => {
     if (id === threadId) return;
@@ -78,7 +63,7 @@ export function LeftSidebar() {
                   : "text-[#666] hover:text-[#b2b2b2]"
               }`}
               key={tab.id}
-              onClick={() => { handleTabChange(tab.id); }}
+              onClick={() => { setActiveTab(tab.id); }}
               title={tab.label}
               type="button"
             >
