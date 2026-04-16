@@ -1702,7 +1702,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, pa
 	}
 
 	if a.publishEvent != nil {
-		if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", eventrelay.EventTypeClientResponse, rawEvent); err != nil {
+		if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, "client-response-create", eventrelay.EventTypeClientResponse, injectThreadFields(meta, rawEvent)); err != nil {
 			return err
 		}
 	}
@@ -2122,6 +2122,11 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 		eventCount++
 		responseID := event.ResolvedResponseID()
+
+		if event.Type.IsReasoningDelta() {
+			continue
+		}
+
 		isDelta := event.Type.IsDelta()
 
 		if isDelta {
@@ -2170,7 +2175,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 
 		if a.publishEvent != nil && (!suppressLiveDeltas || !isDelta) {
-			if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), event.Raw); err != nil {
+			if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), injectThreadFields(meta, event.Raw)); err != nil {
 				return err
 			}
 		}
@@ -2506,120 +2511,37 @@ func (a *threadActor) loadPreparedInputValue(ref string) (any, error) {
 	return loadPreparedInputValueFromBlob(a.ctx, a.blob, ref)
 }
 
-func (a *threadActor) appendItem(entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
-	item, err := a.store.AppendItem(a.ctx, entry)
-	if err != nil {
-		return threadstore.ItemRecord{}, err
+// injectThreadFields prepends thread_id, root_thread_id, and parent_thread_id into the JSON object payload.
+func injectThreadFields(meta threadstore.ThreadMeta, raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return raw
 	}
-	a.publishThreadItem(item)
-	return item, nil
+	prefix := fmt.Sprintf(`"thread_id":%d,"root_thread_id":%d,"parent_thread_id":%d,`,
+		meta.ID, meta.RootThreadID, meta.ParentThreadID)
+	inner := bytes.TrimSpace(trimmed[1 : len(trimmed)-1])
+	out := make([]byte, 0, len(trimmed)+len(prefix))
+	out = append(out, '{')
+	out = append(out, prefix...)
+	if len(inner) > 0 {
+		out = append(out, inner...)
+	}
+	out = append(out, '}')
+	return out
+}
+
+func (a *threadActor) appendItem(entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error) {
+	return a.store.AppendItem(a.ctx, entry)
 }
 
 func (a *threadActor) saveThreadMeta(meta threadstore.ThreadMeta) error {
-	prev := a.currentMeta()
 	if err := a.store.SaveThread(a.ctx, meta); err != nil {
 		return err
 	}
 	a.setMeta(meta)
-	if shouldPublishThreadSnapshot(prev, meta) {
-		a.publishThreadSnapshot(meta)
-	}
 	return nil
 }
 
-func shouldPublishThreadSnapshot(prev, next threadstore.ThreadMeta) bool {
-	if prev.ID <= 0 {
-		return true
-	}
-	return prev.ID != next.ID ||
-		prev.Status != next.Status ||
-		prev.Model != next.Model ||
-		prev.LastResponseID != next.LastResponseID ||
-		prev.ActiveResponseID != next.ActiveResponseID ||
-		prev.ActiveSpawnGroupID != next.ActiveSpawnGroupID
-}
-
-func (a *threadActor) publishThreadSnapshot(meta threadstore.ThreadMeta) {
-	if a.publishEvent == nil {
-		return
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"id":                    meta.ID,
-		"status":                meta.Status,
-		"model":                 meta.Model,
-		"last_response_id":      meta.LastResponseID,
-		"active_response_id":    meta.ActiveResponseID,
-		"active_spawn_group_id": meta.ActiveSpawnGroupID,
-		"updated_at":            meta.UpdatedAt.UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		a.logger.Warn("failed to marshal thread snapshot event", "error", err)
-		return
-	}
-
-	if err := a.publishEvent(
-		a.ctx,
-		meta.ID,
-		meta.SocketGeneration,
-		fmt.Sprintf("snapshot-%d", meta.UpdatedAt.UnixNano()),
-		eventrelay.EventTypeThreadSnapshot,
-		payload,
-	); err != nil {
-		a.logger.Warn("failed to publish thread snapshot event", "error", err)
-	}
-}
-
-func (a *threadActor) publishThreadItem(item threadstore.ItemRecord) {
-	if a.publishEvent == nil {
-		return
-	}
-
-	payload, err := json.Marshal(presentThreadItem(item))
-	if err != nil {
-		a.logger.Warn("failed to marshal thread item event", "seq", item.Seq, "error", err)
-		return
-	}
-
-	if err := a.publishEvent(
-		a.ctx,
-		a.threadID,
-		a.currentSocketGeneration(),
-		fmt.Sprintf("item-%d", item.Seq),
-		eventrelay.EventTypeThreadItem,
-		payload,
-	); err != nil {
-		a.logger.Warn("failed to publish thread item event", "seq", item.Seq, "error", err)
-	}
-}
-
-func presentThreadItem(item threadstore.ItemRecord) map[string]any {
-	response := map[string]any{
-		"cursor":      strconv.FormatInt(item.Seq, 10),
-		"seq":         item.Seq,
-		"response_id": item.ResponseID,
-		"item_type":   item.ItemType,
-		"direction":   item.Direction,
-		"created_at":  item.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if decoded, err := decodeStreamRawJSON(item.Payload); err == nil && decoded != nil {
-		response["payload"] = decoded
-	}
-	return response
-}
-
-func decodeStreamRawJSON(raw json.RawMessage) (any, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, nil
-	}
-
-	var decoded any
-	if err := json.Unmarshal(trimmed, &decoded); err != nil {
-		return string(trimmed), nil
-	}
-	return decoded, nil
-}
 
 func (a *threadActor) loadLatestAssistantText(threadID int64) (string, error) {
 	items, err := a.store.ListItems(a.ctx, threadID, threadstore.ListOptions{Limit: 100})

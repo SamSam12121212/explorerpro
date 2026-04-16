@@ -6,21 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"explorer/internal/eventrelay"
-	"explorer/internal/postgresstore"
-	"explorer/internal/threaddocstore"
 )
 
 type Config struct {
 	Port      string
 	RelayAddr string
 	Logger    *slog.Logger
-	Store     *postgresstore.Store
-	Docs      *threaddocstore.Store
 }
 
 type Server struct {
@@ -43,8 +37,7 @@ func New(cfg Config) *Server {
 	}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /connect", s.handleGlobalConnect)
-	s.mux.HandleFunc("GET /threads/{thread_id}/connect", s.handleConnect)
+	s.mux.HandleFunc("GET /connect", s.handleConnect)
 
 	return s
 }
@@ -102,31 +95,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	threadID, err := strconv.ParseInt(strings.TrimSpace(r.PathValue("thread_id")), 10, 64)
-	if err != nil || threadID <= 0 {
-		http.Error(w, "missing thread_id", http.StatusBadRequest)
-		return
-	}
-
-	afterItem := strings.TrimSpace(r.URL.Query().Get("after_item"))
-
 	client := newClient(clientConfig{
-		logger:    s.logger.With("thread_id", threadID),
-		store:     s.cfg.Store,
-		docs:      s.cfg.Docs,
-		threadID:  threadID,
-		afterItem: afterItem,
+		logger: s.logger,
 	})
-
-	client.serve(w, r, s.hub)
-}
-
-func (s *Server) handleGlobalConnect(w http.ResponseWriter, r *http.Request) {
-	client := newClient(clientConfig{
-		logger: s.logger.With("scope", "global"),
-		store:  s.cfg.Store,
-		docs:   s.cfg.Docs,
-	})
-
 	client.serve(w, r, s.hub)
 }
