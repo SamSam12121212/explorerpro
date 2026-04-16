@@ -30,6 +30,10 @@ export interface ThreadState {
   threads: ThreadEntry[];
   threadsLoading: boolean;
   uploadCount: number;
+  // call_ids of `query_document` function calls observed in the current turn.
+  // Populated as `response.output_item.added` events arrive; cleared when the
+  // worker resumes (next `response.created`) or on terminal failure.
+  pendingDocumentQueries: string[];
 }
 
 export interface ThreadActions {

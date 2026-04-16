@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import type { ThreadEntry, ThreadState } from "./types";
 import {
+  applyDocumentQueryAdded,
   applyOutputItemAdded,
   applyOutputTextDelta,
   buildMessageFromOutputItemDone,
@@ -102,6 +103,7 @@ const initialState: ThreadState = {
   threads: [],
   threadsLoading: true,
   uploadCount: 0,
+  pendingDocumentQueries: [],
 };
 
 export class ThreadService {
@@ -223,6 +225,7 @@ export class ThreadService {
         thinking: nextThinking,
         pendingDocuments: [],
         pendingImages: [],
+        pendingDocumentQueries: [],
         draft: "",
       }));
     } catch (error) {
@@ -245,6 +248,7 @@ export class ThreadService {
         thinking: false,
         threadId: null,
         attachedDocuments: [],
+        pendingDocumentQueries: [],
       }));
     }
   };
@@ -453,14 +457,31 @@ export class ThreadService {
       this.setState((s) => (s.thinking === nextThinking ? s : { ...s, thinking: nextThinking }));
     }
 
+    // A new turn is starting (model resumed after spawn group, or a fresh
+    // user-driven response). Clear the per-turn `query_document` indicator
+    // set: any in-flight calls from the previous turn have been resolved
+    // (their `function_call_output`s are inputs to this new response).
+    if (payload.type === "response.created") {
+      this.setState((s) => (
+        s.pendingDocumentQueries.length === 0
+          ? s
+          : { ...s, pendingDocumentQueries: [] }
+      ));
+    }
+
     // New output item → seed a streaming stub for assistant messages. Deltas
     // will fill in the text; `.done` replaces with the authoritative payload.
     // applyOutputItemAdded preserves any text already accumulated by an
     // earlier delta (delta-before-added race).
+    //
+    // Same event also drives the `query_document` indicator: function_call
+    // items with name "query_document" get their call_id appended.
     if (payload.type === "response.output_item.added") {
       this.setState((s) => {
         const nextMessages = applyOutputItemAdded(s.messages, event);
-        return nextMessages === s.messages ? s : { ...s, messages: nextMessages };
+        const nextDocQueries = applyDocumentQueryAdded(s.pendingDocumentQueries, event);
+        if (nextMessages === s.messages && nextDocQueries === s.pendingDocumentQueries) return s;
+        return { ...s, messages: nextMessages, pendingDocumentQueries: nextDocQueries };
       });
     }
 
@@ -499,11 +520,20 @@ export class ThreadService {
       const previousStatus = this.lastThreadStatus;
       this.lastThreadStatus = terminalStatus;
 
+      // Only clear `pendingDocumentQueries` on terminal *failure*: a normal
+      // `response.completed` for a turn that emitted query_document calls is
+      // immediately followed by spawn-group execution (no events) and then
+      // `response.created` for the worker's follow-up turn — which is what
+      // clears the indicator. Clearing on `.completed` would hide it during
+      // the very window we want to surface.
+      const clearDocQueries = terminalStatus !== "completed";
+
       this.setState((s) => ({
         ...s,
         phase: "idle",
         thinking: false,
         messages: finalizeStreamingMessages(s.messages),
+        pendingDocumentQueries: clearDocQueries ? [] : s.pendingDocumentQueries,
       }));
 
       if (

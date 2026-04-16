@@ -1,3 +1,4 @@
+import { QUERY_DOCUMENT_TOOL_NAME } from "../constants";
 import type {
   MessageRole,
   ThreadItemsResponse,
@@ -264,6 +265,34 @@ export function applyOutputTextDelta(current: ThreadMessage[], event: Record<str
       streaming: true,
     },
   ];
+}
+
+interface FunctionCallItem {
+  type?: string;
+  id?: string;
+  call_id?: string;
+  name?: string;
+}
+
+/**
+ * Apply a `response.output_item.added` event for a `query_document`
+ * function_call item. Appends the call_id to the pending list so the UI can
+ * surface a "Reading N documents..." indicator.
+ *
+ * Returns the input array unchanged for non-function_call items, calls of
+ * other tools (e.g. spawn_threads), missing call_id, or duplicates — so the
+ * caller can rely on referential equality to skip a no-op setState.
+ */
+export function applyDocumentQueryAdded(current: string[], event: Record<string, unknown>): string[] {
+  const item = event.item as FunctionCallItem | undefined;
+  if (item?.type !== "function_call") return current;
+  if (item.name !== QUERY_DOCUMENT_TOOL_NAME) return current;
+
+  const callID = item.call_id ?? item.id;
+  if (!callID) return current;
+  if (current.includes(callID)) return current;
+
+  return [...current, callID];
 }
 
 export function buildMessageFromOutputItemDone(event: Record<string, unknown>): ThreadMessage | null {
