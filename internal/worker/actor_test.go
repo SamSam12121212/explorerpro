@@ -3629,6 +3629,47 @@ func TestStreamUntilTerminalPublishesChildNonDeltaEvents(t *testing.T) {
 	}
 }
 
+func TestInjectThreadFields(t *testing.T) {
+	t.Parallel()
+
+	meta := threadstore.ThreadMeta{
+		ID:             7,
+		RootThreadID:   3,
+		ParentThreadID: 3,
+	}
+
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{
+			name: "normal event",
+			raw:  json.RawMessage(`{"type":"response.completed"}`),
+			want: `{"thread_id":7,"root_thread_id":3,"parent_thread_id":3,"type":"response.completed"}`,
+		},
+		{
+			name: "empty object produces valid JSON",
+			raw:  json.RawMessage(`{}`),
+			want: `{"thread_id":7,"root_thread_id":3,"parent_thread_id":3}`,
+		},
+		{
+			name: "non-object passthrough",
+			raw:  json.RawMessage(`[]`),
+			want: `[]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(injectThreadFields(meta, tt.raw))
+			if got != tt.want {
+				t.Fatalf("injectThreadFields() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOutputItemLogEventTypeIncludesItemTypeForAdded(t *testing.T) {
 	t.Parallel()
 
