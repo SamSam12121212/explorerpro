@@ -55,6 +55,11 @@ ON CONFLICT (thread_id, collection_id) DO NOTHING
 // collection_documents.created_at ascending — so that an unchanged attachment
 // yields a byte-identical runtime context between turns (keeps the prompt
 // cache warm).
+//
+// Uses two queries regardless of N: one for the attached collections, one
+// batched query that fetches every member document across all of them
+// (filtered by ANY($collection_ids)). Grouping and in-collection ordering
+// happen in Go.
 func (s *Store) ListAttached(ctx context.Context, threadID int64, limit int64) ([]AttachedCollection, error) {
 	if limit <= 0 {
 		limit = 100
@@ -73,31 +78,36 @@ LIMIT $2`, threadID, limit)
 	defer collectionRows.Close()
 
 	var attached []AttachedCollection
+	indexByID := map[string]int{}
 	for collectionRows.Next() {
 		var c AttachedCollection
 		if err := collectionRows.Scan(&c.ID, &c.Name); err != nil {
 			return nil, fmt.Errorf("scan thread collection: %w", err)
 		}
+		c.Documents = []docstore.Document{}
+		indexByID[c.ID] = len(attached)
 		attached = append(attached, c)
 	}
 	if err := collectionRows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate thread collections: %w", err)
 	}
 
-	for idx := range attached {
-		docs, err := s.listCollectionDocuments(ctx, attached[idx].ID)
-		if err != nil {
-			return nil, err
-		}
-		attached[idx].Documents = docs
+	if len(attached) == 0 {
+		return attached, nil
 	}
 
-	return attached, nil
-}
+	collectionIDs := make([]string, len(attached))
+	for i, c := range attached {
+		collectionIDs[i] = c.ID
+	}
 
-func (s *Store) listCollectionDocuments(ctx context.Context, collectionID string) ([]docstore.Document, error) {
-	rows, err := s.pool.Query(ctx, `
+	// One batched fetch for every member across every attached collection.
+	// Ordering inside each collection is stable (cd.created_at ASC, d.id ASC)
+	// and grouping is done in Go by reading rows in collection_id, cd.created_at
+	// order.
+	docRows, err := s.pool.Query(ctx, `
 SELECT
+    cd.collection_id,
     d.id,
     d.filename,
     d.source_ref,
@@ -114,17 +124,20 @@ SELECT
     d.updated_at
 FROM collection_documents cd
 JOIN documents d ON d.id = cd.document_id
-WHERE cd.collection_id = $1
-ORDER BY cd.created_at ASC, d.id ASC`, collectionID)
+WHERE cd.collection_id = ANY($1::text[])
+ORDER BY cd.collection_id ASC, cd.created_at ASC, d.id ASC`, collectionIDs)
 	if err != nil {
-		return nil, fmt.Errorf("list collection %s documents: %w", collectionID, err)
+		return nil, fmt.Errorf("list collection documents for thread %d: %w", threadID, err)
 	}
-	defer rows.Close()
+	defer docRows.Close()
 
-	documents := make([]docstore.Document, 0)
-	for rows.Next() {
-		var document docstore.Document
-		if err := rows.Scan(
+	for docRows.Next() {
+		var (
+			collectionID string
+			document     docstore.Document
+		)
+		if err := docRows.Scan(
+			&collectionID,
 			&document.ID,
 			&document.Filename,
 			&document.SourceRef,
@@ -142,7 +155,18 @@ ORDER BY cd.created_at ASC, d.id ASC`, collectionID)
 		); err != nil {
 			return nil, fmt.Errorf("scan collection document: %w", err)
 		}
-		documents = append(documents, document)
+
+		idx, ok := indexByID[collectionID]
+		if !ok {
+			// Shouldn't happen — WHERE clause is filtered to these IDs — but
+			// skip defensively rather than panic.
+			continue
+		}
+		attached[idx].Documents = append(attached[idx].Documents, document)
 	}
-	return documents, rows.Err()
+	if err := docRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate collection documents: %w", err)
+	}
+
+	return attached, nil
 }
