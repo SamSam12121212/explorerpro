@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadMessage } from "../types";
 import {
+  applyOutputItemAdded,
   applyOutputTextDelta,
   buildMessageFromOutputItemDone,
   buildStreamingMessageFromOutputItemAdded,
@@ -155,19 +156,56 @@ describe("upsertMessage", () => {
   });
 });
 
-describe("end-to-end stream sequence", () => {
+describe("applyOutputItemAdded", () => {
+  it("seeds a streaming stub when no message with that id exists", () => {
+    const next = applyOutputItemAdded([], {
+      type: "response.output_item.added",
+      item: { id: "msg_1", type: "message", role: "assistant", content: [] },
+    });
+
+    expect(next).toEqual([
+      { id: "msg_1", role: "assistant", text: "", streaming: true },
+    ]);
+  });
+
+  it("preserves an existing message when delta arrived before added (regression)", () => {
+    // Delta-before-added race: the delta handler already created the message
+    // with accumulated text. `.added` carries no text and must not overwrite.
+    const initial: ThreadMessage[] = [
+      { id: "msg_race", role: "assistant", text: "early tokens", streaming: true },
+    ];
+
+    const next = applyOutputItemAdded(initial, {
+      type: "response.output_item.added",
+      item: { id: "msg_race", type: "message", role: "assistant", content: [] },
+    });
+
+    expect(next).toBe(initial);
+    expect(next).toEqual([
+      { id: "msg_race", role: "assistant", text: "early tokens", streaming: true },
+    ]);
+  });
+
+  it("returns input unchanged for non-message items", () => {
+    const initial: ThreadMessage[] = [];
+    expect(
+      applyOutputItemAdded(initial, {
+        type: "response.output_item.added",
+        item: { id: "rs_1", type: "reasoning" },
+      }),
+    ).toBe(initial);
+  });
+});
+
+describe("end-to-end stream sequences", () => {
   it("added → deltas → done produces the authoritative message with streaming cleared", () => {
     let messages: ThreadMessage[] = [];
 
     // 1. output_item.added → streaming stub
-    const stub = buildStreamingMessageFromOutputItemAdded({
+    messages = applyOutputItemAdded(messages, {
       type: "response.output_item.added",
       item: { id: "msg_x", type: "message", role: "assistant", content: [] },
     });
-    expect(stub).not.toBeNull();
-    if (stub) {
-      messages = upsertMessage(messages, stub);
-    }
 
     // 2. deltas accumulate
     messages = applyOutputTextDelta(messages, {
@@ -204,6 +242,52 @@ describe("end-to-end stream sequence", () => {
       { id: "msg_x", role: "assistant", text: "Hello world" },
     ]);
     expect(messages[0]?.streaming).toBeUndefined();
+  });
+
+  it("delta → added → delta → done: earlier deltas survive a late .added", () => {
+    let messages: ThreadMessage[] = [];
+
+    // 1. Delta arrives first (before .added)
+    messages = applyOutputTextDelta(messages, {
+      type: "response.output_text.delta",
+      item_id: "msg_y",
+      delta: "early ",
+    });
+
+    // 2. .added arrives late — must not wipe the accumulated text
+    messages = applyOutputItemAdded(messages, {
+      type: "response.output_item.added",
+      item: { id: "msg_y", type: "message", role: "assistant", content: [] },
+    });
+
+    // 3. More deltas keep appending
+    messages = applyOutputTextDelta(messages, {
+      type: "response.output_text.delta",
+      item_id: "msg_y",
+      delta: "late",
+    });
+
+    expect(messages).toEqual([
+      { id: "msg_y", role: "assistant", text: "early late", streaming: true },
+    ]);
+
+    // 4. .done finalizes
+    const truth = buildMessageFromOutputItemDone({
+      type: "response.output_item.done",
+      item: {
+        id: "msg_y",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "early late" }],
+      },
+    });
+    if (truth) {
+      messages = upsertMessage(messages, truth);
+    }
+
+    expect(messages).toEqual([
+      { id: "msg_y", role: "assistant", text: "early late" },
+    ]);
   });
 });
 

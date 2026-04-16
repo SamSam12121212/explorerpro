@@ -201,6 +201,25 @@ export function buildStreamingMessageFromOutputItemAdded(event: Record<string, u
   };
 }
 
+/**
+ * Apply a `response.output_item.added` event.
+ *
+ * Seeds an empty streaming stub for new assistant message items. If a message
+ * with the same id already exists — typically because a text delta beat the
+ * `.added` event to the client — the existing message is preserved. The
+ * `.added` event carries no text, so upserting would overwrite accumulated
+ * deltas with an empty string.
+ *
+ * Returns the input array unchanged for non-message items, missing ids, or
+ * the delta-first race case.
+ */
+export function applyOutputItemAdded(current: ThreadMessage[], event: Record<string, unknown>): ThreadMessage[] {
+  const stub = buildStreamingMessageFromOutputItemAdded(event);
+  if (!stub) return current;
+  if (current.some((m) => m.id === stub.id)) return current;
+  return upsertMessage(current, stub);
+}
+
 function extractItemId(event: Record<string, unknown>): string | null {
   const itemId = event.item_id;
   if (typeof itemId === "string" && itemId.length > 0) return itemId;

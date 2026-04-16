@@ -13,10 +13,10 @@ import type {
 } from "../types";
 import type { ThreadEntry, ThreadState } from "./types";
 import {
+  applyOutputItemAdded,
   applyOutputTextDelta,
   buildMessageFromOutputItemDone,
   buildMessagesFromItems,
-  buildStreamingMessageFromOutputItemAdded,
   deriveThinkingFromEvent,
   deriveThinkingFromItems,
   finalizeStreamingMessages,
@@ -455,14 +455,13 @@ export class ThreadService {
 
     // New output item → seed a streaming stub for assistant messages. Deltas
     // will fill in the text; `.done` replaces with the authoritative payload.
+    // applyOutputItemAdded preserves any text already accumulated by an
+    // earlier delta (delta-before-added race).
     if (payload.type === "response.output_item.added") {
-      const stub = buildStreamingMessageFromOutputItemAdded(event);
-      if (stub) {
-        this.setState((s) => {
-          const nextMessages = upsertMessage(s.messages, stub);
-          return nextMessages === s.messages ? s : { ...s, messages: nextMessages };
-        });
-      }
+      this.setState((s) => {
+        const nextMessages = applyOutputItemAdded(s.messages, event);
+        return nextMessages === s.messages ? s : { ...s, messages: nextMessages };
+      });
     }
 
     // Text delta → append to the streaming message keyed by item_id.
