@@ -428,6 +428,11 @@ export class ThreadService {
 
     if (payload.type === "thread.heartbeat") return;
 
+    // Child-thread events carry parent_thread_id > 0. They must not mutate
+    // root thread state (phase, lastThreadStatus, messages). Silently drop
+    // until the aggregate child-indicator feature is wired up.
+    if (payload.parent_thread_id) return;
+
     this.handleOpenAIEvent(payload);
   };
 
