@@ -353,7 +353,11 @@ export function ThreadPanel() {
                 className={`relative text-[#888] hover:text-[#d4d4d4] disabled:cursor-not-allowed disabled:opacity-40 ${
                   persistedBadgeCount > 0 ? "mr-1" : ""
                 }`}
-                disabled={totalBadgeCount === 0}
+                disabled={
+                  totalBadgeCount === 0 &&
+                  attachedCollections.length === 0 &&
+                  pendingCollections.length === 0
+                }
                 onClick={() => { setAttachmentsOpen(true); }}
                 title="View attached documents"
                 type="button"
