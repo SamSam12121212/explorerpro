@@ -248,6 +248,7 @@ export class ThreadService {
         thinking: false,
         threadId: null,
         attachedDocuments: [],
+        pendingDocumentQueries: [],
       }));
     }
   };
