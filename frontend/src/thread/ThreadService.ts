@@ -443,9 +443,14 @@ export class ThreadService {
     const event = payload as Record<string, unknown>;
 
     // Thinking indicator from reasoning / output events.
+    //
+    // Many event types (including every output_text.delta) produce the same
+    // `thinking` value we already hold. Return the current state reference
+    // unchanged in that case so `setState` can bail — otherwise every delta
+    // would trigger a spurious listener emit and re-render.
     const nextThinking = deriveThinkingFromEvent(event);
     if (nextThinking !== null) {
-      this.setState((s) => ({ ...s, thinking: nextThinking }));
+      this.setState((s) => (s.thinking === nextThinking ? s : { ...s, thinking: nextThinking }));
     }
 
     // New output item → seed a streaming stub for assistant messages. Deltas
@@ -453,19 +458,21 @@ export class ThreadService {
     if (payload.type === "response.output_item.added") {
       const stub = buildStreamingMessageFromOutputItemAdded(event);
       if (stub) {
-        this.setState((s) => ({
-          ...s,
-          messages: upsertMessage(s.messages, stub),
-        }));
+        this.setState((s) => {
+          const nextMessages = upsertMessage(s.messages, stub);
+          return nextMessages === s.messages ? s : { ...s, messages: nextMessages };
+        });
       }
     }
 
     // Text delta → append to the streaming message keyed by item_id.
+    // applyOutputTextDelta returns the same array reference for no-op events
+    // (empty delta / missing item_id); bail in that case to avoid an emit.
     if (payload.type === "response.output_text.delta") {
-      this.setState((s) => ({
-        ...s,
-        messages: applyOutputTextDelta(s.messages, event),
-      }));
+      this.setState((s) => {
+        const nextMessages = applyOutputTextDelta(s.messages, event);
+        return nextMessages === s.messages ? s : { ...s, messages: nextMessages };
+      });
     }
 
     // Completed output items → replace the streaming stub with the
