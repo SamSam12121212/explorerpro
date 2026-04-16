@@ -10,6 +10,12 @@ export const DEFAULT_MODEL = "gpt-5.4-mini";
 export const DEFAULT_REASONING = "medium";
 export const COLLECTIONS_CHANGED_EVENT = "explorer:collections-changed";
 
+// Worker-side tool name (internal/doccmd: ToolNameQueryDocument). The tool
+// itself is injected by the worker when documents are attached, not declared
+// in EXPLORER_TOOLS — but the frontend needs the name to recognize the
+// corresponding `function_call` items in the live stream.
+export const QUERY_DOCUMENT_TOOL_NAME = "query_document";
+
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
   "If parallel work would materially help, you may call spawn_threads once with up to 10 child threads.",

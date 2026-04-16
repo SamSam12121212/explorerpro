@@ -26,6 +26,7 @@ export function ThreadPanel() {
     model,
     attachedDocuments,
     pendingDocuments,
+    pendingDocumentQueries,
     pendingImages,
     reasoningEffort,
     sendMessage,
@@ -52,10 +53,12 @@ export function ThreadPanel() {
   }
   const totalVisibleDocuments = attachedDocuments.length + pendingDocuments.length;
 
+  const docQueryCount = pendingDocumentQueries.length;
+
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy, thinking]);
+  }, [messages, busy, thinking, docQueryCount]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -126,7 +129,17 @@ export function ThreadPanel() {
             </article>
           )}
 
-          {busy && !thinking && !messages.some((m) => m.streaming && m.text) && (
+          {docQueryCount > 0 && (
+            <article className={bubbleClass("assistant")}>
+              <p className="m-0 text-[#888]">
+                {docQueryCount === 1
+                  ? "Reading 1 document..."
+                  : `Reading ${docQueryCount.toString()} documents...`}
+              </p>
+            </article>
+          )}
+
+          {busy && !thinking && docQueryCount === 0 && !messages.some((m) => m.streaming && m.text) && (
             <div className="self-start px-4 py-3">
               <div className="inline-flex gap-1">
                 <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[#888]" />

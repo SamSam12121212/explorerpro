@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadMessage } from "../types";
 import {
+  applyDocumentQueryAdded,
   applyOutputItemAdded,
   applyOutputTextDelta,
   buildMessageFromOutputItemDone,
@@ -288,6 +289,95 @@ describe("end-to-end stream sequences", () => {
     expect(messages).toEqual([
       { id: "msg_y", role: "assistant", text: "early late" },
     ]);
+  });
+});
+
+describe("applyDocumentQueryAdded", () => {
+  const baseEvent = (item: Record<string, unknown>) => ({
+    type: "response.output_item.added",
+    output_index: 0,
+    item,
+  });
+
+  it("appends the call_id for a query_document function_call", () => {
+    expect(
+      applyDocumentQueryAdded([], baseEvent({
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_abc",
+        name: "query_document",
+        arguments: "",
+      })),
+    ).toEqual(["call_abc"]);
+  });
+
+  it("preserves order across multiple parallel query_document calls", () => {
+    let pending: string[] = [];
+    pending = applyDocumentQueryAdded(pending, baseEvent({
+      type: "function_call", id: "fc_1", call_id: "call_a", name: "query_document",
+    }));
+    pending = applyDocumentQueryAdded(pending, baseEvent({
+      type: "function_call", id: "fc_2", call_id: "call_b", name: "query_document",
+    }));
+    pending = applyDocumentQueryAdded(pending, baseEvent({
+      type: "function_call", id: "fc_3", call_id: "call_c", name: "query_document",
+    }));
+
+    expect(pending).toEqual(["call_a", "call_b", "call_c"]);
+  });
+
+  it("ignores function_call items for other tools (e.g. spawn_threads)", () => {
+    const initial: string[] = [];
+    expect(
+      applyDocumentQueryAdded(initial, baseEvent({
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_spawn",
+        name: "spawn_threads",
+      })),
+    ).toBe(initial);
+  });
+
+  it("ignores non-function_call items (message, reasoning)", () => {
+    const initial: string[] = [];
+    expect(
+      applyDocumentQueryAdded(initial, baseEvent({ id: "msg_1", type: "message" })),
+    ).toBe(initial);
+    expect(
+      applyDocumentQueryAdded(initial, baseEvent({ id: "rs_1", type: "reasoning" })),
+    ).toBe(initial);
+  });
+
+  it("falls back to item.id when call_id is missing", () => {
+    expect(
+      applyDocumentQueryAdded([], baseEvent({
+        type: "function_call",
+        id: "fc_only",
+        name: "query_document",
+      })),
+    ).toEqual(["fc_only"]);
+  });
+
+  it("ignores entries with no identifier at all (referential equality)", () => {
+    const initial: string[] = [];
+    expect(
+      applyDocumentQueryAdded(initial, baseEvent({
+        type: "function_call",
+        name: "query_document",
+      })),
+    ).toBe(initial);
+  });
+
+  it("deduplicates: a repeated call_id does not create a second entry", () => {
+    const initial = ["call_a"];
+    expect(
+      applyDocumentQueryAdded(initial, baseEvent({
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_a",
+        name: "query_document",
+      })),
+    ).toBe(initial);
   });
 });
 
