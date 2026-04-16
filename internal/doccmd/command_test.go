@@ -146,7 +146,7 @@ func TestRuntimeContextResponseRoundTrip(t *testing.T) {
 		RequestID:    "docctx_123",
 		Status:       PrepareStatusOK,
 		Instructions: "Be concise.\n\n<available_documents>\n</available_documents>",
-		Tools:        json.RawMessage(`[{"type":"function","name":"query_attached_documents"}]`),
+		Tools:        json.RawMessage(`[{"type":"function","name":"query_document"}]`),
 	}
 
 	data, err := EncodeRuntimeContextResponse(resp)
@@ -182,12 +182,15 @@ func TestRuntimeContextResponseValidation(t *testing.T) {
 	}
 }
 
-func TestQueryAttachedDocumentsToolDefinition(t *testing.T) {
+func TestQueryDocumentToolDefinition(t *testing.T) {
 	t.Parallel()
 
-	def := QueryAttachedDocumentsToolDefinition()
-	if def["name"] != ToolNameQueryAttachedDocuments {
-		t.Fatalf("name = %v, want %q", def["name"], ToolNameQueryAttachedDocuments)
+	def := QueryDocumentToolDefinition()
+	if def["name"] != ToolNameQueryDocument {
+		t.Fatalf("name = %v, want %q", def["name"], ToolNameQueryDocument)
+	}
+	if def["strict"] != true {
+		t.Fatalf("strict = %v, want true", def["strict"])
 	}
 	params, ok := def["parameters"].(map[string]any)
 	if !ok {
@@ -197,10 +200,28 @@ func TestQueryAttachedDocumentsToolDefinition(t *testing.T) {
 	if !ok {
 		t.Fatalf("properties = %#v, want map[string]any", params["properties"])
 	}
-	if _, ok := props["document_ids"]; !ok {
-		t.Fatal("document_ids property missing")
+	docIDProp, ok := props["document_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("document_id property missing or wrong shape: %#v", props["document_id"])
+	}
+	if docIDProp["type"] != "integer" {
+		t.Fatalf("document_id type = %v, want integer", docIDProp["type"])
 	}
 	if _, ok := props["task"]; !ok {
 		t.Fatal("task property missing")
+	}
+	if _, ok := props["document_ids"]; ok {
+		t.Fatal("legacy document_ids property should be gone after refactor")
+	}
+	required, ok := params["required"].([]string)
+	if !ok {
+		t.Fatalf("required = %#v, want []string", params["required"])
+	}
+	wantRequired := map[string]bool{"document_id": true, "task": true}
+	for _, r := range required {
+		delete(wantRequired, r)
+	}
+	if len(wantRequired) != 0 {
+		t.Fatalf("required missing fields: %v (got %v)", wantRequired, required)
 	}
 }

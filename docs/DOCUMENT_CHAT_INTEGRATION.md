@@ -18,7 +18,7 @@ It is meant to answer three questions quickly:
 - `docsplitter` turns PDFs into manifests plus page images
 - chat threads can attach document IDs
 - attached documents are advertised to the model at send time
-- the model can call `query_attached_documents`
+- the model can call `query_document`
 - each requested document query runs as a normal child thread
 - the worker is still the only process that talks to OpenAI
 
@@ -39,7 +39,7 @@ It does not participate in thread execution.
 Owns document-adjacent runtime preparation:
 
 - build runtime-context augmentation for attached documents
-- inject the `query_attached_documents` tool definition
+- inject the `query_document` tool definition
 - build prepared input artifacts for first-touch document warmups
 
 It does not open OpenAI sockets and does not execute document queries.
@@ -50,7 +50,7 @@ Owns OpenAI execution:
 
 - build and send `response.create`
 - stream socket events
-- detect `query_attached_documents`
+- detect `query_document`
 - spawn one child thread per document
 - regroup child results
 - update shared base anchors when warmups complete
@@ -79,7 +79,7 @@ Preferred path:
 
 - call `documenthandler` via `doc.runtime_context`
 - append an `<available_documents>` block to `instructions`
-- inject `query_attached_documents` into `tools`
+- inject `query_document` into `tools`
 
 Fallback path:
 
@@ -87,27 +87,26 @@ Fallback path:
 
 ### 3. The model chooses the tool
 
-If the model emits a `function_call` named `query_attached_documents`, the actor captures it during `streamUntilTerminal`.
+If the model emits a `function_call` named `query_document`, the actor captures it during `streamUntilTerminal`. The model is expected to emit one `query_document` call per document it wants to query — in parallel when asking multiple documents different questions in the same turn.
 
 The tool shape is:
 
 ```json
 {
   "type": "function",
-  "name": "query_attached_documents",
+  "name": "query_document",
   "parameters": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "document_ids": {
-        "type": "array",
-        "items": { "type": "string" }
+      "document_id": {
+        "type": "integer"
       },
       "task": {
         "type": "string"
       }
     },
-    "required": ["document_ids", "task"]
+    "required": ["document_id", "task"]
   }
 }
 ```
@@ -216,7 +215,7 @@ Already implemented:
 - persist `attached_document_ids` on thread create/resume
 - hydrate attached documents on thread load and websocket snapshot
 - inject document availability into runtime context
-- dispatch `query_attached_documents`
+- dispatch `query_document`
 - show per-document query model and base-anchor metadata in the PDF viewer details drawer
 - `PATCH /documents/:id` support for updating `query_model` and clearing stored base-anchor fields
 
@@ -224,7 +223,7 @@ Still true:
 
 - documents are not injected into the parent thread as raw page payloads
 - the parent thread only sees attachment metadata plus tool availability
-- child thread tools filter out `query_attached_documents`
+- child thread tools filter out `query_document`
 - the composer still does not support a document-only send without text or image input
 
 ## Relevant Files

@@ -1932,7 +1932,7 @@ func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, d
 	if err != nil {
 		return err
 	}
-	rawTools, err = appendQueryAttachedDocumentsToolLocal(rawTools)
+	rawTools, err = appendQueryDocumentToolLocal(rawTools)
 	if err != nil {
 		return err
 	}
@@ -2023,7 +2023,7 @@ func escapePromptAttributeLocal(value string) string {
 	return replacer.Replace(value)
 }
 
-func appendQueryAttachedDocumentsToolLocal(raw json.RawMessage) (json.RawMessage, error) {
+func appendQueryDocumentToolLocal(raw json.RawMessage) (json.RawMessage, error) {
 	var tools []map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {
@@ -2033,12 +2033,12 @@ func appendQueryAttachedDocumentsToolLocal(raw json.RawMessage) (json.RawMessage
 
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == doccmd.ToolNameQueryAttachedDocuments {
+		if name == doccmd.ToolNameQueryDocument {
 			return raw, nil
 		}
 	}
 
-	tools = append(tools, doccmd.QueryAttachedDocumentsToolDefinition())
+	tools = append(tools, doccmd.QueryDocumentToolDefinition())
 	encoded, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("marshal local document runtime tools: %w", err)
@@ -2047,8 +2047,8 @@ func appendQueryAttachedDocumentsToolLocal(raw json.RawMessage) (json.RawMessage
 }
 
 type docQueryRequest struct {
-	DocumentIDs []int64 `json:"document_ids"`
-	Task        string  `json:"task"`
+	DocumentID int64  `json:"document_id"`
+	Task       string `json:"task"`
 }
 
 type docQueryCall struct {
@@ -2057,9 +2057,9 @@ type docQueryCall struct {
 }
 
 type docQueryRoundCall struct {
-	CallID      string  `json:"call_id"`
-	DocumentIDs []int64 `json:"document_ids,omitempty"`
-	Task        string  `json:"task,omitempty"`
+	CallID     string `json:"call_id"`
+	DocumentID int64  `json:"document_id,omitempty"`
+	Task       string `json:"task,omitempty"`
 }
 
 type docQueryDocWork struct {
@@ -2070,18 +2070,13 @@ type docQueryDocWork struct {
 func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 	var req docQueryRequest
 	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
-		return docQueryRequest{}, fmt.Errorf("decode %s arguments: %w", doccmd.ToolNameQueryAttachedDocuments, err)
+		return docQueryRequest{}, fmt.Errorf("decode %s arguments: %w", doccmd.ToolNameQueryDocument, err)
 	}
-	if len(req.DocumentIDs) == 0 {
-		return docQueryRequest{}, fmt.Errorf("%s requires at least one document_id", doccmd.ToolNameQueryAttachedDocuments)
-	}
-	for _, documentID := range req.DocumentIDs {
-		if documentID <= 0 {
-			return docQueryRequest{}, fmt.Errorf("%s requires positive document_ids", doccmd.ToolNameQueryAttachedDocuments)
-		}
+	if req.DocumentID <= 0 {
+		return docQueryRequest{}, fmt.Errorf("%s requires a positive document_id", doccmd.ToolNameQueryDocument)
 	}
 	if strings.TrimSpace(req.Task) == "" {
-		return docQueryRequest{}, fmt.Errorf("%s requires a non-empty task", doccmd.ToolNameQueryAttachedDocuments)
+		return docQueryRequest{}, fmt.Errorf("%s requires a non-empty task", doccmd.ToolNameQueryDocument)
 	}
 	return req, nil
 }
@@ -2205,7 +2200,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 						}
 						pendingSpawn = &req
 						pendingSpawnCallID = call.CallID
-					} else if err == nil && call.Name == doccmd.ToolNameQueryAttachedDocuments {
+					} else if err == nil && call.Name == doccmd.ToolNameQueryDocument {
 						req, err := decodeDocQueryRequest(call.Arguments)
 						if err != nil {
 							a.logger.Warn("invalid document query arguments, falling back to waiting_tool",
@@ -2915,9 +2910,9 @@ func outputItemSemanticAttrs(itemRaw json.RawMessage) []any {
 	}
 
 	switch call.Name {
-	case doccmd.ToolNameQueryAttachedDocuments:
+	case doccmd.ToolNameQueryDocument:
 		if req, ok := decodeDocQueryRequestForLog(call.Arguments); ok {
-			attrs = append(attrs, "document_count", len(req.DocumentIDs))
+			attrs = append(attrs, "document_id", req.DocumentID)
 		}
 	case "spawn_threads":
 		if req, ok := decodeSpawnRequestForLog(call.Arguments); ok {
@@ -2933,7 +2928,7 @@ func outputItemSemanticAttrs(itemRaw json.RawMessage) []any {
 
 func classifyFunctionCallName(name string) string {
 	switch strings.TrimSpace(name) {
-	case doccmd.ToolNameQueryAttachedDocuments:
+	case doccmd.ToolNameQueryDocument:
 		return "document_query"
 	case "spawn_threads":
 		return "spawn_threads"
@@ -2949,8 +2944,7 @@ func decodeDocQueryRequestForLog(arguments string) (docQueryRequest, bool) {
 	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
 		return docQueryRequest{}, false
 	}
-	req.DocumentIDs = uniqueDocumentIDsPreserveOrder(req.DocumentIDs)
-	return req, len(req.DocumentIDs) > 0
+	return req, req.DocumentID > 0
 }
 
 func decodeSpawnRequestForLog(arguments string) (spawnRequest, bool) {
@@ -3057,22 +3051,17 @@ func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []thread
 	outputItems := make([]map[string]any, 0, len(callBindings))
 	for _, binding := range callBindings {
 		filteredChildren := children
-		if len(binding.DocumentIDs) > 0 {
-			allowedDocumentIDs := make(map[int64]struct{}, len(binding.DocumentIDs))
-			for _, documentID := range binding.DocumentIDs {
-				allowedDocumentIDs[documentID] = struct{}{}
-			}
-
+		if binding.DocumentID > 0 {
 			filteredChildren = make([]map[string]any, 0, len(children))
 			for _, child := range children {
-				documentID, ok := child["document_id"].(int64)
-				if !ok {
-					documentIDFloat, ok := child["document_id"].(float64)
-					if ok {
-						documentID = int64(documentIDFloat)
-					}
+				var documentID int64
+				switch v := child["document_id"].(type) {
+				case int64:
+					documentID = v
+				case float64:
+					documentID = int64(v)
 				}
-				if _, ok := allowedDocumentIDs[documentID]; ok {
+				if documentID == binding.DocumentID {
 					filteredChildren = append(filteredChildren, child)
 				}
 			}
@@ -3082,8 +3071,8 @@ func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []thread
 			"spawn_group_id": spawn.ID,
 			"children":       filteredChildren,
 		}
-		if len(binding.DocumentIDs) > 0 {
-			outputPayload["document_ids"] = binding.DocumentIDs
+		if binding.DocumentID > 0 {
+			outputPayload["document_id"] = binding.DocumentID
 		}
 		if strings.TrimSpace(binding.Task) != "" {
 			outputPayload["task"] = binding.Task
@@ -3350,14 +3339,13 @@ func normalizeDocQueryRoundCalls(calls []docQueryCall) []docQueryRoundCall {
 		if callID == "" {
 			continue
 		}
-		documentIDs := uniqueDocumentIDsPreserveOrder(call.Request.DocumentIDs)
-		if len(documentIDs) == 0 {
+		if call.Request.DocumentID <= 0 {
 			continue
 		}
 		normalized = append(normalized, docQueryRoundCall{
-			CallID:      callID,
-			DocumentIDs: documentIDs,
-			Task:        strings.TrimSpace(call.Request.Task),
+			CallID:     callID,
+			DocumentID: call.Request.DocumentID,
+			Task:       strings.TrimSpace(call.Request.Task),
 		})
 	}
 	return normalized
@@ -3368,15 +3356,16 @@ func buildDocQueryDocWork(calls []docQueryRoundCall) []docQueryDocWork {
 	ordered := make([]docQueryDocWork, 0, len(calls))
 
 	for _, call := range calls {
-		for _, documentID := range call.DocumentIDs {
-			work, ok := byDocumentID[documentID]
-			if !ok {
-				ordered = append(ordered, docQueryDocWork{DocumentID: documentID})
-				work = &ordered[len(ordered)-1]
-				byDocumentID[documentID] = work
-			}
-			work.Calls = append(work.Calls, call)
+		if call.DocumentID <= 0 {
+			continue
 		}
+		work, ok := byDocumentID[call.DocumentID]
+		if !ok {
+			ordered = append(ordered, docQueryDocWork{DocumentID: call.DocumentID})
+			work = &ordered[len(ordered)-1]
+			byDocumentID[call.DocumentID] = work
+		}
+		work.Calls = append(work.Calls, call)
 	}
 
 	return ordered
@@ -3388,7 +3377,7 @@ func buildDocQueryDocTask(calls []docQueryRoundCall) string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("Multiple query_attached_documents requests from the same parent response need answers for this document. Respond with clearly labeled sections for each parent call.\n\n")
+	builder.WriteString("Multiple query_document requests from the same parent response target this document. Respond with clearly labeled sections for each parent call.\n\n")
 	builder.WriteString("<parent_calls>\n")
 	for _, call := range calls {
 		builder.WriteString(`<call id="`)
@@ -3449,8 +3438,8 @@ func roundCallsToPendingCalls(calls []docQueryRoundCall) []docQueryCall {
 		pending = append(pending, docQueryCall{
 			CallID: call.CallID,
 			Request: docQueryRequest{
-				DocumentIDs: append([]int64(nil), call.DocumentIDs...),
-				Task:        call.Task,
+				DocumentID: call.DocumentID,
+				Task:       call.Task,
 			},
 		})
 	}
@@ -3673,19 +3662,6 @@ func sanitizeStableDocumentIDPart(raw string) string {
 		}
 	}
 	return strings.Trim(builder.String(), "_")
-}
-
-func uniqueDocumentIDsPreserveOrder(values []int64) []int64 {
-	seen := make(map[int64]bool, len(values))
-	deduped := make([]int64, 0, len(values))
-	for _, value := range values {
-		if seen[value] {
-			continue
-		}
-		seen[value] = true
-		deduped = append(deduped, value)
-	}
-	return deduped
 }
 
 func formatDocumentIDLocal(id int64) string {

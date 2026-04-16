@@ -21,7 +21,7 @@ const (
 	PrepareStatusError             = "error"
 	PrepareStatusNoop              = "noop"
 	PrepareStatusPending           = "pending"
-	ToolNameQueryAttachedDocuments = "query_attached_documents"
+	ToolNameQueryDocument = "query_document"
 )
 
 type SplitCommand struct {
@@ -229,27 +229,26 @@ func validateRuntimeContextResponse(resp RuntimeContextResponse) error {
 	return nil
 }
 
-func QueryAttachedDocumentsToolDefinition() map[string]any {
+func QueryDocumentToolDefinition() map[string]any {
 	return map[string]any{
 		"type":        "function",
-		"name":        ToolNameQueryAttachedDocuments,
-		"description": "Query one or more attached documents. Each document has all of its pages already loaded into a separate analysis session. Prefer a single call per response: include every needed document ID in document_ids instead of making multiple query_attached_documents calls in the same turn. Describe what you need in the task field; mention specific page numbers there if needed.",
+		"name":        ToolNameQueryDocument,
+		"description": "Query a single attached document. Each document has all of its pages already loaded into a separate analysis session. Call this tool in parallel — once per document — when you need to ask multiple documents different questions in the same turn. The available document IDs and filenames are listed in the <available_documents> block. Describe what you need in the task field; mention specific page numbers there if needed.",
 		"strict":      true,
 		"parameters": map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
 			"properties": map[string]any{
-				"document_ids": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "integer"},
-					"description": "IDs of the attached documents to query.",
+				"document_id": map[string]any{
+					"type":        "integer",
+					"description": "ID of the attached document to query.",
 				},
 				"task": map[string]any{
 					"type":        "string",
-					"description": "What to look for or ask about in the documents.",
+					"description": "What to look for or ask about in this document.",
 				},
 			},
-			"required": []string{"document_ids", "task"},
+			"required": []string{"document_id", "task"},
 		},
 	}
 }

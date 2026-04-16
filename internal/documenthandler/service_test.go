@@ -164,8 +164,8 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	if len(tools) != 2 {
 		t.Fatalf("tools length = %d, want 2", len(tools))
 	}
-	if tools[1]["name"] != doccmd.ToolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryAttachedDocuments)
+	if tools[1]["name"] != doccmd.ToolNameQueryDocument {
+		t.Fatalf("tool name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryDocument)
 	}
 }
 

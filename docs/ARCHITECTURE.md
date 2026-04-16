@@ -58,7 +58,7 @@ flowchart LR
 ## Document Query Model
 
 - Thread attachments live in `thread_documents`.
-- Send-time runtime context advertises attached documents and injects `query_attached_documents`.
+- Send-time runtime context advertises attached documents and injects `query_document`.
 - When the model chooses that tool, the worker spawns one child thread per requested document.
 - Those child threads persist, publish events, and recover exactly like any other thread.
 

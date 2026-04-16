@@ -185,8 +185,8 @@ func TestAggregateSpawnOutputItemForMultipleDocumentQueryCalls(t *testing.T) {
 	t.Parallel()
 
 	parentCallID, err := encodeDocQueryRoundCalls([]docQueryRoundCall{
-		{CallID: "call_parent_1", DocumentIDs: []int64{1}, Task: "Summarize doc 1"},
-		{CallID: "call_parent_2", DocumentIDs: []int64{2}, Task: "Summarize doc 2"},
+		{CallID: "call_parent_1", DocumentID: 1, Task: "Summarize doc 1"},
+		{CallID: "call_parent_2", DocumentID: 2, Task: "Summarize doc 2"},
 	})
 	if err != nil {
 		t.Fatalf("encodeDocQueryRoundCalls() error = %v", err)
@@ -720,7 +720,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 				RequestID:    req.RequestID,
 				Status:       doccmd.PrepareStatusOK,
 				Instructions: "Be concise.\n\n<available_documents>\n<document id=\"1\" name=\"report.pdf\" />\n</available_documents>",
-				Tools:        json.RawMessage(`[{"type":"function","name":"lookup"},{"type":"function","name":"query_attached_documents"}]`),
+				Tools:        json.RawMessage(`[{"type":"function","name":"lookup"},{"type":"function","name":"query_document"}]`),
 			}, nil
 		}),
 	}
@@ -742,8 +742,8 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 	if !ok || len(tools) != 2 {
 		t.Fatalf("tools = %#v, want 2 tools", payload["tools"])
 	}
-	if toolParamName(tools[1]) != doccmd.ToolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryAttachedDocuments)
+	if toolParamName(tools[1]) != doccmd.ToolNameQueryDocument {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryDocument)
 	}
 }
 
@@ -815,8 +815,8 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 	if !ok || len(tools) != 2 {
 		t.Fatalf("tools = %#v, want lookup plus document query tool", payload["tools"])
 	}
-	if toolParamName(tools[1]) != doccmd.ToolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryAttachedDocuments)
+	if toolParamName(tools[1]) != doccmd.ToolNameQueryDocument {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryDocument)
 	}
 }
 
@@ -857,7 +857,7 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 				RequestID:    req.RequestID,
 				Status:       doccmd.PrepareStatusOK,
 				Instructions: req.Instructions,
-				Tools:        json.RawMessage(`[{"type":"function","name":"query_attached_documents"}]`),
+				Tools:        json.RawMessage(`[{"type":"function","name":"query_document"}]`),
 			}, nil
 		}),
 	}
@@ -884,8 +884,8 @@ func TestBuildThreadResponseCreatePayloadAddsRequiredIncludeAndDocumentTool(t *t
 	if !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want 1 tool", payload["tools"])
 	}
-	if toolParamName(tools[0]) != doccmd.ToolNameQueryAttachedDocuments {
-		t.Fatalf("tool name = %q, want %q", toolParamName(tools[0]), doccmd.ToolNameQueryAttachedDocuments)
+	if toolParamName(tools[0]) != doccmd.ToolNameQueryDocument {
+		t.Fatalf("tool name = %q, want %q", toolParamName(tools[0]), doccmd.ToolNameQueryDocument)
 	}
 }
 
@@ -1136,7 +1136,7 @@ func TestFilterChildThreadToolChoiceDropsInternalFunctionChoices(t *testing.T) {
 		},
 		{
 			name: "attached documents",
-			raw:  `{"type":"function","name":"query_attached_documents"}`,
+			raw:  `{"type":"function","name":"query_document"}`,
 		},
 	}
 
@@ -1164,7 +1164,7 @@ func TestFilterChildThreadToolChoiceFiltersAllowedTools(t *testing.T) {
 		"mode":"required",
 		"tools":[
 			{"type":"function","name":"spawn_threads"},
-			{"type":"function","name":"query_attached_documents"},
+			{"type":"function","name":"query_document"},
 			{"type":"function","name":"keep_tool"},
 			{"type":"web_search_preview"}
 		]
@@ -1218,7 +1218,7 @@ func TestFilterChildThreadToolChoiceDropsEmptyAllowedTools(t *testing.T) {
 		"mode":"required",
 		"tools":[
 			{"type":"function","name":"spawn_threads"},
-			{"type":"function","name":"query_attached_documents"}
+			{"type":"function","name":"query_document"}
 		]
 	}`)
 	if err != nil {
@@ -2443,31 +2443,36 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 func TestDecodeDocQueryRequest(t *testing.T) {
 	t.Parallel()
 
-	req, err := decodeDocQueryRequest(`{"document_ids":[1,2],"task":"summarize findings"}`)
+	req, err := decodeDocQueryRequest(`{"document_id":7,"task":"summarize findings"}`)
 	if err != nil {
 		t.Fatalf("decodeDocQueryRequest() error = %v", err)
 	}
-	if len(req.DocumentIDs) != 2 {
-		t.Fatalf("document_ids count = %d, want 2", len(req.DocumentIDs))
+	if req.DocumentID != 7 {
+		t.Fatalf("document_id = %d, want 7", req.DocumentID)
 	}
 	if req.Task != "summarize findings" {
 		t.Fatalf("task = %q, want %q", req.Task, "summarize findings")
 	}
 }
 
-func TestDecodeDocQueryRequestRejectsEmptyDocumentIDs(t *testing.T) {
+func TestDecodeDocQueryRequestRejectsNonPositiveDocumentID(t *testing.T) {
 	t.Parallel()
 
-	_, err := decodeDocQueryRequest(`{"document_ids":[],"task":"summarize"}`)
-	if err == nil {
-		t.Fatal("expected error for empty document_ids")
+	for _, args := range []string{
+		`{"document_id":0,"task":"summarize"}`,
+		`{"document_id":-1,"task":"summarize"}`,
+		`{"task":"summarize"}`,
+	} {
+		if _, err := decodeDocQueryRequest(args); err == nil {
+			t.Fatalf("expected error for args %q", args)
+		}
 	}
 }
 
 func TestDecodeDocQueryRequestRejectsEmptyTask(t *testing.T) {
 	t.Parallel()
 
-	_, err := decodeDocQueryRequest(`{"document_ids":[1],"task":""}`)
+	_, err := decodeDocQueryRequest(`{"document_id":1,"task":""}`)
 	if err == nil {
 		t.Fatal("expected error for empty task")
 	}
@@ -2488,13 +2493,16 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	}
 
 	meta := threadstore.ThreadMeta{ID: tid("thread_123"), RootThreadID: tid("thread_123")}
-	_, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
-		CallID: "call_1",
-		Request: docQueryRequest{
-			DocumentIDs: []int64{1, 999},
-			Task:        "summarize",
+	_, err := actor.startDocumentQueryGroup(meta, []docQueryCall{
+		{
+			CallID:  "call_1",
+			Request: docQueryRequest{DocumentID: 1, Task: "summarize"},
 		},
-	}})
+		{
+			CallID:  "call_2",
+			Request: docQueryRequest{DocumentID: 999, Task: "summarize other"},
+		},
+	})
 	if err == nil {
 		t.Fatal("expected error for unattached document")
 	}
@@ -2506,7 +2514,7 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 func TestFilterChildThreadToolsRemovesDocumentQueryTool(t *testing.T) {
 	t.Parallel()
 
-	filtered, err := filterChildThreadTools(`[{"type":"function","name":"query_attached_documents"},{"type":"function","name":"lookup"}]`)
+	filtered, err := filterChildThreadTools(`[{"type":"function","name":"query_document"},{"type":"function","name":"lookup"}]`)
 	if err != nil {
 		t.Fatalf("filterChildThreadTools() error = %v", err)
 	}
@@ -2573,8 +2581,8 @@ func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testi
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []int64{1},
-			Task:        "summarize",
+			DocumentID: 1,
+			Task:       "summarize",
 		},
 	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
@@ -2652,8 +2660,8 @@ func TestStartDocumentQueryGroupUsesLatestReadyDocumentChildLineage(t *testing.T
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []int64{1},
-			Task:        "summarize",
+			DocumentID: 1,
+			Task:       "summarize",
 		},
 	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
@@ -2722,8 +2730,8 @@ func TestStartDocumentQueryGroupUsesBaseAnchorWhenNoChildLineage(t *testing.T) {
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []int64{1},
-			Task:        "summarize",
+			DocumentID: 1,
+			Task:       "summarize",
 		},
 	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
@@ -2801,8 +2809,8 @@ func TestStartDocumentQueryGroupUsesWarmupChildWhenNoLineageOrBaseAnchor(t *test
 	if _, err := actor.startDocumentQueryGroup(meta, []docQueryCall{{
 		CallID: "call_1",
 		Request: docQueryRequest{
-			DocumentIDs: []int64{1, 1},
-			Task:        "summarize",
+			DocumentID: 1,
+			Task:       "summarize",
 		},
 	}}); err != nil {
 		t.Fatalf("startDocumentQueryGroup() error = %v", err)
@@ -3014,8 +3022,8 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	funcCallItem := `{
 		"type":"function_call",
 		"call_id":"call_doc_1",
-		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[1],\"task\":\"summarize\"}"
+		"name":"query_document",
+		"arguments":"{\"document_id\":1,\"task\":\"summarize\"}"
 	}`
 	conn := &actorTestConn{
 		reads: [][]byte{
@@ -3080,14 +3088,14 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	funcCallItem1 := `{
 		"type":"function_call",
 		"call_id":"call_doc_1",
-		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[1],\"task\":\"summarize doc 1\"}"
+		"name":"query_document",
+		"arguments":"{\"document_id\":1,\"task\":\"summarize doc 1\"}"
 	}`
 	funcCallItem2 := `{
 		"type":"function_call",
 		"call_id":"call_doc_2",
-		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[2],\"task\":\"summarize doc 2\"}"
+		"name":"query_document",
+		"arguments":"{\"document_id\":2,\"task\":\"summarize doc 2\"}"
 	}`
 	conn := &actorTestConn{
 		reads: [][]byte{
@@ -3799,21 +3807,21 @@ func TestOutputItemSemanticAttrsForDocumentQuery(t *testing.T) {
 	attrs := attrsMap(outputItemSemanticAttrs(json.RawMessage(`{
 		"type":"function_call",
 		"call_id":"call_doc_123",
-		"name":"query_attached_documents",
-		"arguments":"{\"document_ids\":[1,2,1],\"task\":\"Summarize page 1\"}"
+		"name":"query_document",
+		"arguments":"{\"document_id\":42,\"task\":\"Summarize page 1\"}"
 	}`)))
 
 	if attrs["call_id"] != "call_doc_123" {
 		t.Fatalf("call_id = %v, want call_doc_123", attrs["call_id"])
 	}
-	if attrs["call_name"] != "query_attached_documents" {
-		t.Fatalf("call_name = %v, want query_attached_documents", attrs["call_name"])
+	if attrs["call_name"] != "query_document" {
+		t.Fatalf("call_name = %v, want query_document", attrs["call_name"])
 	}
 	if attrs["call_kind"] != "document_query" {
 		t.Fatalf("call_kind = %v, want document_query", attrs["call_kind"])
 	}
-	if attrs["document_count"] != 2 {
-		t.Fatalf("document_count = %v, want 2", attrs["document_count"])
+	if attrs["document_id"] != int64(42) {
+		t.Fatalf("document_id = %v, want 42", attrs["document_id"])
 	}
 }
 
@@ -3859,8 +3867,8 @@ func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
 			"item":{
 				"type":"function_call",
 				"call_id":"call_doc_123",
-				"name":"query_attached_documents",
-				"arguments":"{\"document_ids\":[1,2],\"task\":\"Summarize page 1\"}"
+				"name":"query_document",
+				"arguments":"{\"document_id\":7,\"task\":\"Summarize page 1\"}"
 			}
 		}`),
 	})
@@ -3874,9 +3882,9 @@ func TestLogOutputItemEventIncludesThreadGraphAndCallAttrs(t *testing.T) {
 		`parent_call_id=call_parent`,
 		`depth=1`,
 		`call_id=call_doc_123`,
-		`call_name=query_attached_documents`,
+		`call_name=query_document`,
 		`call_kind=document_query`,
-		`document_count=2`,
+		`document_id=7`,
 	} {
 		if !strings.Contains(logs, needle) {
 			t.Fatalf("logs = %q, want %s", logs, needle)

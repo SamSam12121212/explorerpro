@@ -39,7 +39,7 @@ Typical flow:
 ## Document Queries
 
 - attached documents are discovered from `thread_documents` before `response.create`
-- runtime context appends `<available_documents>` and injects `query_attached_documents`
+- runtime context appends `<available_documents>` and injects `query_document`
 - when the model calls that tool, the actor spawns one child thread per requested document
 - follow-up queries branch from the latest completed document-query child lineage; first-touch queries reuse a compatible shared base anchor or run a warmup child before the real query child
 - document queries do not use a separate executor runtime
