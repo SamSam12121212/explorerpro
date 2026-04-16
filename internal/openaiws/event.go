@@ -29,7 +29,7 @@ const (
 	EventTypeResponseIncomplete                 EventType = "response.incomplete"
 	EventTypeResponseRefusalDone                EventType = "response.refusal.done"
 	EventTypeResponseFunctionCallArgumentsDelta EventType = "response.function_call_arguments.delta"
-	EventTypeResponseFunctionArgsDone           EventType = "response.function_call_arguments.done"
+	EventTypeResponseFunctionCallArgumentsDone  EventType = "response.function_call_arguments.done"
 )
 
 func (t EventType) IsTerminal() bool {

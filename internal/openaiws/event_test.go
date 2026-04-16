@@ -19,7 +19,7 @@ func TestEventTypeIsToolCallDelta(t *testing.T) {
 	if !EventTypeResponseFunctionCallArgumentsDelta.IsToolCallDelta() {
 		t.Fatal("function_call_arguments.delta should report IsToolCallDelta")
 	}
-	if EventTypeResponseFunctionArgsDone.IsToolCallDelta() {
+	if EventTypeResponseFunctionCallArgumentsDone.IsToolCallDelta() {
 		t.Fatal("function_call_arguments.done is not a delta")
 	}
 	if EventTypeResponseReasoningTextDelta.IsToolCallDelta() {
