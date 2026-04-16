@@ -18,7 +18,7 @@ function bubbleClass(role: MessageRole) {
   }
 }
 
-export function ChatPanel() {
+export function ThreadPanel() {
   const {
     busy,
     draft,
@@ -96,9 +96,14 @@ export function ChatPanel() {
         )}
 
         <div className="flex flex-col gap-3">
-          {messages.map((msg) => (
+          {messages.filter((m) => m.text || (m.images?.length ?? 0) > 0).map((msg) => (
             <article className={bubbleClass(msg.role)} key={msg.id}>
-              {msg.text && <p className="m-0 whitespace-pre-wrap">{msg.text}</p>}
+              {msg.text && (
+                <p className="m-0 whitespace-pre-wrap">
+                  {msg.text}
+                  {msg.streaming && <span className="streaming-caret" />}
+                </p>
+              )}
 
               {msg.images && msg.images.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-2">
@@ -121,7 +126,7 @@ export function ChatPanel() {
             </article>
           )}
 
-          {busy && !thinking && (
+          {busy && !thinking && !messages.some((m) => m.streaming && m.text) && (
             <div className="self-start px-4 py-3">
               <div className="inline-flex gap-1">
                 <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[#888]" />

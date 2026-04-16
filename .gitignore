@@ -7,5 +7,6 @@ dist/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 blob-storage/*
 !blob-storage/.gitkeep

@@ -22,12 +22,13 @@ export interface UploadedImage {
   preview_url: string;
 }
 
-export interface ChatMessage {
+export interface ThreadMessage {
   id: string;
   role: MessageRole;
   text: string;
   images?: UploadedImage[];
   optimistic?: boolean;
+  streaming?: boolean;
 }
 
 export interface HealthResponse {
