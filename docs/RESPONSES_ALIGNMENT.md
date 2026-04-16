@@ -189,7 +189,7 @@ The next typed request-shape slice is now done too.
 - direct request payloads and stored thread `tool_choice` state now both normalize through that same typed builder path
 - child-thread filtering now reuses the same typed `tool_choice` decode instead of assuming the payload is always a JSON object
 - child filtering now correctly preserves string modes such as `"auto"` and `"required"`
-- child filtering now drops runtime-only function choices for `spawn_threads` and `query_attached_documents`
+- child filtering now drops runtime-only function choices for `spawn_threads` and `query_document`
 - `allowed_tools` child filtering now strips those runtime-only function definitions while keeping any remaining allowed tools intact
 
 ### Why this is better

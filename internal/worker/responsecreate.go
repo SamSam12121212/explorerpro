@@ -328,7 +328,7 @@ func toolDefinitionName(tool map[string]any) string {
 
 func isInternalRuntimeToolName(name string) bool {
 	switch name {
-	case "spawn_threads", doccmd.ToolNameQueryAttachedDocuments:
+	case "spawn_threads", doccmd.ToolNameQueryDocument:
 		return true
 	default:
 		return false

@@ -331,7 +331,7 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 	}
 
 	instructions = appendAvailableDocumentsBlock(instructions, documents)
-	tools, err = appendQueryAttachedDocumentsTool(tools)
+	tools, err = appendQueryDocumentTool(tools)
 	if err != nil {
 		return doccmd.RuntimeContextResponse{
 			RequestID: req.RequestID,
@@ -539,7 +539,7 @@ func formatDocumentID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
-func appendQueryAttachedDocumentsTool(raw json.RawMessage) (json.RawMessage, error) {
+func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 	var tools []map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {
@@ -549,12 +549,12 @@ func appendQueryAttachedDocumentsTool(raw json.RawMessage) (json.RawMessage, err
 
 	for _, tool := range tools {
 		name, _ := tool["name"].(string)
-		if name == doccmd.ToolNameQueryAttachedDocuments {
+		if name == doccmd.ToolNameQueryDocument {
 			return raw, nil
 		}
 	}
 
-	tools = append(tools, doccmd.QueryAttachedDocumentsToolDefinition())
+	tools = append(tools, doccmd.QueryDocumentToolDefinition())
 	encoded, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("marshal runtime context tools: %w", err)

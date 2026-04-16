@@ -10,25 +10,26 @@ import (
 type EventType string
 
 const (
-	EventTypeError                             EventType = "error"
-	EventTypeResponseCreate                    EventType = "response.create"
-	EventTypeResponseCreated                   EventType = "response.created"
-	EventTypeResponseInProgress                EventType = "response.in_progress"
-	EventTypeResponseOutputItemAdded           EventType = "response.output_item.added"
-	EventTypeResponseOutputItemDone            EventType = "response.output_item.done"
-	EventTypeResponseReasoningSummaryPartAdded EventType = "response.reasoning_summary_part.added"
-	EventTypeResponseReasoningSummaryPartDone  EventType = "response.reasoning_summary_part.done"
-	EventTypeResponseReasoningSummaryTextDelta EventType = "response.reasoning_summary_text.delta"
-	EventTypeResponseReasoningSummaryTextDone  EventType = "response.reasoning_summary_text.done"
-	EventTypeResponseReasoningTextDelta        EventType = "response.reasoning_text.delta"
-	EventTypeResponseReasoningTextDone         EventType = "response.reasoning_text.done"
-	EventTypeResponseOutputTextDelta           EventType = "response.output_text.delta"
-	EventTypeResponseOutputTextDone            EventType = "response.output_text.done"
-	EventTypeResponseCompleted                 EventType = "response.completed"
-	EventTypeResponseFailed                    EventType = "response.failed"
-	EventTypeResponseIncomplete                EventType = "response.incomplete"
-	EventTypeResponseRefusalDone               EventType = "response.refusal.done"
-	EventTypeResponseFunctionArgsDone          EventType = "response.function_call_arguments.done"
+	EventTypeError                              EventType = "error"
+	EventTypeResponseCreate                     EventType = "response.create"
+	EventTypeResponseCreated                    EventType = "response.created"
+	EventTypeResponseInProgress                 EventType = "response.in_progress"
+	EventTypeResponseOutputItemAdded            EventType = "response.output_item.added"
+	EventTypeResponseOutputItemDone             EventType = "response.output_item.done"
+	EventTypeResponseReasoningSummaryPartAdded  EventType = "response.reasoning_summary_part.added"
+	EventTypeResponseReasoningSummaryPartDone   EventType = "response.reasoning_summary_part.done"
+	EventTypeResponseReasoningSummaryTextDelta  EventType = "response.reasoning_summary_text.delta"
+	EventTypeResponseReasoningSummaryTextDone   EventType = "response.reasoning_summary_text.done"
+	EventTypeResponseReasoningTextDelta         EventType = "response.reasoning_text.delta"
+	EventTypeResponseReasoningTextDone          EventType = "response.reasoning_text.done"
+	EventTypeResponseOutputTextDelta            EventType = "response.output_text.delta"
+	EventTypeResponseOutputTextDone             EventType = "response.output_text.done"
+	EventTypeResponseCompleted                  EventType = "response.completed"
+	EventTypeResponseFailed                     EventType = "response.failed"
+	EventTypeResponseIncomplete                 EventType = "response.incomplete"
+	EventTypeResponseRefusalDone                EventType = "response.refusal.done"
+	EventTypeResponseFunctionCallArgumentsDelta EventType = "response.function_call_arguments.delta"
+	EventTypeResponseFunctionCallArgumentsDone  EventType = "response.function_call_arguments.done"
 )
 
 func (t EventType) IsTerminal() bool {
@@ -46,6 +47,15 @@ func (t EventType) IsDelta() bool {
 
 func (t EventType) IsReasoningDelta() bool {
 	return t == EventTypeResponseReasoningSummaryTextDelta || t == EventTypeResponseReasoningTextDelta
+}
+
+// IsToolCallDelta reports whether the event is a streaming delta for a tool
+// call (currently just function-call argument chunks). These are dropped at
+// the worker the same way reasoning deltas are: tool-call UI surfaces the
+// item on `.added` and finalizes on `.done`, so streaming the argument JSON
+// chunks has no consumer today.
+func (t EventType) IsToolCallDelta() bool {
+	return t == EventTypeResponseFunctionCallArgumentsDelta
 }
 
 type ClientEvent struct {
