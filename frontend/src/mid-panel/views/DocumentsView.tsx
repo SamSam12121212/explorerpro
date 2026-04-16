@@ -201,7 +201,7 @@ export function DocumentsView({
                     <span>
                       {attachedDocumentIds.includes(document.id)
                         ? "Attached"
-                        : "Attach to chat"}
+                        : "Attach to thread"}
                     </span>
                   </button>
                 </div>

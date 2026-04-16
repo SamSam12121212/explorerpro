@@ -1,7 +1,7 @@
 import type {
-  ChatMessage,
   MessageRole,
   ThreadItemsResponse,
+  ThreadMessage,
   ThreadStreamPayload,
   UploadedImage,
 } from "../types";
@@ -90,8 +90,8 @@ function extractMessageImages(item: NonNullable<ThreadItemsResponse["items"]>[nu
   });
 }
 
-export function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ChatMessage[] {
-  const messages: ChatMessage[] = [];
+export function buildMessagesFromItems(itemsResponse: ThreadItemsResponse): ThreadMessage[] {
+  const messages: ThreadMessage[] = [];
 
   for (const item of itemsResponse.items ?? []) {
     if (item.item_type !== "message") continue;
@@ -121,36 +121,48 @@ function sameImageRefs(left?: UploadedImage[], right?: UploadedImage[]): boolean
   return (left ?? []).every((image, index) => image.image_ref === right?.[index]?.image_ref);
 }
 
-function sameMessageContent(left: ChatMessage, right: ChatMessage): boolean {
+function sameMessageContent(left: ThreadMessage, right: ThreadMessage): boolean {
   return left.role === right.role && left.text === right.text && sameImageRefs(left.images, right.images);
 }
 
-export function mergeMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  if (incoming.length === 0) return current;
-
-  const merged = [...current];
-  const seen = new Set(
-    current.filter((m) => !m.optimistic).map((m) => m.id),
-  );
-
-  for (const message of incoming) {
-    if (seen.has(message.id)) continue;
-    seen.add(message.id);
-
-    if (message.role === "user") {
-      const optimisticIndex = merged.findIndex(
-        (candidate) => candidate.optimistic && candidate.role === "user" && sameMessageContent(candidate, message),
-      );
-      if (optimisticIndex >= 0) {
-        merged[optimisticIndex] = message;
-        continue;
-      }
-    }
-
-    merged.push(message);
+/**
+ * Insert or replace a single message by id.
+ *
+ * Used for live stream updates (streaming stub → deltas → final `.done` message).
+ * The `.done` replacement is what realizes the "completion is truth" contract:
+ * it overwrites whatever text the deltas had accumulated with the server's
+ * authoritative `output_item.done` payload, and clears the `streaming` flag.
+ *
+ * Also preserves the optimistic-user-merge behavior from `mergeMessages`: an
+ * incoming user message matching an optimistic stub by content replaces the
+ * stub in place (server-assigned id wins).
+ */
+export function upsertMessage(current: ThreadMessage[], incoming: ThreadMessage): ThreadMessage[] {
+  const existingIndex = current.findIndex((m) => m.id === incoming.id);
+  if (existingIndex >= 0) {
+    const next = [...current];
+    next[existingIndex] = incoming;
+    return next;
   }
 
-  return merged;
+  if (incoming.role === "user") {
+    const optimisticIndex = current.findIndex(
+      (candidate) => candidate.optimistic && candidate.role === "user" && sameMessageContent(candidate, incoming),
+    );
+    if (optimisticIndex >= 0) {
+      const next = [...current];
+      next[optimisticIndex] = incoming;
+      return next;
+    }
+  }
+
+  return [...current, incoming];
+}
+
+/** Clear `streaming` flags from any messages that still have one set. */
+export function finalizeStreamingMessages(current: ThreadMessage[]): ThreadMessage[] {
+  if (!current.some((m) => m.streaming)) return current;
+  return current.map((m) => (m.streaming ? { ...m, streaming: undefined } : m));
 }
 
 export function statusMeansBusy(status?: string): boolean {
@@ -172,7 +184,70 @@ type OutputItem = {
   content?: OutputItemContent[];
 };
 
-export function buildMessageFromOutputItemDone(event: Record<string, unknown>): ChatMessage | null {
+/**
+ * Build an empty streaming assistant message from `response.output_item.added`.
+ * Returns null for non-message items (reasoning, function_call, etc).
+ */
+export function buildStreamingMessageFromOutputItemAdded(event: Record<string, unknown>): ThreadMessage | null {
+  const item = event.item as OutputItem | undefined;
+  if (item?.type !== "message") return null;
+  if (!item.id) return null;
+
+  return {
+    id: item.id,
+    role: "assistant",
+    text: "",
+    streaming: true,
+  };
+}
+
+function extractItemId(event: Record<string, unknown>): string | null {
+  const itemId = event.item_id;
+  if (typeof itemId === "string" && itemId.length > 0) return itemId;
+  const item = event.item as OutputItem | undefined;
+  if (item?.id) return item.id;
+  return null;
+}
+
+/**
+ * Apply a `response.output_text.delta` event: append `event.delta` to the
+ * streaming message whose id matches `event.item_id`. If no such message
+ * exists yet (delta-before-added race), create one on demand.
+ *
+ * Returns the input array unchanged if the event carries no text delta or
+ * identifiable item id.
+ */
+export function applyOutputTextDelta(current: ThreadMessage[], event: Record<string, unknown>): ThreadMessage[] {
+  const delta = typeof event.delta === "string" ? event.delta : "";
+  if (!delta) return current;
+
+  const itemId = extractItemId(event);
+  if (!itemId) return current;
+
+  const existingIndex = current.findIndex((m) => m.id === itemId);
+  if (existingIndex >= 0) {
+    const existing = current[existingIndex];
+    const next = [...current];
+    next[existingIndex] = {
+      ...existing,
+      text: existing.text + delta,
+      streaming: true,
+    };
+    return next;
+  }
+
+  return [
+    ...current,
+    {
+      id: itemId,
+      role: "assistant",
+      text: delta,
+      streaming: true,
+    },
+  ];
+}
+
+export function buildMessageFromOutputItemDone(event: Record<string, unknown>): ThreadMessage | null {
   const item = event.item as OutputItem | undefined;
   if (!item || item.type !== "message") return null;
 

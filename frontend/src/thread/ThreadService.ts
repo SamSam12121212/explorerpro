@@ -13,13 +13,16 @@ import type {
 } from "../types";
 import type { ThreadEntry, ThreadState } from "./types";
 import {
+  applyOutputTextDelta,
   buildMessageFromOutputItemDone,
   buildMessagesFromItems,
+  buildStreamingMessageFromOutputItemAdded,
   deriveThinkingFromEvent,
   deriveThinkingFromItems,
+  finalizeStreamingMessages,
   logStreamPayload,
-  mergeMessages,
   statusMeansBusy,
+  upsertMessage,
 } from "./eventInterpreter";
 
 type Listener = () => void;
@@ -445,13 +448,34 @@ export class ThreadService {
       this.setState((s) => ({ ...s, thinking: nextThinking }));
     }
 
-    // Completed output items → append message.
+    // New output item → seed a streaming stub for assistant messages. Deltas
+    // will fill in the text; `.done` replaces with the authoritative payload.
+    if (payload.type === "response.output_item.added") {
+      const stub = buildStreamingMessageFromOutputItemAdded(event);
+      if (stub) {
+        this.setState((s) => ({
+          ...s,
+          messages: upsertMessage(s.messages, stub),
+        }));
+      }
+    }
+
+    // Text delta → append to the streaming message keyed by item_id.
+    if (payload.type === "response.output_text.delta") {
+      this.setState((s) => ({
+        ...s,
+        messages: applyOutputTextDelta(s.messages, event),
+      }));
+    }
+
+    // Completed output items → replace the streaming stub with the
+    // authoritative message (this is the "completion is truth" step).
     if (payload.type === "response.output_item.done") {
       const msg = buildMessageFromOutputItemDone(event);
       if (msg) {
         this.setState((s) => ({
           ...s,
-          messages: mergeMessages(s.messages, [msg]),
+          messages: upsertMessage(s.messages, msg),
         }));
       }
     }
@@ -473,6 +497,7 @@ export class ThreadService {
         ...s,
         phase: "idle",
         thinking: false,
+        messages: finalizeStreamingMessages(s.messages),
       }));
 
       if (

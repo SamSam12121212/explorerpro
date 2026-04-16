@@ -14,7 +14,7 @@ import {
   type LeftSidebarTab,
 } from "./components/LeftSidebar";
 import { MidPanelHost } from "./components/MidPanelHost";
-import { ChatPanel } from "./components/chat/ChatPanel";
+import { ThreadPanel } from "./components/thread/ThreadPanel";
 import { ThreadProvider, useThread } from "./thread";
 
 const PANEL_GROUP_ID = "explorer-shell-panels";
@@ -89,7 +89,7 @@ function AppLayout() {
       defaultSize: "32%",
       id: RIGHT_PANEL_ID,
       minSize: "22px",
-      node: <ChatPanel />,
+      node: <ThreadPanel />,
     });
   }
 
@@ -118,7 +118,7 @@ function AppLayout() {
           <LuPanelRight size={18} />
         </IconActionButton>
         <IconActionButton
-          label="New chat"
+          label="New thread"
           onClick={resetConversation}
         >
           <LuSquarePen size={18} />

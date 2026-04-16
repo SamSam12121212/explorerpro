@@ -1,6 +1,6 @@
 import type {
   AttachedDocument,
-  ChatMessage,
+  ThreadMessage,
   HealthState,
   ReasoningEffort,
   UploadedImage,
@@ -17,7 +17,7 @@ export type ThreadPhase = "idle" | "loading" | "streaming" | "error";
 
 export interface ThreadState {
   threadId: number | null;
-  messages: ChatMessage[];
+  messages: ThreadMessage[];
   phase: ThreadPhase;
   thinking: boolean;
   model: string;
