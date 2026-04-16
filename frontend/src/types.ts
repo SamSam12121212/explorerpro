@@ -165,33 +165,17 @@ export interface ThreadItemsResponse {
   };
 }
 
-export interface ThreadStreamSnapshotMessage {
-  type: "thread.snapshot";
-  thread_id: number;
-  thread?: ThreadResponse["thread"];
-  attached_documents?: AttachedDocument[];
-}
-
-export interface ThreadStreamItemsDeltaMessage {
-  type: "thread.items.delta";
-  thread_id: number;
-  items?: ThreadItemsResponse["items"];
-  page?: ThreadItemsResponse["page"];
-}
-
 export interface ThreadStreamHeartbeatMessage {
   type: "thread.heartbeat";
-  thread_id: number;
   time?: string;
 }
 
 export interface ThreadStreamPayload {
   type: string;
   thread_id: number;
+  root_thread_id?: number;
+  parent_thread_id?: number;
   [key: string]: unknown;
 }
 
-export type ThreadStreamMessage =
-  | ThreadStreamSnapshotMessage
-  | ThreadStreamItemsDeltaMessage
-  | ThreadStreamHeartbeatMessage;
+export type ThreadStreamMessage = ThreadStreamHeartbeatMessage;

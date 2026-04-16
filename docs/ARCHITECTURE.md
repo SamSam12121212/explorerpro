@@ -52,7 +52,7 @@ flowchart LR
 2. The API publishes `thread.start` to `THREAD_CMD`.
 3. A worker claims ownership in Postgres and opens the socket.
 4. The worker sends `response.create` and persists thread snapshots, items, responses, and spawn state to Postgres.
-5. The worker publishes live deltas to `THREAD_EVENTS` and durable raw history to `THREAD_HISTORY`.
+5. The worker publishes live raw OpenAI events (minus reasoning deltas and child-thread deltas) to `THREAD_EVENTS` with an additive identity tuple (`thread_id`, `root_thread_id`, `parent_thread_id`), and durable raw history to `THREAD_HISTORY`.
 6. Recovery or adoption reloads the thread from Postgres and resumes from the latest durable checkpoint.
 
 ## Document Query Model

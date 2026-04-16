@@ -9,8 +9,6 @@ import (
 
 const (
 	EventTypeClientResponse = "client.response.create"
-	EventTypeThreadSnapshot = "thread.snapshot"
-	EventTypeThreadItem     = "thread.item.appended"
 
 	maxFrameSize = 16 << 20 // 16 MB
 	headerSize   = 4 + 8 + 1 // frame length + thread_id + event_type_length

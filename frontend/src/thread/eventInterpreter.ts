@@ -157,6 +157,52 @@ export function statusMeansBusy(status?: string): boolean {
   return !["ready", "completed", "failed", "incomplete", "cancelled"].includes(status ?? "");
 }
 
+type OutputItemContent = {
+  type?: string;
+  text?: string;
+  image_ref?: string;
+  content_type?: string;
+  filename?: string;
+};
+
+type OutputItem = {
+  id?: string;
+  type?: string;
+  role?: string;
+  content?: OutputItemContent[];
+};
+
+export function buildMessageFromOutputItemDone(event: Record<string, unknown>): ChatMessage | null {
+  const item = event.item as OutputItem | undefined;
+  if (!item || item.type !== "message") return null;
+
+  const text = (item.content ?? [])
+    .filter((c) => c.type === "output_text")
+    .map((c) => c.text?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n\n");
+
+  const images: UploadedImage[] = (item.content ?? []).flatMap((c) => {
+    if (c.type !== "image_ref" || !c.image_ref) return [];
+    return [{
+      image_id: c.image_ref.split("/").at(-2) ?? crypto.randomUUID(),
+      image_ref: c.image_ref,
+      content_type: c.content_type,
+      filename: c.filename,
+      preview_url: "/" + c.image_ref.replace("blob://", ""),
+    }];
+  });
+
+  if (!text && images.length === 0) return null;
+
+  return {
+    id: item.id ?? crypto.randomUUID(),
+    role: "assistant",
+    text,
+    images: images.length > 0 ? images : undefined,
+  };
+}
+
 export function logStreamPayload(payload: ThreadStreamPayload): void {
   console.log(`[ws] ${payload.type}`, payload);
 }

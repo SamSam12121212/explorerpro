@@ -1,6 +1,6 @@
 # Delta Handoff
 
-Date: April 13, 2026
+Date: April 16, 2026
 
 ## Contract
 
@@ -10,51 +10,50 @@ They exist only to move live thread events from the worker to wsserver so active
 
 Current rule:
 
-- worker publishes live thread events to JetStream `THREAD_EVENTS`
-- wsserver is the only JetStream consumer
-- wsserver broadcasts those events to connected sockets for the thread
-- wsserver acks the JetStream message after fanout
-- once acked, the message is gone
+- worker publishes live thread events to the event relay (`THREAD_EVENTS` JetStream in the relay client)
+- wsserver is the only relay consumer
+- wsserver broadcasts those events to all connected clients
+- once forwarded, the message is gone
 
 No replay. No browser ack. No delta history.
 
-If a page misses deltas, it catches up later from snapshot/item reads or polling.
+If a page misses events, it catches up via HTTP (`GET /threads/:id` and `GET /threads/:id/items`).
 
-## What Goes Where
+## What Goes on the Wire
 
-### `THREAD_EVENTS`
+### WS event shape
 
-Transient live handoff queue for:
+Every message sent to the browser is a raw OpenAI Responses API event with three additive identity fields prepended:
 
-- `client.response.create`
-- `thread.snapshot`
-- `thread.item.appended`
-- raw OpenAI socket events needed by the live UI, including deltas
+```json
+{
+  "thread_id":        7,
+  "root_thread_id":   3,
+  "parent_thread_id": 3,
+  "type":             "response.output_item.done",
+  ...original OpenAI event fields...
+}
+```
 
-### `THREAD_HISTORY`
+The worker injects the identity tuple at publish time in `injectThreadFields`.
 
-Durable history for:
+### `client.response.create`
 
-- recoverable `client.response.create` checkpoints
-- non-delta raw socket events
-- event-history inspection
+The `response.create` command sent to OpenAI is also published so connected clients know a response is starting. Same identity envelope.
 
-### Postgres
+### `thread.heartbeat`
 
-Durable read model and coordination.
+A transport-level heartbeat with no OpenAI API analog. Carries only `type` and `time`.
 
-Not delta storage.
+### What is dropped
 
-## What Changed
+- `response.reasoning_text.delta` and `response.reasoning_summary_text.delta` — dropped at the worker before publish (early `continue` in `streamUntilTerminal`). Not stored in history either.
+- All other `.delta` events from child threads — suppressed at publish time when `meta.ParentThreadID > 0`.
 
-- `THREAD_EVENTS` moved to `WorkQueuePolicy`
-- wsserver stopped creating one JetStream subscription per browser connection
-- wsserver now owns a single consumer and fans out in-process
-- worker live-event publish stopped being best-effort
-- deltas stopped being written into `THREAD_HISTORY`
+## What We Do Not Have
 
-## What We Explicitly Do Not Keep
-
+- `thread.snapshot` WS messages — thread state is read via HTTP
+- `thread.items.delta` WS messages — items are read via HTTP on connect/reconnect
 - per-tab JetStream consumers
 - delta replay
 - delta persistence in Postgres
@@ -63,9 +62,7 @@ Not delta storage.
 
 ## Relevant Files
 
-- [internal/natsbootstrap/threadevents.go](/Users/detachedhead/explorer/internal/natsbootstrap/threadevents.go)
-- [internal/threadevents/threadevents.go](/Users/detachedhead/explorer/internal/threadevents/threadevents.go)
-- [internal/worker/service.go](/Users/detachedhead/explorer/internal/worker/service.go)
+- [internal/openaiws/event.go](/Users/detachedhead/explorer/internal/openaiws/event.go)
 - [internal/worker/actor.go](/Users/detachedhead/explorer/internal/worker/actor.go)
 - [internal/wsserver/server.go](/Users/detachedhead/explorer/internal/wsserver/server.go)
 - [internal/wsserver/hub.go](/Users/detachedhead/explorer/internal/wsserver/hub.go)

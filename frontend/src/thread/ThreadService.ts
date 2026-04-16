@@ -8,13 +8,12 @@ import type {
   ThreadItemsResponse,
   ThreadListResponse,
   ThreadResponse,
-  ThreadStreamItemsDeltaMessage,
   ThreadStreamPayload,
-  ThreadStreamSnapshotMessage,
   UploadedImage,
 } from "../types";
 import type { ThreadEntry, ThreadState } from "./types";
 import {
+  buildMessageFromOutputItemDone,
   buildMessagesFromItems,
   deriveThinkingFromEvent,
   deriveThinkingFromItems,
@@ -420,57 +419,65 @@ export class ThreadService {
   private readonly handleStreamMessage = (payload: ThreadStreamPayload) => {
     logStreamPayload(payload);
 
-    if (!this.state.threadId || payload.thread_id !== this.state.threadId) return;
+    if (!this.state.threadId) return;
 
-    switch (payload.type) {
-      case "thread.snapshot":
-        this.handleSnapshot(payload as ThreadStreamSnapshotMessage);
-        break;
-      case "thread.items.delta": {
-        const delta = payload as ThreadStreamItemsDeltaMessage;
-        const nextThinking = deriveThinkingFromItems(delta.items);
-        const nextMessages = buildMessagesFromItems({ items: delta.items, page: delta.page });
+    // Route by root_thread_id when present; fall back to thread_id for events
+    // that predate the identity tuple (e.g. heartbeat has neither).
+    const rootId = payload.root_thread_id ?? payload.thread_id;
+    if (rootId !== this.state.threadId) return;
 
-        this.setState((s) => ({
-          ...s,
-          thinking: nextThinking ?? s.thinking,
-          messages: nextMessages.length > 0 ? mergeMessages(s.messages, nextMessages) : s.messages,
-        }));
-        break;
-      }
-      case "thread.heartbeat":
-        break;
-      default:
-        this.handleOpenAIEvent(payload);
-        break;
-    }
+    if (payload.type === "thread.heartbeat") return;
+
+    this.handleOpenAIEvent(payload);
   };
 
-  private handleSnapshot(payload: ThreadStreamSnapshotMessage) {
-    const nextStatus = payload.thread?.status ?? null;
-    const previousStatus = this.lastThreadStatus;
-    const nextBusy = statusMeansBusy(nextStatus ?? undefined);
-    this.lastThreadStatus = nextStatus;
-
-    this.setState((s) => ({
-      ...s,
-      phase: nextBusy ? "streaming" : "idle",
-      thinking: nextBusy ? s.thinking : false,
-      model: payload.thread?.model ?? DEFAULT_MODEL,
-      attachedDocuments: normalizeAttachedDocuments(payload.attached_documents),
-    }));
-
-    if (nextStatus && ["failed", "incomplete", "cancelled"].includes(nextStatus) && previousStatus !== nextStatus) {
-      this.appendMessage("error", `Thread ended with status: ${nextStatus}`);
-    }
-
-    if (!nextBusy) void this.fetchThreadList();
-  }
-
   private handleOpenAIEvent(payload: ThreadStreamPayload) {
-    const nextThinking = deriveThinkingFromEvent(payload as Record<string, unknown>);
+    const event = payload as Record<string, unknown>;
+
+    // Thinking indicator from reasoning / output events.
+    const nextThinking = deriveThinkingFromEvent(event);
     if (nextThinking !== null) {
       this.setState((s) => ({ ...s, thinking: nextThinking }));
+    }
+
+    // Completed output items → append message.
+    if (payload.type === "response.output_item.done") {
+      const msg = buildMessageFromOutputItemDone(event);
+      if (msg) {
+        this.setState((s) => ({
+          ...s,
+          messages: mergeMessages(s.messages, [msg]),
+        }));
+      }
+    }
+
+    // Terminal response events → update phase and trigger list refresh.
+    if (
+      payload.type === "response.completed" ||
+      payload.type === "response.failed" ||
+      payload.type === "response.incomplete"
+    ) {
+      const terminalStatus =
+        payload.type === "response.completed" ? "completed" :
+        payload.type === "response.failed" ? "failed" : "incomplete";
+
+      const previousStatus = this.lastThreadStatus;
+      this.lastThreadStatus = terminalStatus;
+
+      this.setState((s) => ({
+        ...s,
+        phase: "idle",
+        thinking: false,
+      }));
+
+      if (
+        terminalStatus !== "completed" &&
+        previousStatus !== terminalStatus
+      ) {
+        this.appendMessage("error", `Thread ended with status: ${terminalStatus}`);
+      }
+
+      void this.fetchThreadList();
     }
   }
 }

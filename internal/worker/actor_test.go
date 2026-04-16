@@ -3519,6 +3519,116 @@ func TestFlushDeltaLogForDoneEventSkipsWhenOnlyFirstDeltaSeen(t *testing.T) {
 	}
 }
 
+func TestStreamUntilTerminalDropsReasoningDeltas(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads[tid("thread_root")] = threadstore.ThreadMeta{
+		ID:               tid("thread_root"),
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    tid("worker-local-1"),
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.reasoning_text.delta","delta":"thinking..."}`),
+			[]byte(`{"type":"response.reasoning_summary_text.delta","delta":"summary..."}`),
+			[]byte(`{"type":"response.output_text.delta","response":{"id":"resp_1"},"delta":"hello"}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		},
+	}
+
+	var publishedEventTypes []string
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.publishEvent = func(_ context.Context, _ int64, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+		publishedEventTypes = append(publishedEventTypes, eventType)
+		return nil
+	}
+
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.reasoning_text.delta" || eventType == "response.reasoning_summary_text.delta" {
+			t.Fatalf("reasoning delta event should not publish: %#v", publishedEventTypes)
+		}
+	}
+
+	for _, entry := range store.historyEvents {
+		if entry.EventType == "response.reasoning_text.delta" || entry.EventType == "response.reasoning_summary_text.delta" {
+			t.Fatalf("reasoning delta event should not be in history: %#v", entry)
+		}
+	}
+
+	found := false
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.output_text.delta" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("publishedEventTypes = %#v, want response.output_text.delta still published", publishedEventTypes)
+	}
+}
+
+func TestStreamUntilTerminalPublishesChildNonDeltaEvents(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads[tid("thread_child")] = threadstore.ThreadMeta{
+		ID:               tid("thread_child"),
+		RootThreadID:     tid("thread_root"),
+		ParentThreadID:   tid("thread_parent"),
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    tid("worker-local-1"),
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.output_text.delta","response":{"id":"resp_1"},"delta":"hello"}`),
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":{"id":"item_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		},
+	}
+
+	var publishedEventTypes []string
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.publishEvent = func(_ context.Context, _ int64, _ uint64, _ string, eventType string, _ json.RawMessage) error {
+		publishedEventTypes = append(publishedEventTypes, eventType)
+		return nil
+	}
+
+	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.output_text.delta" {
+			t.Fatalf("child delta event should not publish: %#v", publishedEventTypes)
+		}
+	}
+
+	hasItemDone := false
+	hasCompleted := false
+	for _, eventType := range publishedEventTypes {
+		if eventType == "response.output_item.done" {
+			hasItemDone = true
+		}
+		if eventType == "response.completed" {
+			hasCompleted = true
+		}
+	}
+	if !hasItemDone || !hasCompleted {
+		t.Fatalf("publishedEventTypes = %#v, want response.output_item.done and response.completed for child", publishedEventTypes)
+	}
+}
+
 func TestOutputItemLogEventTypeIncludesItemTypeForAdded(t *testing.T) {
 	t.Parallel()
 

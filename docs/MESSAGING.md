@@ -25,23 +25,37 @@ Each command carries:
 2. If the lease is live, publish directly to the owner worker subject.
 3. Otherwise publish to the dispatch subject.
 
-## Event Planes
+## Event Plane
 
 ### `THREAD_EVENTS`
 
-Transient ws handoff queue for:
+Transient ws handoff queue. The worker publishes raw OpenAI Responses API events with an additive identity envelope:
 
-- `thread.snapshot`
-- `thread.item.appended`
-- `client.response.create`
-- raw OpenAI events needed by the live UI, including deltas
+```json
+{
+  "thread_id":        <leaf thread>,
+  "root_thread_id":   <user-facing root>,
+  "parent_thread_id": <parent, 0 for roots>,
+  "type":             "<openai event type>",
+  ...original event fields...
+}
+```
+
+Published events:
+
+- `client.response.create` — the response.create command sent to OpenAI
+- raw OpenAI server events for the thread — all non-delta events, plus `.delta` events for root threads
+
+Not published:
+
+- `response.reasoning_text.delta` and `response.reasoning_summary_text.delta` — dropped at the worker (latency)
+- any `.delta` event when `meta.ParentThreadID > 0` — child thread delta suppression
 
 Rules:
 
-- worker publishes once
-- wsserver is the only consumer
-- wsserver fans out to connected sockets
-- after wsserver ack, the message is gone
+- worker publishes once, identity tuple already injected
+- wsserver fans out to all connected clients
+- after fanout, the message is gone
 
 ### `THREAD_HISTORY`
 

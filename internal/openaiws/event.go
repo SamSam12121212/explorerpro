@@ -44,6 +44,10 @@ func (t EventType) IsDelta() bool {
 	return strings.HasSuffix(string(t), ".delta")
 }
 
+func (t EventType) IsReasoningDelta() bool {
+	return t == EventTypeResponseReasoningSummaryTextDelta || t == EventTypeResponseReasoningTextDelta
+}
+
 type ClientEvent struct {
 	Type    EventType       `json:"type"`
 	EventID string          `json:"-"`
