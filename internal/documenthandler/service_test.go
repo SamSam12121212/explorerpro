@@ -11,6 +11,7 @@ import (
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadcollectionstore"
 )
 
 func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
@@ -49,7 +50,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 				PageCount:   1,
 			},
 		},
-	}, &fakeThreadDocStore{}, blob)
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
 	svc.now = func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -114,7 +115,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 }
 
 func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
 
 	resp := svc.prepareInput(context.Background(), doccmd.PrepareInputRequest{
 		RequestID:  "req_unsupported",
@@ -137,7 +138,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 				{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 			},
 		},
-	}, newTestBlobStore(t))
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
@@ -170,7 +171,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 }
 
 func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
@@ -215,6 +216,22 @@ func (s *fakeThreadDocStore) ListDocuments(_ context.Context, threadID int64, _ 
 	documents := s.documentsByThread[threadID]
 	cloned := make([]docstore.Document, len(documents))
 	copy(cloned, documents)
+	return cloned, nil
+}
+
+type fakeThreadCollectionStore struct {
+	collectionsByThread map[int64][]threadcollectionstore.AttachedCollection
+	err                 error
+}
+
+func (s *fakeThreadCollectionStore) ListAttached(_ context.Context, threadID int64, _ int64) ([]threadcollectionstore.AttachedCollection, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	collections := s.collectionsByThread[threadID]
+	cloned := make([]threadcollectionstore.AttachedCollection, len(collections))
+	copy(cloned, collections)
 	return cloned, nil
 }
 

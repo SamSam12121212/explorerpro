@@ -20,6 +20,7 @@ import (
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
 	"explorer/internal/threadcmd"
+	"explorer/internal/threadcollectionstore"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
 
@@ -42,20 +43,21 @@ const (
 )
 
 type threadActorConfig struct {
-	ThreadID       int64
-	WorkerID       int64
-	Logger         *slog.Logger
-	Store          actorStore
-	History        threadHistoryStore
-	ThreadDocs     threadDocumentStore
-	DocRuntime     docRuntimeContextClient
-	DocStore       docActorDocStore
-	PreparedInputs docActorPreparedInputClient
-	Blob           *blobstore.LocalStore
-	OpenAIConfig   openaiws.Config
-	Publish        func(ctx context.Context, subject string, cmd threadcmd.Command) error
-	PublishEvent   func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
-	SessionFactory func() *openaiws.Session
+	ThreadID          int64
+	WorkerID          int64
+	Logger            *slog.Logger
+	Store             actorStore
+	History           threadHistoryStore
+	ThreadDocs        threadDocumentStore
+	ThreadCollections threadCollectionStore
+	DocRuntime        docRuntimeContextClient
+	DocStore          docActorDocStore
+	PreparedInputs    docActorPreparedInputClient
+	Blob              *blobstore.LocalStore
+	OpenAIConfig      openaiws.Config
+	Publish           func(ctx context.Context, subject string, cmd threadcmd.Command) error
+	PublishEvent      func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
+	SessionFactory    func() *openaiws.Session
 }
 
 type actorStore interface {
@@ -99,6 +101,10 @@ type threadDocumentStore interface {
 	FilterAttached(ctx context.Context, threadID int64, documentIDs []int64) ([]int64, error)
 }
 
+type threadCollectionStore interface {
+	ListAttached(ctx context.Context, threadID int64, limit int64) ([]threadcollectionstore.AttachedCollection, error)
+}
+
 type docActorDocStore interface {
 	Get(ctx context.Context, id int64) (docstore.Document, error)
 	UpdateBaseLineage(ctx context.Context, id int64, baseResponseID, baseModel, baseReasoning string) error
@@ -109,19 +115,20 @@ type docActorPreparedInputClient interface {
 }
 
 type threadActor struct {
-	threadID       int64
-	workerID       int64
-	logger         *slog.Logger
-	store          actorStore
-	history        threadHistoryStore
-	threadDocs     threadDocumentStore
-	docRuntime     docRuntimeContextClient
-	docStore       docActorDocStore
-	preparedInputs docActorPreparedInputClient
-	blob           *blobstore.LocalStore
-	cfg            openaiws.Config
-	publish        func(ctx context.Context, subject string, cmd threadcmd.Command) error
-	publishEvent   func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
+	threadID          int64
+	workerID          int64
+	logger            *slog.Logger
+	store             actorStore
+	history           threadHistoryStore
+	threadDocs        threadDocumentStore
+	threadCollections threadCollectionStore
+	docRuntime        docRuntimeContextClient
+	docStore          docActorDocStore
+	preparedInputs    docActorPreparedInputClient
+	blob              *blobstore.LocalStore
+	cfg               openaiws.Config
+	publish           func(ctx context.Context, subject string, cmd threadcmd.Command) error
+	publishEvent      func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 
 	sessionFactory func() *openaiws.Session
 
@@ -161,24 +168,25 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	actor := &threadActor{
-		threadID:       cfg.ThreadID,
-		workerID:       cfg.WorkerID,
-		logger:         cfg.Logger,
-		store:          cfg.Store,
-		history:        cfg.History,
-		threadDocs:     cfg.ThreadDocs,
-		docRuntime:     cfg.DocRuntime,
-		docStore:       cfg.DocStore,
-		preparedInputs: cfg.PreparedInputs,
-		blob:           cfg.Blob,
-		cfg:            cfg.OpenAIConfig,
-		publish:        cfg.Publish,
-		publishEvent:   cfg.PublishEvent,
-		sessionFactory: cfg.SessionFactory,
-		ctx:            ctx,
-		cancel:         cancel,
-		commands:       make(chan queuedCommand, commandQueueSize),
-		done:           make(chan struct{}),
+		threadID:          cfg.ThreadID,
+		workerID:          cfg.WorkerID,
+		logger:            cfg.Logger,
+		store:             cfg.Store,
+		history:           cfg.History,
+		threadDocs:        cfg.ThreadDocs,
+		threadCollections: cfg.ThreadCollections,
+		docRuntime:        cfg.DocRuntime,
+		docStore:          cfg.DocStore,
+		preparedInputs:    cfg.PreparedInputs,
+		blob:              cfg.Blob,
+		cfg:               cfg.OpenAIConfig,
+		publish:           cfg.Publish,
+		publishEvent:      cfg.PublishEvent,
+		sessionFactory:    cfg.SessionFactory,
+		ctx:               ctx,
+		cancel:            cancel,
+		commands:          make(chan queuedCommand, commandQueueSize),
+		done:              make(chan struct{}),
 	}
 
 	go actor.run()
@@ -1859,11 +1867,18 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 	if err != nil {
 		return fmt.Errorf("list attached documents for runtime context: %w", err)
 	}
-	if len(documents) == 0 {
+	var collections []threadcollectionstore.AttachedCollection
+	if a.threadCollections != nil {
+		collections, err = a.threadCollections.ListAttached(a.ctx, threadID, 200)
+		if err != nil {
+			return fmt.Errorf("list attached collections for runtime context: %w", err)
+		}
+	}
+	if len(documents) == 0 && len(collections) == 0 {
 		return nil
 	}
 	if a.docRuntime == nil {
-		return a.applyLocalDocumentRuntimeContext(payload, documents)
+		return a.applyLocalDocumentRuntimeContext(payload, documents, collections)
 	}
 
 	rawTools, err := marshalRuntimeContextTools(payload["tools"])
@@ -1879,16 +1894,16 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 		Tools:        rawTools,
 	})
 	if err != nil {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("load document runtime context: %w", err))
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("load document runtime context: %w", err))
 	}
 	if resp.RequestID != requestID {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID))
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID))
 	}
 	if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
 		if strings.TrimSpace(resp.Error) == "" {
 			resp.Error = fmt.Sprintf("runtime context returned status %q", resp.Status)
 		}
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("document runtime context: %s", resp.Error))
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("document runtime context: %s", resp.Error))
 	}
 
 	if strings.TrimSpace(resp.Instructions) == "" {
@@ -1904,24 +1919,25 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 
 	decoded, err := decodeToolsParam(resp.Tools)
 	if err != nil {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, fmt.Errorf("decode document runtime tools: %w", err))
+		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("decode document runtime tools: %w", err))
 	}
 	payload["tools"] = decoded
 	return nil
 }
 
-func (a *threadActor) fallbackDocumentRuntimeContext(_ int64, payload map[string]any, documents []docstore.Document, cause error) error {
+func (a *threadActor) fallbackDocumentRuntimeContext(_ int64, payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection, cause error) error {
 	if a.logger != nil {
 		a.logger.Warn("document runtime context unavailable, falling back to local augmentation",
 			"document_count", len(documents),
+			"collection_count", len(collections),
 			"error", cause,
 		)
 	}
-	return a.applyLocalDocumentRuntimeContext(payload, documents)
+	return a.applyLocalDocumentRuntimeContext(payload, documents, collections)
 }
 
-func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, documents []docstore.Document) error {
-	instructions := appendAvailableDocumentsBlockLocal(stringValue(payload["instructions"]), documents)
+func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) error {
+	instructions := appendAvailableDocumentsBlockLocal(stringValue(payload["instructions"]), documents, collections)
 	if strings.TrimSpace(instructions) == "" {
 		delete(payload, "instructions")
 	} else {
@@ -1961,8 +1977,8 @@ func marshalRuntimeContextTools(value any) (json.RawMessage, error) {
 	return raw, nil
 }
 
-func appendAvailableDocumentsBlockLocal(base string, documents []docstore.Document) string {
-	block := formatAvailableDocumentsBlockLocal(documents)
+func appendAvailableDocumentsBlockLocal(base string, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
+	block := formatAvailableDocumentsBlockLocal(documents, collections)
 	if block == "" {
 		return base
 	}
@@ -1975,7 +1991,21 @@ func appendAvailableDocumentsBlockLocal(base string, documents []docstore.Docume
 	return trimmedBase + "\n\n" + block
 }
 
-func formatAvailableDocumentsBlockLocal(documents []docstore.Document) string {
+func formatAvailableDocumentsBlockLocal(documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
+	var parts []string
+
+	if standalone := formatDocumentsBlockLocal(documents, "<available_documents>", "</available_documents>"); standalone != "" {
+		parts = append(parts, standalone)
+	}
+
+	for _, collection := range collections {
+		parts = append(parts, formatCollectionBlockLocal(collection))
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func formatDocumentsBlockLocal(documents []docstore.Document, openTag, closeTag string) string {
 	var builder strings.Builder
 	count := 0
 
@@ -1991,7 +2021,8 @@ func formatAvailableDocumentsBlockLocal(documents []docstore.Document) string {
 		}
 
 		if count == 0 {
-			builder.WriteString("<available_documents>\n")
+			builder.WriteString(openTag)
+			builder.WriteByte('\n')
 		}
 		builder.WriteString(`<document id="`)
 		builder.WriteString(escapePromptAttributeLocal(id))
@@ -2006,7 +2037,27 @@ func formatAvailableDocumentsBlockLocal(documents []docstore.Document) string {
 		return ""
 	}
 
-	builder.WriteString("</available_documents>")
+	builder.WriteString(closeTag)
+	return builder.String()
+}
+
+func formatCollectionBlockLocal(collection threadcollectionstore.AttachedCollection) string {
+	name := strings.TrimSpace(collection.Name)
+	if name == "" {
+		name = collection.ID
+	}
+
+	var builder strings.Builder
+	builder.WriteString(`<collection name="`)
+	builder.WriteString(escapePromptAttributeLocal(name))
+	builder.WriteString(`">` + "\n")
+	if inner := formatDocumentsBlockLocal(collection.Documents, "<available_documents>", "</available_documents>"); inner != "" {
+		builder.WriteString(inner)
+		builder.WriteByte('\n')
+	} else {
+		builder.WriteString("<available_documents></available_documents>\n")
+	}
+	builder.WriteString("</collection>")
 	return builder.String()
 }
 

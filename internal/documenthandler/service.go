@@ -13,6 +13,7 @@ import (
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadcollectionstore"
 
 	"github.com/nats-io/nats.go"
 )
@@ -25,6 +26,10 @@ type threadDocumentStore interface {
 	ListDocuments(ctx context.Context, threadID int64, limit int64) ([]docstore.Document, error)
 }
 
+type threadCollectionStore interface {
+	ListAttached(ctx context.Context, threadID int64, limit int64) ([]threadcollectionstore.AttachedCollection, error)
+}
+
 type documentBlobStore interface {
 	Ref(parts ...string) string
 	ReadRef(ctx context.Context, ref string) ([]byte, error)
@@ -35,24 +40,26 @@ type documentBlobStore interface {
 // document-adjacent backend work. It is intentionally not the OpenAI
 // document executor; worker-owned document execution lives in the worker.
 type Service struct {
-	logger     *slog.Logger
-	nc         *nats.Conn
-	js         nats.JetStreamContext
-	docs       documentStore
-	threadDocs threadDocumentStore
-	blob       documentBlobStore
-	now        func() time.Time
+	logger            *slog.Logger
+	nc                *nats.Conn
+	js                nats.JetStreamContext
+	docs              documentStore
+	threadDocs        threadDocumentStore
+	threadCollections threadCollectionStore
+	blob              documentBlobStore
+	now               func() time.Time
 }
 
-func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, blob documentBlobStore) *Service {
+func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, threadCollections threadCollectionStore, blob documentBlobStore) *Service {
 	return &Service{
-		logger:     logger,
-		nc:         nc,
-		js:         js,
-		docs:       docs,
-		threadDocs: threadDocs,
-		blob:       blob,
-		now:        func() time.Time { return time.Now().UTC() },
+		logger:            logger,
+		nc:                nc,
+		js:                js,
+		docs:              docs,
+		threadDocs:        threadDocs,
+		threadCollections: threadCollections,
+		blob:              blob,
+		now:               func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -321,7 +328,19 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 		}
 	}
 
-	if len(documents) == 0 {
+	var collections []threadcollectionstore.AttachedCollection
+	if s.threadCollections != nil {
+		collections, err = s.threadCollections.ListAttached(ctx, req.ThreadID, 200)
+		if err != nil {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusError,
+				Error:     fmt.Sprintf("list attached collections: %v", err),
+			}
+		}
+	}
+
+	if len(documents) == 0 && len(collections) == 0 {
 		return doccmd.RuntimeContextResponse{
 			RequestID:    req.RequestID,
 			Status:       doccmd.PrepareStatusOK,
@@ -330,7 +349,7 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 		}
 	}
 
-	instructions = appendAvailableDocumentsBlock(instructions, documents)
+	instructions = appendAvailableDocumentsBlock(instructions, documents, collections)
 	tools, err = appendQueryDocumentTool(tools)
 	if err != nil {
 		return doccmd.RuntimeContextResponse{
@@ -486,8 +505,8 @@ func escapePromptAttribute(value string) string {
 	return replacer.Replace(value)
 }
 
-func appendAvailableDocumentsBlock(base string, documents []docstore.Document) string {
-	block := formatAvailableDocumentsBlock(documents)
+func appendAvailableDocumentsBlock(base string, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
+	block := formatAvailableDocumentsBlock(documents, collections)
 	if block == "" {
 		return base
 	}
@@ -500,7 +519,21 @@ func appendAvailableDocumentsBlock(base string, documents []docstore.Document) s
 	return trimmedBase + "\n\n" + block
 }
 
-func formatAvailableDocumentsBlock(documents []docstore.Document) string {
+func formatAvailableDocumentsBlock(documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
+	var parts []string
+
+	if standalone := formatDocumentsBlock(documents, "<available_documents>", "</available_documents>"); standalone != "" {
+		parts = append(parts, standalone)
+	}
+
+	for _, collection := range collections {
+		parts = append(parts, formatCollectionBlock(collection))
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func formatDocumentsBlock(documents []docstore.Document, openTag, closeTag string) string {
 	var builder strings.Builder
 	count := 0
 
@@ -516,7 +549,8 @@ func formatAvailableDocumentsBlock(documents []docstore.Document) string {
 		}
 
 		if count == 0 {
-			builder.WriteString("<available_documents>\n")
+			builder.WriteString(openTag)
+			builder.WriteByte('\n')
 		}
 		builder.WriteString(`<document id="`)
 		builder.WriteString(escapePromptAttribute(id))
@@ -531,7 +565,29 @@ func formatAvailableDocumentsBlock(documents []docstore.Document) string {
 		return ""
 	}
 
-	builder.WriteString("</available_documents>")
+	builder.WriteString(closeTag)
+	return builder.String()
+}
+
+func formatCollectionBlock(collection threadcollectionstore.AttachedCollection) string {
+	name := strings.TrimSpace(collection.Name)
+	if name == "" {
+		name = collection.ID
+	}
+
+	var builder strings.Builder
+	builder.WriteString(`<collection name="`)
+	builder.WriteString(escapePromptAttribute(name))
+	builder.WriteString(`">` + "\n")
+	if inner := formatDocumentsBlock(collection.Documents, "<available_documents>", "</available_documents>"); inner != "" {
+		builder.WriteString(inner)
+		builder.WriteByte('\n')
+	} else {
+		// Empty collections are still surfaced so the model knows the
+		// collection exists (the user may add documents to it mid-thread).
+		builder.WriteString("<available_documents></available_documents>\n")
+	}
+	builder.WriteString("</collection>")
 	return builder.String()
 }
 
