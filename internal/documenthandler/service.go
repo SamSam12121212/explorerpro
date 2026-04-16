@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"explorer/internal/doccmd"
+	"explorer/internal/docprompt"
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/preparedinput"
@@ -349,7 +350,7 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 		}
 	}
 
-	instructions = appendAvailableDocumentsBlock(instructions, documents, collections)
+	instructions = docprompt.AppendAvailableDocumentsBlock(instructions, documents, collections)
 	tools, err = appendQueryDocumentTool(tools)
 	if err != nil {
 		return doccmd.RuntimeContextResponse{
@@ -387,8 +388,8 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(formatDocumentID(doc.ID)),
+			docprompt.EscapeAttribute(doc.Filename),
+			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
 			manifest.PageCount),
 	})
 
@@ -439,8 +440,8 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(formatDocumentID(doc.ID)),
+			docprompt.EscapeAttribute(doc.Filename),
+			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
 			manifest.PageCount),
 	})
 
@@ -492,108 +493,6 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	return inputJSON, nil
 }
 
-func escapePromptAttribute(value string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		`"`, "&quot;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\n", "&#10;",
-		"\r", "&#13;",
-		"\t", "&#9;",
-	)
-	return replacer.Replace(value)
-}
-
-func appendAvailableDocumentsBlock(base string, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
-	block := formatAvailableDocumentsBlock(documents, collections)
-	if block == "" {
-		return base
-	}
-
-	trimmedBase := strings.TrimRight(base, "\n")
-	if strings.TrimSpace(trimmedBase) == "" {
-		return block
-	}
-
-	return trimmedBase + "\n\n" + block
-}
-
-func formatAvailableDocumentsBlock(documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
-	var parts []string
-
-	if standalone := formatDocumentsBlock(documents, "<available_documents>", "</available_documents>"); standalone != "" {
-		parts = append(parts, standalone)
-	}
-
-	for _, collection := range collections {
-		parts = append(parts, formatCollectionBlock(collection))
-	}
-
-	return strings.Join(parts, "\n")
-}
-
-func formatDocumentsBlock(documents []docstore.Document, openTag, closeTag string) string {
-	var builder strings.Builder
-	count := 0
-
-	for _, document := range documents {
-		if document.ID <= 0 {
-			continue
-		}
-		id := formatDocumentID(document.ID)
-
-		name := strings.TrimSpace(document.Filename)
-		if name == "" {
-			name = id
-		}
-
-		if count == 0 {
-			builder.WriteString(openTag)
-			builder.WriteByte('\n')
-		}
-		builder.WriteString(`<document id="`)
-		builder.WriteString(escapePromptAttribute(id))
-		builder.WriteString(`" name="`)
-		builder.WriteString(escapePromptAttribute(name))
-		builder.WriteString(`" />`)
-		builder.WriteByte('\n')
-		count++
-	}
-
-	if count == 0 {
-		return ""
-	}
-
-	builder.WriteString(closeTag)
-	return builder.String()
-}
-
-func formatCollectionBlock(collection threadcollectionstore.AttachedCollection) string {
-	name := strings.TrimSpace(collection.Name)
-	if name == "" {
-		name = collection.ID
-	}
-
-	var builder strings.Builder
-	builder.WriteString(`<collection name="`)
-	builder.WriteString(escapePromptAttribute(name))
-	builder.WriteString(`">` + "\n")
-	if inner := formatDocumentsBlock(collection.Documents, "<available_documents>", "</available_documents>"); inner != "" {
-		builder.WriteString(inner)
-		builder.WriteByte('\n')
-	} else {
-		// Empty collections are still surfaced so the model knows the
-		// collection exists (the user may add documents to it mid-thread).
-		builder.WriteString("<available_documents></available_documents>\n")
-	}
-	builder.WriteString("</collection>")
-	return builder.String()
-}
-
-func formatDocumentID(id int64) string {
-	return strconv.FormatInt(id, 10)
-}
 
 func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 	var tools []map[string]any

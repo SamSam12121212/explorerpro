@@ -15,6 +15,7 @@ import (
 
 	"explorer/internal/blobstore"
 	"explorer/internal/doccmd"
+	"explorer/internal/docprompt"
 	"explorer/internal/docstore"
 	"explorer/internal/eventrelay"
 	"explorer/internal/idgen"
@@ -1937,7 +1938,7 @@ func (a *threadActor) fallbackDocumentRuntimeContext(_ int64, payload map[string
 }
 
 func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) error {
-	instructions := appendAvailableDocumentsBlockLocal(stringValue(payload["instructions"]), documents, collections)
+	instructions := docprompt.AppendAvailableDocumentsBlock(stringValue(payload["instructions"]), documents, collections)
 	if strings.TrimSpace(instructions) == "" {
 		delete(payload, "instructions")
 	} else {
@@ -1975,103 +1976,6 @@ func marshalRuntimeContextTools(value any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshal runtime context tools: %w", err)
 	}
 	return raw, nil
-}
-
-func appendAvailableDocumentsBlockLocal(base string, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
-	block := formatAvailableDocumentsBlockLocal(documents, collections)
-	if block == "" {
-		return base
-	}
-
-	trimmedBase := strings.TrimRight(base, "\n")
-	if strings.TrimSpace(trimmedBase) == "" {
-		return block
-	}
-
-	return trimmedBase + "\n\n" + block
-}
-
-func formatAvailableDocumentsBlockLocal(documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) string {
-	var parts []string
-
-	if standalone := formatDocumentsBlockLocal(documents, "<available_documents>", "</available_documents>"); standalone != "" {
-		parts = append(parts, standalone)
-	}
-
-	for _, collection := range collections {
-		parts = append(parts, formatCollectionBlockLocal(collection))
-	}
-
-	return strings.Join(parts, "\n")
-}
-
-func formatDocumentsBlockLocal(documents []docstore.Document, openTag, closeTag string) string {
-	var builder strings.Builder
-	count := 0
-
-	for _, document := range documents {
-		if document.ID <= 0 {
-			continue
-		}
-		id := formatDocumentIDLocal(document.ID)
-
-		name := strings.TrimSpace(document.Filename)
-		if name == "" {
-			name = id
-		}
-
-		if count == 0 {
-			builder.WriteString(openTag)
-			builder.WriteByte('\n')
-		}
-		builder.WriteString(`<document id="`)
-		builder.WriteString(escapePromptAttributeLocal(id))
-		builder.WriteString(`" name="`)
-		builder.WriteString(escapePromptAttributeLocal(name))
-		builder.WriteString(`" />`)
-		builder.WriteByte('\n')
-		count++
-	}
-
-	if count == 0 {
-		return ""
-	}
-
-	builder.WriteString(closeTag)
-	return builder.String()
-}
-
-func formatCollectionBlockLocal(collection threadcollectionstore.AttachedCollection) string {
-	name := strings.TrimSpace(collection.Name)
-	if name == "" {
-		name = collection.ID
-	}
-
-	var builder strings.Builder
-	builder.WriteString(`<collection name="`)
-	builder.WriteString(escapePromptAttributeLocal(name))
-	builder.WriteString(`">` + "\n")
-	if inner := formatDocumentsBlockLocal(collection.Documents, "<available_documents>", "</available_documents>"); inner != "" {
-		builder.WriteString(inner)
-		builder.WriteByte('\n')
-	} else {
-		builder.WriteString("<available_documents></available_documents>\n")
-	}
-	builder.WriteString("</collection>")
-	return builder.String()
-}
-
-func escapePromptAttributeLocal(value string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		`"`, "&quot;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\n", "&#10;",
-		"\r", "&#13;",
-		"\t", "&#9;",
-	)
-	return replacer.Replace(value)
 }
 
 func appendQueryDocumentToolLocal(raw json.RawMessage) (json.RawMessage, error) {
@@ -3432,7 +3336,7 @@ func buildDocQueryDocTask(calls []docQueryRoundCall) string {
 	builder.WriteString("<parent_calls>\n")
 	for _, call := range calls {
 		builder.WriteString(`<call id="`)
-		builder.WriteString(escapePromptAttributeLocal(call.CallID))
+		builder.WriteString(docprompt.EscapeAttribute(call.CallID))
 		builder.WriteString(`">`)
 		builder.WriteByte('\n')
 		builder.WriteString(call.Task)
