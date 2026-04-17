@@ -7,10 +7,15 @@ const REMARK_PLUGINS = [remarkGfm];
 const LINK_CLASS = "text-[#007acc] underline-offset-2 hover:underline";
 
 // Internal paths stay inside the SPA (react-router <Link>); anything else opens
-// in a new tab. The model is instructed to emit `/documents/{id}?page={n}` for
-// page citations — see DEFAULT_INSTRUCTIONS in src/constants.ts.
+// in a new tab. The model is instructed to emit `/doc/{id}?page={n}` for page
+// citations — see DEFAULT_INSTRUCTIONS in src/constants.ts.
+//
+// Protocol-relative URLs like `//evil.com` also start with `/` but the browser
+// resolves them as full external navigations, so they're explicitly rejected.
 function isInternalHref(href: string | undefined): href is string {
-  return typeof href === "string" && href.startsWith("/");
+  if (typeof href !== "string") return false;
+  if (!href.startsWith("/")) return false;
+  return !href.startsWith("//");
 }
 
 const COMPONENTS: Components = {
