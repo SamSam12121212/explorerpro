@@ -1,7 +1,17 @@
 import Markdown, { type Components } from "react-markdown";
+import { Link } from "react-router";
 import remarkGfm from "remark-gfm";
 
 const REMARK_PLUGINS = [remarkGfm];
+
+const LINK_CLASS = "text-[#007acc] underline-offset-2 hover:underline";
+
+// Internal paths stay inside the SPA (react-router <Link>); anything else opens
+// in a new tab. The model is instructed to emit `/documents/{id}?page={n}` for
+// page citations — see DEFAULT_INSTRUCTIONS in src/constants.ts.
+function isInternalHref(href: string | undefined): href is string {
+  return typeof href === "string" && href.startsWith("/");
+}
 
 const COMPONENTS: Components = {
   p: ({ children }) => <p className="m-0 mb-2 last:mb-0">{children}</p>,
@@ -11,11 +21,20 @@ const COMPONENTS: Components = {
   strong: ({ children }) => <strong className="font-semibold text-[#e6e6e6]">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,
   del: ({ children }) => <del className="opacity-70">{children}</del>,
-  a: ({ children, href }) => (
-    <a className="text-[#007acc] underline-offset-2 hover:underline" href={href} rel="noreferrer" target="_blank">
-      {children}
-    </a>
-  ),
+  a: ({ children, href }) => {
+    if (isInternalHref(href)) {
+      return (
+        <Link className={LINK_CLASS} to={href}>
+          {children}
+        </Link>
+      );
+    }
+    return (
+      <a className={LINK_CLASS} href={href} rel="noreferrer" target="_blank">
+        {children}
+      </a>
+    );
+  },
   code: ({ children }) => (
     <code className="border border-[#333] bg-[#252525] px-1 py-0.5 font-mono text-[12px] text-[#d4d4d4]">{children}</code>
   ),

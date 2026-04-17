@@ -22,6 +22,7 @@ export const DEFAULT_INSTRUCTIONS = [
   "If parallel work would materially help, you may call spawn_threads once with up to 10 child threads.",
   "Only use child threads when the task benefits from decomposition; otherwise answer normally.",
   "After child results return, synthesize one final answer for the user.",
+  "When you cite a page from an attached document, format the citation as a markdown link pointing at the document, e.g. `[page 25](/documents/123?page=25)` where `123` is the `id` attribute from the matching `<document>` entry inside `<available_documents>`. Always use a relative `/documents/{id}?page={n}` path — the frontend intercepts these as in-app navigation. Only link to documents that appear in `<available_documents>`; never invent ids.",
 ].join(" ");
 
 // GPT-5.4 does not support `minimal`; use `none` for the lowest effort.
