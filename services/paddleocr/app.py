@@ -142,9 +142,13 @@ async def ocr_endpoint(
 
     if results:
         first = results[0]
-        texts = _get_field(first, "rec_texts", [])
-        polys = _get_field(first, "rec_polys", [])
-        scores = _get_field(first, "rec_scores", [])
+        # `or []` guards against the key being present with an explicit
+        # None value — _get_field's default only fires on absence, and
+        # zip(None, ...) would raise TypeError and 500. Matches the
+        # defensive pattern /structure already uses below.
+        texts = _get_field(first, "rec_texts", []) or []
+        polys = _get_field(first, "rec_polys", []) or []
+        scores = _get_field(first, "rec_scores", []) or []
 
         for text, poly, score in zip(texts, polys, scores):
             poly_ints = [[int(round(float(p[0]))), int(round(float(p[1])))] for p in poly]
