@@ -532,7 +532,7 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 		subject = threadcmd.WorkerCommandSubject(s.workerID, kind)
 	}
 
-	if !s.claimRecoveryAttempt(threadID) {
+	if s.recoveryAttemptsExhausted(threadID) {
 		return nil
 	}
 
@@ -541,30 +541,37 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 		return err
 	}
 
-	return s.publishCommand(ctx, subject, cmd)
+	if err := s.publishCommand(ctx, subject, cmd); err != nil {
+		return err
+	}
+
+	s.recordRecoveryAttempt(threadID)
+	return nil
 }
 
-func (s *Service) claimRecoveryAttempt(threadID int64) bool {
+func (s *Service) recoveryAttemptsExhausted(threadID int64) bool {
+	s.recoveryAttemptsMu.Lock()
+	defer s.recoveryAttemptsMu.Unlock()
+
+	return s.recoveryAttempts[threadID] >= maxRecoveryAttemptsPerThread
+}
+
+func (s *Service) recordRecoveryAttempt(threadID int64) {
 	s.recoveryAttemptsMu.Lock()
 	defer s.recoveryAttemptsMu.Unlock()
 
 	if s.recoveryAttempts == nil {
 		s.recoveryAttempts = map[int64]int{}
 	}
-	attempts := s.recoveryAttempts[threadID]
-	if attempts >= maxRecoveryAttemptsPerThread {
-		if attempts == maxRecoveryAttemptsPerThread {
-			s.logger.Warn("recovery attempt cap reached, suppressing further reconciles for thread",
-				"thread_id", threadID,
-				"attempts", attempts,
-				"cap", maxRecoveryAttemptsPerThread,
-			)
-			s.recoveryAttempts[threadID] = attempts + 1
-		}
-		return false
+	attempts := s.recoveryAttempts[threadID] + 1
+	s.recoveryAttempts[threadID] = attempts
+	if attempts == maxRecoveryAttemptsPerThread {
+		s.logger.Warn("recovery attempt cap reached, suppressing further reconciles for thread",
+			"thread_id", threadID,
+			"attempts", attempts,
+			"cap", maxRecoveryAttemptsPerThread,
+		)
 	}
-	s.recoveryAttempts[threadID] = attempts + 1
-	return true
 }
 
 func (s *Service) hasLiveActor(threadID int64) bool {
