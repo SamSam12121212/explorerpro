@@ -1,9 +1,13 @@
-import { LuFileText, LuFolder, LuGitFork, LuMessageSquare } from "react-icons/lu";
+import { useRef, useState, type ChangeEvent } from "react";
+import { LuFileText, LuFolder, LuGitFork, LuMessageSquare, LuPlus } from "react-icons/lu";
 import { CollectionsView } from "../mid-panel/views/CollectionsView";
 import { DocumentsView } from "../mid-panel/views/DocumentsView";
 import { ReposView } from "../mid-panel/views/ReposView";
 import { ThreadSidebar } from "./ThreadSidebar";
+import { IconActionButton } from "./IconActionButton";
 import { useThread } from "../thread";
+import { uploadDocument } from "../api";
+import { DOCUMENTS_CHANGED_EVENT } from "../constants";
 
 export type LeftSidebarTab = "threads" | "collections" | "documents" | "repos";
 
@@ -27,6 +31,8 @@ interface LeftSidebarProps {
 }
 
 export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [uploadingDocument, setUploadingDocument] = useState(false);
   const {
     threads,
     threadId,
@@ -56,6 +62,30 @@ export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
     ...pendingCollections.map((c) => c.id),
   ];
 
+  const handleDocumentUploadClick = () => {
+    inputRef.current?.click();
+  };
+
+  const handleDocumentFileChange = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || uploadingDocument) return;
+
+    setUploadingDocument(true);
+    try {
+      await uploadDocument(file);
+      window.dispatchEvent(new Event(DOCUMENTS_CHANGED_EVENT));
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : "Failed to upload document",
+      );
+    } finally {
+      setUploadingDocument(false);
+    }
+  };
+
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
       <div className="shell-bar justify-center gap-1 px-2">
@@ -78,6 +108,21 @@ export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
             </button>
           );
         })}
+        {activeTab === "documents" && (
+          <IconActionButton
+            label={uploadingDocument ? "Uploading document" : "Upload document"}
+            onClick={handleDocumentUploadClick}
+          >
+            <LuPlus className={uploadingDocument ? "animate-pulse" : ""} size={18} />
+          </IconActionButton>
+        )}
+        <input
+          accept="application/pdf,.pdf"
+          className="hidden"
+          onChange={(event) => void handleDocumentFileChange(event)}
+          ref={inputRef}
+          type="file"
+        />
       </div>
 
       <div className="min-h-0 flex-1">

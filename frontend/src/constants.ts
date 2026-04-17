@@ -9,6 +9,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
 export const DEFAULT_MODEL = "gpt-5.4-mini";
 export const DEFAULT_REASONING = "medium";
 export const COLLECTIONS_CHANGED_EVENT = "explorer:collections-changed";
+export const DOCUMENTS_CHANGED_EVENT = "explorer:documents-changed";
 
 // Worker-side tool name (internal/doccmd: ToolNameQueryDocument). The tool
 // itself is injected by the worker when documents are attached, not declared
