@@ -1,0 +1,29 @@
+services:
+  paddleocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: explorer/paddleocr:local
+    container_name: paddleocr
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PADDLEOCR_BEARER_TOKEN: ${PADDLEOCR_BEARER_TOKEN:?must be set}
+      PADDLEOCR_LANG: ${PADDLEOCR_LANG:-en}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - paddle-models:/root/.paddlex
+      - paddle-hub:/root/.paddleocr
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  paddle-models:
+  paddle-hub:
