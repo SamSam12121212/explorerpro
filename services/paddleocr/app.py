@@ -226,12 +226,19 @@ async def structure_endpoint(
     t0 = time.perf_counter()
     arr, width, height = _load_image(await image.read())
 
-    # First call triggers ~60-90s lazy model load — absolutely must not
-    # block the event loop, or /health goes dark for the whole duration.
-    # The load itself is protected by threading.Lock inside _get_structure
-    # (see double-check). Inference runs under the inference semaphore.
-    pipeline = await asyncio.to_thread(_get_structure)
+    # First call triggers ~60-90s lazy model load. Two things matter:
+    #   1. Must not block the event loop (hence asyncio.to_thread).
+    #   2. Must not run concurrently with _ocr.predict in another
+    #      threadpool thread — that's the same "concurrent Paddle
+    #      operations across threads" failure the semaphore prevents
+    #      for inference. _structure_lock alone only stops duplicate
+    #      loads; it doesn't stop overlap with OCR inference.
+    # So: acquire the inference semaphore before _get_structure() too.
+    # First /structure blocks /ocr for 60-90s once per container lifetime;
+    # subsequent calls hit the _structure-is-not-None fast path and only
+    # hold the semaphore for predict.
     async with _inference_sem:
+        pipeline = await asyncio.to_thread(_get_structure)
         results = await asyncio.to_thread(pipeline.predict, arr)
 
     blocks: list[StructureBlock] = []
