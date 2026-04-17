@@ -102,7 +102,13 @@ func (s *Store) FilterAttached(ctx context.Context, threadID int64, documentIDs 
 SELECT document_id
 FROM thread_documents
 WHERE thread_id = $1
-  AND document_id = ANY($2::bigint[])`, threadID, documentIDs)
+  AND document_id = ANY($2::bigint[])
+UNION
+SELECT cd.document_id
+FROM collection_documents cd
+JOIN thread_collections tc ON tc.collection_id = cd.collection_id
+WHERE tc.thread_id = $1
+  AND cd.document_id = ANY($2::bigint[])`, threadID, documentIDs)
 	if err != nil {
 		return nil, fmt.Errorf("filter attached documents for %d: %w", threadID, err)
 	}
