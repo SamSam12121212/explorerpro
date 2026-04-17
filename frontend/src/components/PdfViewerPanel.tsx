@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   PDFViewer,
+  ZoomMode,
   type Command,
+  type EmbedPdfContainer,
   type IconsConfig,
   type PluginRegistry,
   type ThemeConfig,
@@ -267,6 +269,27 @@ function buildToolbarCommands(onToggleDetails: () => void): Command[] {
   ];
 }
 
+const PDF_VIEWER_STYLE_OVERRIDES = `
+  [data-epdf-i="${MAIN_TOOLBAR_ID}"] {
+    border-bottom-width: 0 !important;
+  }
+  [data-epdf-i="${MAIN_TOOLBAR_ID}"] svg[role="img"] {
+    width: 18px !important;
+    height: 18px !important;
+  }
+`;
+
+function handleContainerInit(container: EmbedPdfContainer) {
+  const shadowRoot = container.shadowRoot;
+  if (shadowRoot === null) {
+    return;
+  }
+
+  const style = window.document.createElement("style");
+  style.textContent = PDF_VIEWER_STYLE_OVERRIDES;
+  shadowRoot.appendChild(style);
+}
+
 function handleViewerReady(registry: PluginRegistry, onToggleDetails: () => void) {
   const commandsPlugin = registry.getPlugin<CommandsPlugin>("commands");
   if (commandsPlugin !== null) {
@@ -395,6 +418,9 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
             src: `/documents/${documentId}/source`,
             icons: PDF_VIEWER_ICONS,
             theme: PDF_VIEWER_THEME,
+            zoom: {
+              defaultZoomLevel: ZoomMode.FitWidth,
+            },
             disabledCategories: [
               "annotation",
               "annotation-shape",
@@ -415,6 +441,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
               "selection",
             ],
           }}
+          onInit={handleContainerInit}
           onReady={(registry) => {
             handleViewerReady(registry, () => {
               setDetailsOpen((current) => !current);
