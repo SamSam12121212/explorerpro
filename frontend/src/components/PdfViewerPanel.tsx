@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import {
   PDFViewer,
+  PdfAnnotationSubtype,
   ZoomMode,
   type Command,
   type EmbedPdfContainer,
@@ -12,6 +13,12 @@ import {
   type UIPlugin,
   type UISchema,
 } from "@embedpdf/react-pdf-viewer";
+import {
+  LockModeType,
+  type AnnotationCapability,
+  type AnnotationPlugin,
+} from "@embedpdf/plugin-annotation";
+import { PdfAnnotationBorderStyle } from "@embedpdf/models";
 import type { CommandsPlugin } from "@embedpdf/plugin-commands";
 import type { ScrollCapability, ScrollPlugin } from "@embedpdf/plugin-scroll";
 import { LuRotateCcw, LuX } from "react-icons/lu";
@@ -321,6 +328,55 @@ function parseTargetPage(value: string | null): number | null {
   return parsed;
 }
 
+// A citation is a bounding box on a specific page, supplied in manifest pixel
+// coordinates (top-left origin). The format matches what OCR tools like
+// PaddleOCR emit directly — page-indexed, integer pixels. Conversion to
+// embedpdf's PDF-point page-space happens at render time using the document's
+// DPI (both share a top-left origin, so no y-flip).
+export interface Citation {
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+// Repeated `?cite=page,x,y,w,h` params. Malformed entries are dropped
+// silently so one bad cite doesn't poison the whole highlight set.
+function parseCitations(values: string[]): Citation[] {
+  const out: Citation[] = [];
+  for (const raw of values) {
+    const parts = raw.split(",");
+    if (parts.length !== 5) continue;
+    const nums = parts.map((p) => Number.parseFloat(p));
+    if (nums.some((n) => !Number.isFinite(n))) continue;
+    const [page, x, y, width, height] = nums;
+    if (!Number.isInteger(page) || page < 1) continue;
+    if (width <= 0 || height <= 0) continue;
+    if (x < 0 || y < 0) continue;
+    out.push({ page, x, y, width, height });
+  }
+  return out;
+}
+
+// Stand-in citations until a real producer wires this up. Toggle with
+// `?mock=1` on the URL — lets us visually verify the overlay pipeline
+// without constructing cite params by hand.
+const MOCK_CITATIONS: Citation[] = [
+  { page: 1, x: 200, y: 300, width: 900, height: 80 },
+  { page: 1, x: 200, y: 500, width: 700, height: 60 },
+  { page: 2, x: 150, y: 400, width: 1000, height: 120 },
+];
+
+// Manifest pixels → PDF points (embedpdf's page-space unit). Both are
+// top-left-origin so no y-flip; it's a single uniform scale factor.
+function pixelsToPoints(pixels: number, dpi: number): number {
+  return (pixels * 72) / dpi;
+}
+
+const CITATION_COLOR = "#ffcc00";
+const CITATION_OPACITY = 0.35;
+
 // Jump to the target page if (a) the scroll capability is ready and (b) the
 // target page falls within the document's bounds. `behavior: "instant"` avoids
 // the smooth-scroll animation — we want link clicks to land immediately.
@@ -377,8 +433,20 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
   //     (doc stayed loaded), effect fires and jumps.
   const [searchParams] = useSearchParams();
   const pageParam = searchParams.get("page");
+  const mockCitations = searchParams.get("mock") === "1";
+  const citeParams = searchParams.getAll("cite");
   const scrollCapRef = useRef<ScrollCapability | null>(null);
+  const annotationCapRef = useRef<AnnotationCapability | null>(null);
   const [isScrollReady, setIsScrollReady] = useState(false);
+
+  // Parsing depends only on the raw param strings, not array identity — memo
+  // so the draw effect below isn't re-running on every render.
+  const citations = useMemo<Citation[]>(() => {
+    if (mockCitations) return MOCK_CITATIONS;
+    return parseCitations(citeParams);
+    // Join keeps the effect's reactivity without citing the unstable array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mockCitations, citeParams.join("|")]);
 
   useEffect(() => {
     // PDFViewer's key={documentId} remounts the viewer on doc change and
@@ -387,6 +455,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     // onLayoutReady before touching the new registry.
     setIsScrollReady(false);
     scrollCapRef.current = null;
+    annotationCapRef.current = null;
   }, [documentId]);
 
   useEffect(() => {
@@ -395,6 +464,66 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     if (scrollCap === null) return;
     jumpToTargetPage(scrollCap, documentId, parseTargetPage(pageParam));
   }, [pageParam, documentId, isScrollReady]);
+
+  // Paint citation rects as ephemeral Square annotations. We gate on:
+  //   - isScrollReady (per-doc layout is live)
+  //   - annotationCapRef (registry captured in onReady)
+  //   - document loaded AND matching the current route (otherwise we could
+  //     draw using a previous doc's DPI during a doc-switch race)
+  // Cleanup purges what this run created — `autoCommit: false` keeps them
+  // out of the PDF file, and `purgeAnnotation` drops state without
+  // round-tripping to PDFium. The viewer remount on docId change also
+  // tears everything down for free; this cleanup covers same-doc cite
+  // param changes.
+  const docDpi = document?.dpi ?? 0;
+  const docMatchesRoute = document !== null && document.id.toString() === documentId;
+  useEffect(() => {
+    if (!isScrollReady) return;
+    if (!docMatchesRoute) return;
+    if (docDpi <= 0) return;
+    const annotationCap = annotationCapRef.current;
+    if (annotationCap === null) return;
+    if (citations.length === 0) return;
+
+    const scope = annotationCap.forDocument(documentId);
+    const created: { pageIndex: number; id: string }[] = [];
+    for (const cite of citations) {
+      const id = crypto.randomUUID();
+      const pageIndex = cite.page - 1;
+      const rect = {
+        origin: {
+          x: pixelsToPoints(cite.x, docDpi),
+          y: pixelsToPoints(cite.y, docDpi),
+        },
+        size: {
+          width: pixelsToPoints(cite.width, docDpi),
+          height: pixelsToPoints(cite.height, docDpi),
+        },
+      };
+      scope.createAnnotation(pageIndex, {
+        id,
+        type: PdfAnnotationSubtype.SQUARE,
+        pageIndex,
+        rect,
+        flags: ["readOnly", "locked", "print"],
+        color: CITATION_COLOR,
+        opacity: CITATION_OPACITY,
+        strokeWidth: 0,
+        strokeColor: CITATION_COLOR,
+        strokeStyle: PdfAnnotationBorderStyle.SOLID,
+      });
+      created.push({ pageIndex, id });
+    }
+
+    return () => {
+      const cap = annotationCapRef.current;
+      if (cap === null) return;
+      const cleanupScope = cap.forDocument(documentId);
+      for (const entry of created) {
+        cleanupScope.purgeAnnotation(entry.pageIndex, entry.id);
+      }
+    };
+  }, [citations, documentId, isScrollReady, docMatchesRoute, docDpi]);
 
   useEffect(() => {
     let cancelled = false;
@@ -483,9 +612,14 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
             zoom: {
               defaultZoomLevel: ZoomMode.FitWidth,
             },
+            // Ephemeral programmatic rects only — annotations live in Redux
+            // state, never flushed to the PDF file. `locked: All` makes them
+            // non-interactive (clicks pass through, no drag/resize handles).
+            annotations: {
+              autoCommit: false,
+              locked: { type: LockModeType.All },
+            },
             disabledCategories: [
-              "annotation",
-              "annotation-shape",
               "form",
               "redaction",
               "document-open",
@@ -508,6 +642,11 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
             handleViewerReady(registry, () => {
               setDetailsOpen((current) => !current);
             });
+
+            const annotationPlugin = registry.getPlugin<AnnotationPlugin>("annotation");
+            if (annotationPlugin !== null) {
+              annotationCapRef.current = annotationPlugin.provides();
+            }
 
             const scrollPlugin = registry.getPlugin<ScrollPlugin>("scroll");
             if (scrollPlugin === null) return;
