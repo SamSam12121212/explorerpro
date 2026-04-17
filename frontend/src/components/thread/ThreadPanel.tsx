@@ -3,6 +3,7 @@ import { LuChevronDown, LuFileText, LuFolder, LuImage, LuPaperclip, LuSend } fro
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
 import type { AttachedCollection, AttachedDocument, MessageRole, ReasoningEffort } from "../../types";
 import { useThread } from "../../thread";
+import { MarkdownContent } from "./MarkdownContent";
 
 function bubbleClass(role: MessageRole) {
   const base = "max-w-[92%] px-4 py-3 text-sm leading-relaxed";
@@ -132,10 +133,14 @@ export function ThreadPanel() {
           {messages.filter((m) => m.text || (m.images?.length ?? 0) > 0).map((msg) => (
             <article className={bubbleClass(msg.role)} key={msg.id}>
               {msg.text && (
-                <p className="m-0 whitespace-pre-wrap">
-                  {msg.text}
-                  {msg.streaming && <span className="streaming-caret" />}
-                </p>
+                msg.role === "assistant" && !msg.streaming ? (
+                  <MarkdownContent text={msg.text} />
+                ) : (
+                  <p className="m-0 whitespace-pre-wrap">
+                    {msg.text}
+                    {msg.streaming && <span className="streaming-caret" />}
+                  </p>
+                )
               )}
 
               {msg.images && msg.images.length > 0 && (
