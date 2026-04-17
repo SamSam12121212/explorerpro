@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -336,6 +337,80 @@ func TestRecoveryHarnessSkipsOwnedThreadWhenLiveActorExists(t *testing.T) {
 
 	if len(h.published) != 0 {
 		t.Fatalf("published count = %d, want 0", len(h.published))
+	}
+}
+
+func TestRecoveryHarnessPublishFailureDoesNotConsumeAttempt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	h := newRecoveryHarness(t, tid("worker-local-1"))
+	h.addThread(threadstore.ThreadMeta{
+		ID:               800,
+		RootThreadID:     800,
+		Status:           threadstore.ThreadStatusRunning,
+		SocketGeneration: 1,
+		ActiveResponseID: "resp_active",
+	})
+	h.addOwner(800, threadstore.OwnerRecord{
+		WorkerID:         tid("worker-dead"),
+		SocketGeneration: 1,
+		LeaseUntil:       now.Add(-time.Minute),
+	})
+
+	publishErr := errors.New("transient publish failure")
+	var publishAttempts int
+	h.service.publishFn = func(_ context.Context, subject string, cmd threadcmd.Command) error {
+		publishAttempts++
+		if publishAttempts <= maxRecoveryAttemptsPerThread+2 {
+			return publishErr
+		}
+		h.published = append(h.published, publishedCommand{subject: subject, cmd: cmd})
+		return nil
+	}
+
+	for i := 0; i < maxRecoveryAttemptsPerThread+2; i++ {
+		if err := h.service.recoverThread(h.ctx, 800); err == nil {
+			t.Fatalf("iteration %d: expected publish error, got nil", i)
+		}
+	}
+
+	h.service.publishFn = func(_ context.Context, subject string, cmd threadcmd.Command) error {
+		h.published = append(h.published, publishedCommand{subject: subject, cmd: cmd})
+		return nil
+	}
+
+	h.recover(800)
+
+	if len(h.published) != 1 {
+		t.Fatalf("published count = %d, want 1 (failures must not consume the cap)", len(h.published))
+	}
+}
+
+func TestRecoveryHarnessSuppressesReconcileAfterAttemptCap(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	h := newRecoveryHarness(t, tid("worker-local-1"))
+	h.addThread(threadstore.ThreadMeta{
+		ID:               700,
+		RootThreadID:     700,
+		Status:           threadstore.ThreadStatusRunning,
+		SocketGeneration: 1,
+		ActiveResponseID: "resp_active",
+	})
+	h.addOwner(700, threadstore.OwnerRecord{
+		WorkerID:         tid("worker-dead"),
+		SocketGeneration: 1,
+		LeaseUntil:       now.Add(-time.Minute),
+	})
+
+	for i := 0; i < maxRecoveryAttemptsPerThread+3; i++ {
+		h.recover(700)
+	}
+
+	if len(h.published) != maxRecoveryAttemptsPerThread {
+		t.Fatalf("published count = %d, want %d", len(h.published), maxRecoveryAttemptsPerThread)
 	}
 }
 
