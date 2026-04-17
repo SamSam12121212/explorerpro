@@ -351,7 +351,8 @@ function parseCitations(values: string[]): Citation[] {
     const nums = parts.map((p) => Number.parseFloat(p));
     if (nums.some((n) => !Number.isFinite(n))) continue;
     const [page, x, y, width, height] = nums;
-    if (page < 1 || width <= 0 || height <= 0) continue;
+    if (!Number.isInteger(page) || page < 1) continue;
+    if (width <= 0 || height <= 0) continue;
     if (x < 0 || y < 0) continue;
     out.push({ page, x, y, width, height });
   }
