@@ -363,22 +363,38 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
   const [error, setError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
 
-  // `?page=N` on the URL lands the viewer on that page. Two triggers handle
-  // both remount and same-doc cases:
-  //   1. `onLayoutReady` inside onReady — fires when the PDF finishes its
-  //      initial layout after a remount (key={documentId} changes).
-  //   2. The useEffect below — fires when the search param changes while the
-  //      viewer is already mounted on the same doc, since onLayoutReady won't
-  //      fire again in that case.
+  // `?page=N` on the URL lands the viewer on that page. The scroll plugin
+  // builds its per-document state during the load → layout-ready sequence,
+  // so calling forDocument(id).getTotalPages() before that fires throws
+  // "Scroll state not found". We therefore gate the jump on an explicit
+  // "ready for this doc" flag that `onLayoutReady` flips below.
+  //
+  // One useEffect handles both cases via its deps:
+  //   - Different-doc navigation: documentId changes → PDFViewer remounts
+  //     (key={documentId}), reset effect clears the flag, new onLayoutReady
+  //     flips it back, effect fires and jumps.
+  //   - Same-doc navigation: pageParam changes while flag is still true
+  //     (doc stayed loaded), effect fires and jumps.
   const [searchParams] = useSearchParams();
   const pageParam = searchParams.get("page");
   const scrollCapRef = useRef<ScrollCapability | null>(null);
+  const [isScrollReady, setIsScrollReady] = useState(false);
 
   useEffect(() => {
+    // PDFViewer's key={documentId} remounts the viewer on doc change and
+    // its plugin registry is torn down — any captured capability becomes
+    // stale. Clear the flag so the jump effect waits for the fresh
+    // onLayoutReady before touching the new registry.
+    setIsScrollReady(false);
+    scrollCapRef.current = null;
+  }, [documentId]);
+
+  useEffect(() => {
+    if (!isScrollReady) return;
     const scrollCap = scrollCapRef.current;
     if (scrollCap === null) return;
     jumpToTargetPage(scrollCap, documentId, parseTargetPage(pageParam));
-  }, [pageParam, documentId]);
+  }, [pageParam, documentId, isScrollReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -413,9 +429,6 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     void loadDocument();
     return () => {
       cancelled = true;
-      // PDFViewer is keyed on documentId and remounts on change, which
-      // destroys the old registry and invalidates the captured capability.
-      scrollCapRef.current = null;
     };
   }, [documentId]);
 
@@ -497,16 +510,16 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
             const scrollPlugin = registry.getPlugin<ScrollPlugin>("scroll");
             if (scrollPlugin === null) return;
             const scrollCap = scrollPlugin.provides();
-            scrollCapRef.current = scrollCap;
 
-            // `onLayoutReady` fires once the PDF structure is computed and
-            // the viewer can honor scroll requests. We gate on `isInitial`
-            // so only the first-load jump happens here; subsequent in-same-
-            // doc navigations are handled by the pageParam useEffect above.
+            // Don't capture the scroll capability until layout is ready for
+            // THIS document. The scroll plugin only populates its per-doc
+            // state during the load → layout-ready sequence, so reading
+            // anything via forDocument(id) before this fires throws.
             scrollCap.onLayoutReady((event) => {
               if (!event.isInitial) return;
               if (event.documentId !== documentId) return;
-              jumpToTargetPage(scrollCap, documentId, parseTargetPage(pageParam));
+              scrollCapRef.current = scrollCap;
+              setIsScrollReady(true);
             });
           }}
         />
