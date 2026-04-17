@@ -6,6 +6,8 @@ GET  /health     liveness
 """
 from __future__ import annotations
 
+import asyncio
+import hmac
 import io
 import logging
 import os
@@ -71,10 +73,13 @@ class StructureResponse(BaseModel):
 def _check_auth(authorization: str | None) -> None:
     if not AUTH_TOKEN:
         return
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if not authorization:
         raise HTTPException(status_code=401, detail="missing or malformed authorization header")
-    provided = authorization.split(None, 1)[1]
-    if provided != AUTH_TOKEN:
+    scheme, _, token = authorization.partition(" ")
+    token = token.strip()
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="missing or malformed authorization header")
+    if not hmac.compare_digest(token, AUTH_TOKEN):
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
 
@@ -119,7 +124,9 @@ async def ocr_endpoint(
     t0 = time.perf_counter()
     arr, width, height = _load_image(await image.read())
 
-    results = _ocr.predict(arr)
+    # Inference is blocking + CPU/GPU-bound; run off the event loop so /health
+    # and concurrent requests stay responsive.
+    results = await asyncio.to_thread(_ocr.predict, arr)
     lines: list[Line] = []
 
     if results:
@@ -153,13 +160,14 @@ async def ocr_visualize(
     _check_auth(authorization)
     arr, _w, _h = _load_image(await image.read())
 
-    results = _ocr.predict(arr)
+    results = await asyncio.to_thread(_ocr.predict, arr)
     if not results:
         raise HTTPException(status_code=404, detail="no OCR results")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        results[0].save_to_img(str(tmp_path))
+        # save_to_img does extra rendering + disk I/O — also blocking.
+        await asyncio.to_thread(results[0].save_to_img, str(tmp_path))
         candidates = sorted([p for p in tmp_path.rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
         if not candidates:
             raise HTTPException(status_code=500, detail="save_to_img produced no output file")
@@ -191,8 +199,10 @@ async def structure_endpoint(
     t0 = time.perf_counter()
     arr, width, height = _load_image(await image.read())
 
-    pipeline = _get_structure()
-    results = pipeline.predict(arr)
+    # First call triggers ~60-90s lazy model load — absolutely must not
+    # block the event loop, or /health goes dark for the whole duration.
+    pipeline = await asyncio.to_thread(_get_structure)
+    results = await asyncio.to_thread(pipeline.predict, arr)
 
     blocks: list[StructureBlock] = []
     if results:
