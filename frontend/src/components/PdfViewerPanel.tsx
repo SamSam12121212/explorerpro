@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import {
   PDFViewer,
   ZoomMode,
@@ -12,6 +13,7 @@ import {
   type UISchema,
 } from "@embedpdf/react-pdf-viewer";
 import type { CommandsPlugin } from "@embedpdf/plugin-commands";
+import type { ScrollCapability, ScrollPlugin } from "@embedpdf/plugin-scroll";
 import { LuRotateCcw, LuX } from "react-icons/lu";
 import { apiGet, apiPatch } from "../api";
 import { DEFAULT_MODEL, DEFAULT_REASONING, MODEL_OPTIONS, REASONING_OPTIONS } from "../constants";
@@ -309,6 +311,31 @@ function handleViewerReady(registry: PluginRegistry, onToggleDetails: () => void
   }
 }
 
+// Parse `?page=N` into a 1-based page number, or null if absent / malformed.
+// Upper bound is clamped later against the document's totalPages (known only
+// after the scroll plugin's layout is ready).
+function parseTargetPage(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return null;
+  return parsed;
+}
+
+// Jump to the target page if (a) the scroll capability is ready and (b) the
+// target page falls within the document's bounds. `behavior: "instant"` avoids
+// the smooth-scroll animation — we want link clicks to land immediately.
+function jumpToTargetPage(
+  scrollCap: ScrollCapability,
+  documentId: string,
+  target: number | null,
+): void {
+  if (target === null) return;
+  const scope = scrollCap.forDocument(documentId);
+  const totalPages = scope.getTotalPages();
+  if (totalPages < 1 || target > totalPages) return;
+  scope.scrollToPage({ pageNumber: target, behavior: "instant" });
+}
+
 function formatTimestamp(value?: string) {
   if (!value) {
     return "Not initialized yet";
@@ -335,6 +362,23 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
+
+  // `?page=N` on the URL lands the viewer on that page. Two triggers handle
+  // both remount and same-doc cases:
+  //   1. `onLayoutReady` inside onReady — fires when the PDF finishes its
+  //      initial layout after a remount (key={documentId} changes).
+  //   2. The useEffect below — fires when the search param changes while the
+  //      viewer is already mounted on the same doc, since onLayoutReady won't
+  //      fire again in that case.
+  const [searchParams] = useSearchParams();
+  const pageParam = searchParams.get("page");
+  const scrollCapRef = useRef<ScrollCapability | null>(null);
+
+  useEffect(() => {
+    const scrollCap = scrollCapRef.current;
+    if (scrollCap === null) return;
+    jumpToTargetPage(scrollCap, documentId, parseTargetPage(pageParam));
+  }, [pageParam, documentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -369,6 +413,9 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     void loadDocument();
     return () => {
       cancelled = true;
+      // PDFViewer is keyed on documentId and remounts on change, which
+      // destroys the old registry and invalidates the captured capability.
+      scrollCapRef.current = null;
     };
   }, [documentId]);
 
@@ -445,6 +492,21 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
           onReady={(registry) => {
             handleViewerReady(registry, () => {
               setDetailsOpen((current) => !current);
+            });
+
+            const scrollPlugin = registry.getPlugin<ScrollPlugin>("scroll");
+            if (scrollPlugin === null) return;
+            const scrollCap = scrollPlugin.provides();
+            scrollCapRef.current = scrollCap;
+
+            // `onLayoutReady` fires once the PDF structure is computed and
+            // the viewer can honor scroll requests. We gate on `isInitial`
+            // so only the first-load jump happens here; subsequent in-same-
+            // doc navigations are handled by the pageParam useEffect above.
+            scrollCap.onLayoutReady((event) => {
+              if (!event.isInitial) return;
+              if (event.documentId !== documentId) return;
+              jumpToTargetPage(scrollCap, documentId, parseTargetPage(pageParam));
             });
           }}
         />
