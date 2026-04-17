@@ -77,7 +77,7 @@ export function ThreadSidebar({
 
           return (
             <div
-              className={`group flex items-start border-b border-[#2a2a2a] transition ${
+              className={`group flex items-start transition ${
                 isActive
                   ? "bg-[#2a2a2a] shadow-[inset_2px_0_0_#007acc]"
                   : "bg-transparent hover:bg-[#252525]"
@@ -97,9 +97,6 @@ export function ThreadSidebar({
                 type="button"
               >
                 <span className="block truncate text-sm font-medium">{thread.label}</span>
-                <span className="block truncate text-[0.78rem] text-[#777]">
-                  {thread.previewText || "No messages yet"}
-                </span>
               </button>
 
               <div
