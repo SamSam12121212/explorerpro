@@ -17,7 +17,7 @@ There is no provider abstraction layer, so Azure OpenAI does not work. ZDR is no
 - **Durable transport via NATS + JetStream** with idempotent delivery and replay safety.
 - **Postgres-backed runtime state and durable history.**
 
-## The evidence chain
+## The evidence chain - in progress, not yet implemented
 
 When a user asks something that needs grounding in a document:
 
@@ -41,7 +41,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-The OCR service in `services/paddleocr/` is deployed separately on a GPU droplet — not part of the default stack because you probably do not have an RTX 6000 in your tower. See that service's own compose file for how it runs.
+The OCR service in `services/paddleocr/` is deployed separately on a GPU droplet. See that service's own compose file for how it runs.
 
 ## Rough edges
 
