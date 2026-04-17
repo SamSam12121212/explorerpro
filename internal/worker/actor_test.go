@@ -2509,6 +2509,9 @@ func TestStartDocumentQueryGroupRejectsUnattachedDocs(t *testing.T) {
 	if !strings.Contains(err.Error(), "999") {
 		t.Fatalf("error = %v, want mention of missing document id", err)
 	}
+	if !errors.Is(err, errCommandPrecond) {
+		t.Fatalf("expected errCommandPrecond, got %v", err)
+	}
 }
 
 func TestFilterChildThreadToolsRemovesDocumentQueryTool(t *testing.T) {

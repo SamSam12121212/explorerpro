@@ -3155,7 +3155,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		}
 	}
 	if len(missing) > 0 {
-		return 0, fmt.Errorf("documents not attached to thread: %v", missing)
+		return 0, fmt.Errorf("%w: documents not attached to thread: %v", errCommandPrecond, missing)
 	}
 
 	childThreadIDs := make([]int64, 0, len(docWork))
