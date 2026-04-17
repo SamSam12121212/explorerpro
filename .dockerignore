@@ -1,0 +1,35 @@
+# VCS & local tooling
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+
+# Build caches & artifacts
+.cache/
+bin/
+dist/
+*.tsbuildinfo
+
+# OS junk
+.DS_Store
+
+# Env files (secrets — never into images)
+.env
+.env.local
+.env.*
+
+# Frontend has its own image; backend Go builds don't need it
+frontend/
+
+# Python sidecar deployed separately (see services/paddleocr/README)
+services/paddleocr/
+
+# Runtime-persisted data
+blob-storage/
+
+# Docs & top-level text
+docs/
+*.md
+handoff.md
+LICENSE

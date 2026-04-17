@@ -50,8 +50,9 @@ services:
     restart: unless-stopped
 
   api:
-    build: .
-    entrypoint: ["api"]
+    build:
+      context: .
+      dockerfile: cmd/api/Dockerfile
     ports:
       - "${PORT:-8080}:8080"
     environment:
@@ -78,8 +79,9 @@ services:
     restart: unless-stopped
 
   worker:
-    build: .
-    entrypoint: ["worker"]
+    build:
+      context: .
+      dockerfile: cmd/worker/Dockerfile
     environment:
       APP_ENV: development
       SERVICE_NAME: explorer-worker
@@ -106,8 +108,9 @@ services:
     restart: unless-stopped
 
   wsserver:
-    build: .
-    entrypoint: ["wsserver"]
+    build:
+      context: .
+      dockerfile: cmd/wsserver/Dockerfile
     ports:
       - "${WS_PORT:-8081}:8081"
     environment:
@@ -122,8 +125,9 @@ services:
     restart: unless-stopped
 
   git:
-    build: .
-    entrypoint: ["gitservice"]
+    build:
+      context: .
+      dockerfile: cmd/git/Dockerfile
     environment:
       SERVICE_NAME: explorer-git
       LOG_LEVEL: "${LOG_LEVEL:-info}"
@@ -142,8 +146,9 @@ services:
     restart: unless-stopped
 
   docsplitter:
-    build: .
-    entrypoint: ["docsplitter"]
+    build:
+      context: .
+      dockerfile: cmd/docsplitter/Dockerfile
     environment:
       SERVICE_NAME: explorer-docsplitter
       LOG_LEVEL: "${LOG_LEVEL:-info}"
@@ -161,8 +166,9 @@ services:
     restart: unless-stopped
 
   documenthandler:
-    build: .
-    entrypoint: ["documenthandler"]
+    build:
+      context: .
+      dockerfile: cmd/documenthandler/Dockerfile
     environment:
       SERVICE_NAME: explorer-documenthandler
       LOG_LEVEL: "${LOG_LEVEL:-info}"
