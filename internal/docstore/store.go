@@ -154,6 +154,17 @@ func (s *Store) UpdateSettings(ctx context.Context, id int64, queryModel, queryR
 	return d, nil
 }
 
+func (s *Store) Delete(ctx context.Context, id int64) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM documents WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete document: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDocumentNotFound
+	}
+	return nil
+}
+
 func (s *Store) UpdateStatus(ctx context.Context, id int64, status, manifestRef string, pageCount int, errMsg string) error {
 	_, err := s.pool.Exec(ctx, `
 UPDATE documents SET status = $2, manifest_ref = $3, page_count = $4, error = $5, updated_at = now()

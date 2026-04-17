@@ -92,8 +92,10 @@ func (a *documentAPI) handleDocumentRoutes(w http.ResponseWriter, r *http.Reques
 			a.handleGetDocument(w, r, docID)
 		case http.MethodPatch:
 			a.handleUpdateDocument(w, r, docID)
+		case http.MethodDelete:
+			a.handleDeleteDocument(w, r, docID)
 		default:
-			methodNotAllowed(w, http.MethodGet, http.MethodPatch)
+			methodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 		}
 	case len(parts) == 2 && parts[1] == "source":
 		if r.Method != http.MethodGet {
@@ -295,6 +297,20 @@ func (a *documentAPI) handleUpdateDocument(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{
 		"document": presentDocument(doc),
 	})
+}
+
+func (a *documentAPI) handleDeleteDocument(w http.ResponseWriter, r *http.Request, docID int64) {
+	if err := a.store.Delete(r.Context(), docID); err != nil {
+		if errors.Is(err, docstore.ErrDocumentNotFound) {
+			writeErrorJSON(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("delete document: %v", err))
+		return
+	}
+
+	a.logger.Info("document deleted", "document_id", docID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *documentAPI) handleDocumentSource(w http.ResponseWriter, r *http.Request, docID int64) {
