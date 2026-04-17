@@ -12,6 +12,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Annotated
@@ -41,6 +42,14 @@ from paddleocr import PaddleOCR  # noqa: E402
 log.info("Instantiating PaddleOCR (downloads weights on first run)…")
 _ocr = PaddleOCR(use_textline_orientation=True, lang=LANG)
 log.info("PaddleOCR ready.")
+
+# PaddleOCR.predict is not thread-safe — concurrent calls on the same
+# instance crash with RuntimeError: std::exception (see
+# https://github.com/PaddlePaddle/PaddleOCR/issues/16238). A single
+# async semaphore serializes every inference call across all endpoints;
+# we have one GPU anyway, so parallelism was illusory. The await on
+# .acquire() yields to the event loop so /health stays responsive.
+_inference_sem = asyncio.Semaphore(1)
 
 
 class Line(BaseModel):
@@ -125,8 +134,10 @@ async def ocr_endpoint(
     arr, width, height = _load_image(await image.read())
 
     # Inference is blocking + CPU/GPU-bound; run off the event loop so /health
-    # and concurrent requests stay responsive.
-    results = await asyncio.to_thread(_ocr.predict, arr)
+    # stays responsive. Semaphore(1) serializes concurrent predict calls —
+    # PaddleOCR.predict is not thread-safe.
+    async with _inference_sem:
+        results = await asyncio.to_thread(_ocr.predict, arr)
     lines: list[Line] = []
 
     if results:
@@ -160,14 +171,17 @@ async def ocr_visualize(
     _check_auth(authorization)
     arr, _w, _h = _load_image(await image.read())
 
-    results = await asyncio.to_thread(_ocr.predict, arr)
+    async with _inference_sem:
+        results = await asyncio.to_thread(_ocr.predict, arr)
     if not results:
         raise HTTPException(status_code=404, detail="no OCR results")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        # save_to_img does extra rendering + disk I/O — also blocking.
-        await asyncio.to_thread(results[0].save_to_img, str(tmp_path))
+        # save_to_img does extra rendering + disk I/O and may touch the
+        # same model state, so keep it inside the serialization window.
+        async with _inference_sem:
+            await asyncio.to_thread(results[0].save_to_img, str(tmp_path))
         candidates = sorted([p for p in tmp_path.rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
         if not candidates:
             raise HTTPException(status_code=500, detail="save_to_img produced no output file")
@@ -178,16 +192,25 @@ async def ocr_visualize(
 
 
 _structure = None
+_structure_lock = threading.Lock()
 
 
 def _get_structure():
+    # Double-checked locking: fast path with no lock once initialized,
+    # lock-guarded init on first call. Without the lock two concurrent
+    # /structure requests could both see `_structure is None` in
+    # separate threadpool threads and try to load the ~800MB
+    # PPStructureV3 models twice — wastes time, doubles VRAM, risks OOM.
     global _structure
-    if _structure is None:
-        log.info("Loading PP-StructureV3…")
-        from paddleocr import PPStructureV3
-        _structure = PPStructureV3()
-        log.info("PP-StructureV3 ready.")
-    return _structure
+    if _structure is not None:
+        return _structure
+    with _structure_lock:
+        if _structure is None:
+            log.info("Loading PP-StructureV3…")
+            from paddleocr import PPStructureV3
+            _structure = PPStructureV3()
+            log.info("PP-StructureV3 ready.")
+        return _structure
 
 
 @app.post("/structure", response_model=StructureResponse)
@@ -201,8 +224,11 @@ async def structure_endpoint(
 
     # First call triggers ~60-90s lazy model load — absolutely must not
     # block the event loop, or /health goes dark for the whole duration.
+    # The load itself is protected by threading.Lock inside _get_structure
+    # (see double-check). Inference runs under the inference semaphore.
     pipeline = await asyncio.to_thread(_get_structure)
-    results = await asyncio.to_thread(pipeline.predict, arr)
+    async with _inference_sem:
+        results = await asyncio.to_thread(pipeline.predict, arr)
 
     blocks: list[StructureBlock] = []
     if results:
