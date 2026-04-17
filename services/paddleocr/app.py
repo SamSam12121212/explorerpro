@@ -171,16 +171,16 @@ async def ocr_visualize(
     _check_auth(authorization)
     arr, _w, _h = _load_image(await image.read())
 
-    async with _inference_sem:
-        results = await asyncio.to_thread(_ocr.predict, arr)
-    if not results:
-        raise HTTPException(status_code=404, detail="no OCR results")
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        # save_to_img does extra rendering + disk I/O and may touch the
-        # same model state, so keep it inside the serialization window.
+        # Keep predict + save_to_img atomic under one semaphore acquisition.
+        # save_to_img reads state populated by predict; a concurrent request
+        # acquiring the semaphore between them would mutate that state and
+        # corrupt the visualization. File I/O below runs outside the lock.
         async with _inference_sem:
+            results = await asyncio.to_thread(_ocr.predict, arr)
+            if not results:
+                raise HTTPException(status_code=404, detail="no OCR results")
             await asyncio.to_thread(results[0].save_to_img, str(tmp_path))
         candidates = sorted([p for p in tmp_path.rglob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}])
         if not candidates:
