@@ -29,15 +29,16 @@ import (
 )
 
 const (
-	commandAckWait    = 30 * time.Minute
-	workerLeaseTTL    = 2 * time.Minute
-	workerConsumerTTL = 10 * time.Minute
-	socketExpiryTTL   = 55 * time.Minute
-	socketRotateLead  = 5 * time.Minute
-	socketPruneTTL    = 1 * time.Hour
-	socketSweepBatch  = 256
-	commandQueueSize  = 128
-	recoverySweepTTL  = 15 * time.Second
+	commandAckWait              = 30 * time.Minute
+	workerLeaseTTL              = 2 * time.Minute
+	workerConsumerTTL           = 10 * time.Minute
+	socketExpiryTTL             = 55 * time.Minute
+	socketRotateLead            = 5 * time.Minute
+	socketPruneTTL              = 1 * time.Hour
+	socketSweepBatch            = 256
+	commandQueueSize            = 128
+	recoverySweepTTL            = 15 * time.Second
+	maxRecoveryAttemptsPerThread = 5
 )
 
 type Service struct {
@@ -59,6 +60,9 @@ type Service struct {
 
 	actorsMu sync.Mutex
 	actors   map[int64]*threadActor
+
+	recoveryAttemptsMu sync.Mutex
+	recoveryAttempts   map[int64]int
 }
 
 type serviceSweepStore interface {
@@ -103,6 +107,7 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		sweepStore:        store,
 		relay:             relay,
 		actors:            map[int64]*threadActor{},
+		recoveryAttempts:  map[int64]int{},
 	}, nil
 }
 
@@ -143,7 +148,7 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(commandAckWait),
-		nats.DeliverAll(),
+		nats.DeliverNew(),
 	)
 	if err != nil {
 		return fmt.Errorf("subscribe dispatch commands: %w", err)
@@ -158,7 +163,7 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(commandAckWait),
-		nats.DeliverAll(),
+		nats.DeliverNew(),
 	)
 	if err != nil {
 		_ = dispatchSub.Unsubscribe()
@@ -527,12 +532,39 @@ func (s *Service) recoverThread(ctx context.Context, threadID int64) error {
 		subject = threadcmd.WorkerCommandSubject(s.workerID, kind)
 	}
 
+	if !s.claimRecoveryAttempt(threadID) {
+		return nil
+	}
+
 	cmd, err := s.buildRecoveryCommand(ctx, meta, owner, kind)
 	if err != nil {
 		return err
 	}
 
 	return s.publishCommand(ctx, subject, cmd)
+}
+
+func (s *Service) claimRecoveryAttempt(threadID int64) bool {
+	s.recoveryAttemptsMu.Lock()
+	defer s.recoveryAttemptsMu.Unlock()
+
+	if s.recoveryAttempts == nil {
+		s.recoveryAttempts = map[int64]int{}
+	}
+	attempts := s.recoveryAttempts[threadID]
+	if attempts >= maxRecoveryAttemptsPerThread {
+		if attempts == maxRecoveryAttemptsPerThread {
+			s.logger.Warn("recovery attempt cap reached, suppressing further reconciles for thread",
+				"thread_id", threadID,
+				"attempts", attempts,
+				"cap", maxRecoveryAttemptsPerThread,
+			)
+			s.recoveryAttempts[threadID] = attempts + 1
+		}
+		return false
+	}
+	s.recoveryAttempts[threadID] = attempts + 1
+	return true
 }
 
 func (s *Service) hasLiveActor(threadID int64) bool {

@@ -339,6 +339,33 @@ func TestRecoveryHarnessSkipsOwnedThreadWhenLiveActorExists(t *testing.T) {
 	}
 }
 
+func TestRecoveryHarnessSuppressesReconcileAfterAttemptCap(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	h := newRecoveryHarness(t, tid("worker-local-1"))
+	h.addThread(threadstore.ThreadMeta{
+		ID:               700,
+		RootThreadID:     700,
+		Status:           threadstore.ThreadStatusRunning,
+		SocketGeneration: 1,
+		ActiveResponseID: "resp_active",
+	})
+	h.addOwner(700, threadstore.OwnerRecord{
+		WorkerID:         tid("worker-dead"),
+		SocketGeneration: 1,
+		LeaseUntil:       now.Add(-time.Minute),
+	})
+
+	for i := 0; i < maxRecoveryAttemptsPerThread+3; i++ {
+		h.recover(700)
+	}
+
+	if len(h.published) != maxRecoveryAttemptsPerThread {
+		t.Fatalf("published count = %d, want %d", len(h.published), maxRecoveryAttemptsPerThread)
+	}
+}
+
 func TestRecoveryHarnessSchedulesRotationOnlyForLocalLiveActors(t *testing.T) {
 	t.Parallel()
 
