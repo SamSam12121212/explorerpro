@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { LuEllipsis, LuFileText } from "react-icons/lu";
+import { LuEllipsis, LuFileText, LuTrash2 } from "react-icons/lu";
 import { useNavigate, useParams } from "react-router";
-import { apiGet } from "../../api";
+import { apiDelete, apiGet } from "../../api";
 import { DOCUMENTS_CHANGED_EVENT } from "../../constants";
 import type {
   AttachedDocument,
@@ -36,6 +36,7 @@ export function DocumentsView({
   const navigate = useNavigate();
   const [documents, setDocuments] = useState<DocumentEntry[]>([]);
   const [openMenuDocumentId, setOpenMenuDocumentId] = useState<number | null>(null);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -102,6 +103,31 @@ export function DocumentsView({
       window.removeEventListener("mousedown", handlePointerDown);
     };
   }, [openMenuDocumentId]);
+
+  const handleDelete = useCallback(
+    async (document: DocumentEntry) => {
+      if (deletingDocumentId) return;
+      const confirmed = window.confirm(
+        `Delete "${documentTitle(document)}"? This removes it from the app; the uploaded file in blob storage is retained.`,
+      );
+      if (!confirmed) return;
+
+      setDeletingDocumentId(document.id);
+      try {
+        await apiDelete(`/documents/${document.id.toString()}`);
+        setOpenMenuDocumentId(null);
+        window.dispatchEvent(new Event(DOCUMENTS_CHANGED_EVENT));
+        if (documentId === document.id.toString()) {
+          void navigate("/");
+        }
+      } catch {
+        /* swallow delete errors */
+      } finally {
+        setDeletingDocumentId(null);
+      }
+    },
+    [deletingDocumentId, documentId, navigate],
+  );
 
   return (
     <div className="flex h-full w-full min-w-0 flex-col bg-[#1e1e1e]">
@@ -182,6 +208,21 @@ export function DocumentsView({
                         {attachedDocumentIds.includes(document.id)
                           ? "Attached"
                           : "Attach to thread"}
+                      </span>
+                    </button>
+                    <button
+                      className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs text-[#d4d4d4] transition hover:bg-[#2a2a2a] disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={deletingDocumentId === document.id}
+                      onClick={() => {
+                        void handleDelete(document);
+                      }}
+                      type="button"
+                    >
+                      <LuTrash2 className="h-3.5 w-3.5" />
+                      <span>
+                        {deletingDocumentId === document.id
+                          ? "Deleting…"
+                          : "Delete document"}
                       </span>
                     </button>
                   </div>
