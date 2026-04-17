@@ -475,7 +475,9 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
           key={documentId}
           className="absolute inset-0 h-full w-full"
           config={{
-            src: `/documents/${documentId}/source`,
+            documentManager: {
+              initialDocuments: [{ documentId, url: `/documents/${documentId}/source` }],
+            },
             icons: PDF_VIEWER_ICONS,
             theme: PDF_VIEWER_THEME,
             zoom: {
