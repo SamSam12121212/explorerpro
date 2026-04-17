@@ -2,6 +2,7 @@ import { appStreamManager } from "../stream/appStream";
 import { apiDelete, apiGet, apiPost, checkHealthApi, uploadImage } from "../api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "../constants";
 import type {
+  AttachedCollection,
   AttachedDocument,
   MessageRole,
   ThreadCreateResponse,
@@ -46,6 +47,33 @@ function mergeAttachedDocuments(current: AttachedDocument[], incoming: AttachedD
     if (!seen.has(doc.id)) {
       seen.add(doc.id);
       merged.push(doc);
+    }
+  }
+  return merged;
+}
+
+function normalizeAttachedCollections(collections?: AttachedCollection[]): AttachedCollection[] {
+  return (collections ?? []).map((c) => ({
+    id: c.id,
+    name: c.name,
+    documents: normalizeAttachedDocuments(c.documents),
+  }));
+}
+
+function mergeAttachedCollections(
+  current: AttachedCollection[],
+  incoming: AttachedCollection[],
+): AttachedCollection[] {
+  const merged = [...current];
+  const byId = new Map(current.map((c, i) => [c.id, i] as const));
+  for (const collection of incoming) {
+    const existingIdx = byId.get(collection.id);
+    if (existingIdx === undefined) {
+      byId.set(collection.id, merged.length);
+      merged.push(collection);
+    } else {
+      // Refresh the cached members from the latest response.
+      merged[existingIdx] = collection;
     }
   }
   return merged;
@@ -96,6 +124,8 @@ const initialState: ThreadState = {
   model: DEFAULT_MODEL,
   attachedDocuments: [],
   pendingDocuments: [],
+  attachedCollections: [],
+  pendingCollections: [],
   pendingImages: [],
   draft: "",
   reasoningEffort: "medium",
@@ -163,6 +193,13 @@ export class ThreadService {
     }));
   };
 
+  setPendingCollections = (updater: AttachedCollection[] | ((current: AttachedCollection[]) => AttachedCollection[])) => {
+    this.setState((s) => ({
+      ...s,
+      pendingCollections: typeof updater === "function" ? updater(s.pendingCollections) : updater,
+    }));
+  };
+
   setPendingImages = (updater: UploadedImage[] | ((current: UploadedImage[]) => UploadedImage[])) => {
     this.setState((s) => ({
       ...s,
@@ -175,6 +212,14 @@ export class ThreadService {
       if (s.attachedDocuments.some((d) => d.id === document.id)) return s;
       if (s.pendingDocuments.some((d) => d.id === document.id)) return s;
       return { ...s, pendingDocuments: [...s.pendingDocuments, document] };
+    });
+  };
+
+  attachCollection = (collection: AttachedCollection) => {
+    this.setState((s) => {
+      if (s.attachedCollections.some((c) => c.id === collection.id)) return s;
+      if (s.pendingCollections.some((c) => c.id === collection.id)) return s;
+      return { ...s, pendingCollections: [...s.pendingCollections, collection] };
     });
   };
 
@@ -220,10 +265,12 @@ export class ThreadService {
         threadId: nextThreadId,
         model: threadInfo.thread?.model ?? DEFAULT_MODEL,
         attachedDocuments: normalizeAttachedDocuments(threadInfo.attached_documents),
+        attachedCollections: normalizeAttachedCollections(threadInfo.attached_collections),
         messages: buildMessagesFromItems(payload),
         phase: statusMeansBusy(nextStatus ?? undefined) ? "streaming" : "idle",
         thinking: nextThinking,
         pendingDocuments: [],
+        pendingCollections: [],
         pendingImages: [],
         pendingDocumentQueries: [],
         draft: "",
@@ -248,6 +295,7 @@ export class ThreadService {
         thinking: false,
         threadId: null,
         attachedDocuments: [],
+        attachedCollections: [],
         pendingDocumentQueries: [],
       }));
     }
@@ -277,7 +325,12 @@ export class ThreadService {
     void this.fetchThreadList();
   };
 
-  sendMessage = async (text: string, images: UploadedImage[], documents: AttachedDocument[]) => {
+  sendMessage = async (
+    text: string,
+    images: UploadedImage[],
+    documents: AttachedDocument[],
+    collections: AttachedCollection[],
+  ) => {
     if (!text && images.length === 0) return;
 
     this.setState((s) => ({ ...s, phase: "streaming", thinking: false }));
@@ -298,6 +351,7 @@ export class ThreadService {
           instructions: DEFAULT_INSTRUCTIONS,
           input: inputItems,
           attached_document_ids: documents.map((d) => d.id),
+          attached_collection_ids: collections.map((c) => c.id),
           tools: EXPLORER_TOOLS,
           reasoning,
           store: true,
@@ -311,7 +365,9 @@ export class ThreadService {
           ...s,
           threadId: currentThreadId,
           attachedDocuments: normalizeAttachedDocuments(documents),
+          attachedCollections: normalizeAttachedCollections(collections),
           pendingDocuments: [],
+          pendingCollections: [],
         }));
       } else {
         await apiPost(`/threads/${currentThreadId.toString()}/commands`, {
@@ -320,13 +376,19 @@ export class ThreadService {
             input_items: inputItems,
             reasoning,
             attached_document_ids: documents.map((d) => d.id),
+            attached_collection_ids: collections.map((c) => c.id),
           },
         });
 
         this.setState((s) => ({
           ...s,
           attachedDocuments: mergeAttachedDocuments(s.attachedDocuments, normalizeAttachedDocuments(documents)),
+          attachedCollections: mergeAttachedCollections(
+            s.attachedCollections,
+            normalizeAttachedCollections(collections),
+          ),
           pendingDocuments: [],
+          pendingCollections: [],
         }));
       }
 

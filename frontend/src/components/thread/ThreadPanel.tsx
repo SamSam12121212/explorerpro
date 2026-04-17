@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { LuChevronDown, LuFileText, LuImage, LuPaperclip, LuSend } from "react-icons/lu";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { LuChevronDown, LuFileText, LuFolder, LuImage, LuPaperclip, LuSend } from "react-icons/lu";
 import { MODEL_OPTIONS, REASONING_OPTIONS } from "../../constants";
-import type { MessageRole, ReasoningEffort } from "../../types";
+import type { AttachedCollection, AttachedDocument, MessageRole, ReasoningEffort } from "../../types";
 import { useThread } from "../../thread";
 
 function bubbleClass(role: MessageRole) {
@@ -18,6 +18,18 @@ function bubbleClass(role: MessageRole) {
   }
 }
 
+function uniqueDocumentIds(
+  standaloneDocs: AttachedDocument[],
+  collections: AttachedCollection[],
+): Set<number> {
+  const ids = new Set<number>();
+  for (const doc of standaloneDocs) ids.add(doc.id);
+  for (const collection of collections) {
+    for (const doc of collection.documents) ids.add(doc.id);
+  }
+  return ids;
+}
+
 export function ThreadPanel() {
   const {
     busy,
@@ -26,11 +38,14 @@ export function ThreadPanel() {
     model,
     attachedDocuments,
     pendingDocuments,
+    attachedCollections,
+    pendingCollections,
     pendingDocumentQueries,
     pendingImages,
     reasoningEffort,
     sendMessage,
     setPendingDocuments,
+    setPendingCollections,
     setDraft,
     setModel,
     setPendingImages,
@@ -51,7 +66,22 @@ export function ThreadPanel() {
     setPrevThreadId(threadId);
     setAttachmentsOpen(false);
   }
-  const totalVisibleDocuments = attachedDocuments.length + pendingDocuments.length;
+
+  // Badge count: dedup union across standalone docs (attached + pending) and
+  // every collection's member docs (attached + pending). Matches the rule
+  // "2 collections of 5 docs + 3 standalones = 13" with dedup.
+  const persistedBadgeCount = useMemo(
+    () => uniqueDocumentIds(attachedDocuments, attachedCollections).size,
+    [attachedDocuments, attachedCollections],
+  );
+  const totalBadgeCount = useMemo(
+    () =>
+      uniqueDocumentIds(
+        [...attachedDocuments, ...pendingDocuments],
+        [...attachedCollections, ...pendingCollections],
+      ).size,
+    [attachedDocuments, pendingDocuments, attachedCollections, pendingCollections],
+  );
 
   const docQueryCount = pendingDocumentQueries.length;
 
@@ -184,12 +214,12 @@ export function ThreadPanel() {
         </div>
       )}
 
-      {pendingDocuments.length > 0 && (
+      {(pendingDocuments.length > 0 || pendingCollections.length > 0) && (
         <div className="flex flex-wrap gap-2 px-4 py-2">
           {pendingDocuments.map((doc) => (
             <div
               className="flex items-center gap-2 border border-[#333] bg-[#252525] px-2 py-1.5"
-              key={doc.id}
+              key={`doc-${doc.id.toString()}`}
             >
               <div className="flex h-10 w-10 items-center justify-center border border-[#333] bg-[#1f1f1f] text-[#888]">
                 <LuFileText className="h-4 w-4" />
@@ -217,6 +247,37 @@ export function ThreadPanel() {
               </button>
             </div>
           ))}
+          {pendingCollections.map((collection) => (
+            <div
+              className="flex items-center gap-2 border border-[#333] bg-[#252525] px-2 py-1.5"
+              key={`collection-${collection.id}`}
+            >
+              <div className="flex h-10 w-10 items-center justify-center border border-[#333] bg-[#1f1f1f] text-[#888]">
+                <LuFolder className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="m-0 truncate text-xs text-[#d4d4d4]">
+                  {collection.name.trim() || collection.id}
+                </p>
+                <p className="m-0 text-[11px] text-[#777]">
+                  {collection.documents.length === 1
+                    ? "1 doc"
+                    : `${collection.documents.length.toString()} docs`}
+                </p>
+              </div>
+              <button
+                className="text-xs text-[#888] hover:text-[#f44747]"
+                onClick={() => {
+                  setPendingCollections((current) =>
+                    current.filter((entry) => entry.id !== collection.id),
+                  );
+                }}
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -231,9 +292,10 @@ export function ThreadPanel() {
             }
             const imgs = pendingImages.slice();
             const docs = pendingDocuments.slice();
+            const collections = pendingCollections.slice();
             setDraft("");
             setPendingImages([]);
-            void sendMessage(text, imgs, docs);
+            void sendMessage(text, imgs, docs, collections);
           }}
         >
           <input
@@ -289,17 +351,21 @@ export function ThreadPanel() {
 
               <button
                 className={`relative text-[#888] hover:text-[#d4d4d4] disabled:cursor-not-allowed disabled:opacity-40 ${
-                  attachedDocuments.length > 0 ? "mr-1" : ""
+                  persistedBadgeCount > 0 ? "mr-1" : ""
                 }`}
-                disabled={totalVisibleDocuments === 0}
+                disabled={
+                  totalBadgeCount === 0 &&
+                  attachedCollections.length === 0 &&
+                  pendingCollections.length === 0
+                }
                 onClick={() => { setAttachmentsOpen(true); }}
                 title="View attached documents"
                 type="button"
               >
                 <LuPaperclip className="h-4 w-4" />
-                {attachedDocuments.length > 0 && (
+                {persistedBadgeCount > 0 && (
                   <span className="absolute -top-1.5 -right-2 min-w-4 rounded-full bg-[#007acc] px-1 text-[10px] leading-4 text-white">
-                    {attachedDocuments.length.toString()}
+                    {persistedBadgeCount.toString()}
                   </span>
                 )}
               </button>
@@ -369,7 +435,7 @@ export function ThreadPanel() {
               <div>
                 <p className="m-0 text-sm font-medium text-[#d4d4d4]">Thread attachments</p>
                 <p className="m-0 mt-1 text-xs text-[#777]">
-                  View the documents already attached to this thread and anything queued for the next send.
+                  View the documents and collections already attached to this thread, plus anything queued for the next send.
                 </p>
               </div>
               <button
@@ -386,7 +452,7 @@ export function ThreadPanel() {
                 <section>
                   <div className="mb-2 flex items-center justify-between">
                     <h3 className="m-0 text-xs font-semibold uppercase tracking-widest text-[#888]">
-                      Attached to thread
+                      Attached documents
                     </h3>
                     <span className="text-xs text-[#666]">
                       {attachedDocuments.length.toString()}
@@ -420,22 +486,61 @@ export function ThreadPanel() {
                 <section>
                   <div className="mb-2 flex items-center justify-between">
                     <h3 className="m-0 text-xs font-semibold uppercase tracking-widest text-[#888]">
+                      Attached collections
+                    </h3>
+                    <span className="text-xs text-[#666]">
+                      {attachedCollections.length.toString()}
+                    </span>
+                  </div>
+                  {attachedCollections.length === 0 ? (
+                    <p className="m-0 border border-dashed border-[#333] px-3 py-3 text-sm text-[#666]">
+                      No collections are attached to this thread yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {attachedCollections.map((collection) => (
+                        <div
+                          className="flex items-center gap-3 border border-[#333] bg-[#252525] px-3 py-2"
+                          key={collection.id}
+                        >
+                          <div className="flex h-9 w-9 items-center justify-center border border-[#333] bg-[#1b1b1b] text-[#888]">
+                            <LuFolder className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="m-0 truncate text-sm text-[#d4d4d4]">
+                              {collection.name.trim() || collection.id}
+                            </p>
+                            <p className="m-0 text-[11px] text-[#777]">
+                              {collection.documents.length === 1
+                                ? "1 doc"
+                                : `${collection.documents.length.toString()} docs`}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="m-0 text-xs font-semibold uppercase tracking-widest text-[#888]">
                       Pending next send
                     </h3>
                     <span className="text-xs text-[#666]">
-                      {pendingDocuments.length.toString()}
+                      {(pendingDocuments.length + pendingCollections.length).toString()}
                     </span>
                   </div>
-                  {pendingDocuments.length === 0 ? (
+                  {pendingDocuments.length === 0 && pendingCollections.length === 0 ? (
                     <p className="m-0 border border-dashed border-[#333] px-3 py-3 text-sm text-[#666]">
-                      No new documents are queued right now.
+                      No new documents or collections are queued right now.
                     </p>
                   ) : (
                     <div className="space-y-2">
                       {pendingDocuments.map((document) => (
                         <div
                           className="flex items-center gap-3 border border-[#333] bg-[#252525] px-3 py-2"
-                          key={document.id}
+                          key={`doc-${document.id.toString()}`}
                         >
                           <div className="flex h-9 w-9 items-center justify-center border border-[#333] bg-[#1b1b1b] text-[#888]">
                             <LuFileText className="h-4 w-4" />
@@ -450,6 +555,37 @@ export function ThreadPanel() {
                             onClick={() => {
                               setPendingDocuments((current) =>
                                 current.filter((entry) => entry.id !== document.id),
+                              );
+                            }}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                      {pendingCollections.map((collection) => (
+                        <div
+                          className="flex items-center gap-3 border border-[#333] bg-[#252525] px-3 py-2"
+                          key={`collection-${collection.id}`}
+                        >
+                          <div className="flex h-9 w-9 items-center justify-center border border-[#333] bg-[#1b1b1b] text-[#888]">
+                            <LuFolder className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="m-0 truncate text-sm text-[#d4d4d4]">
+                              {collection.name.trim() || collection.id}
+                            </p>
+                            <p className="m-0 text-[11px] text-[#777]">
+                              {collection.documents.length === 1
+                                ? "1 doc"
+                                : `${collection.documents.length.toString()} docs`}
+                            </p>
+                          </div>
+                          <button
+                            className="text-xs text-[#888] hover:text-[#f44747]"
+                            onClick={() => {
+                              setPendingCollections((current) =>
+                                current.filter((entry) => entry.id !== collection.id),
                               );
                             }}
                             type="button"

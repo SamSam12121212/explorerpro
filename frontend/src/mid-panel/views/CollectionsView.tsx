@@ -1,18 +1,46 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { LuEllipsis, LuFolder } from "react-icons/lu";
 import { useNavigate, useParams } from "react-router";
 import { apiGet, apiPost } from "../../api";
 import { COLLECTIONS_CHANGED_EVENT } from "../../constants";
 import type {
+  AttachedCollection,
   CollectionCreateResponse,
+  CollectionDetailResponse,
   CollectionEntry,
   CollectionListResponse,
+  DocumentEntry,
 } from "../../types";
 
 function documentCountLabel(count: number) {
   return `${count.toString()} doc${count === 1 ? "" : "s"}`;
 }
 
-export function CollectionsView() {
+function toAttachedCollection(
+  collection: CollectionEntry,
+  documents: DocumentEntry[],
+): AttachedCollection {
+  return {
+    id: collection.id,
+    name: collection.name,
+    documents: documents.map((d) => ({
+      id: d.id,
+      filename: d.filename,
+      page_count: d.page_count,
+      status: d.status,
+    })),
+  };
+}
+
+interface CollectionsViewProps {
+  attachedCollectionIds: string[];
+  onAttachCollection: (collection: AttachedCollection) => void;
+}
+
+export function CollectionsView({
+  attachedCollectionIds,
+  onAttachCollection,
+}: CollectionsViewProps) {
   const { collectionId } = useParams<"collectionId">();
   const navigate = useNavigate();
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
@@ -20,6 +48,8 @@ export function CollectionsView() {
   const [showComposer, setShowComposer] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [openMenuCollectionId, setOpenMenuCollectionId] = useState<string | null>(null);
+  const [attachingCollectionId, setAttachingCollectionId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const fetchCollections = useCallback(async () => {
@@ -52,6 +82,31 @@ export function CollectionsView() {
     }
   }, [showComposer]);
 
+  useEffect(() => {
+    if (!openMenuCollectionId) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        setOpenMenuCollectionId(null);
+        return;
+      }
+
+      if (target.closest("[data-collection-menu]")) {
+        return;
+      }
+
+      setOpenMenuCollectionId(null);
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [openMenuCollectionId]);
+
   const handleCreate = async () => {
     const name = draftName.trim();
     if (!name || creating) return;
@@ -69,6 +124,23 @@ export function CollectionsView() {
       setError(err instanceof Error ? err.message : "Failed to create collection");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleAttach = async (collection: CollectionEntry) => {
+    if (attachingCollectionId) return;
+    setAttachingCollectionId(collection.id);
+    setError("");
+    try {
+      const data = await apiGet<CollectionDetailResponse>(
+        `/api/collections/${encodeURIComponent(collection.id)}`,
+      );
+      onAttachCollection(toAttachedCollection(data.collection, data.documents));
+      setOpenMenuCollectionId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to attach collection");
+    } finally {
+      setAttachingCollectionId(null);
     }
   };
 
@@ -135,26 +207,84 @@ export function CollectionsView() {
         ) : (
           collections.map((collection) => {
             const isActive = collection.id === collectionId;
+            const isAttached = attachedCollectionIds.includes(collection.id);
+            const isAttaching = attachingCollectionId === collection.id;
             return (
-              <button
-                className={`flex w-full items-center justify-between gap-2 border-b border-[#2a2a2a] px-3 py-3 text-left transition ${
+              <div
+                className={`group relative border-b border-[#2a2a2a] transition cursor-pointer ${
                   isActive
-                    ? "bg-[#2a2a2a] text-white shadow-[inset_2px_0_0_#007acc]"
-                    : "text-[#b2b2b2] hover:bg-[#252525]"
+                    ? "bg-[#2a2a2a] shadow-[inset_2px_0_0_#007acc]"
+                    : "hover:bg-[#252525]"
                 }`}
                 key={collection.id}
                 onClick={() => {
                   void navigate(`/collections/${collection.id}`);
                 }}
-                type="button"
               >
-                <span className={`truncate text-sm font-medium ${isActive ? "text-white" : "text-[#d4d4d4]"}`}>
-                  {collection.name}
-                </span>
-                <span className="shrink-0 text-[0.68rem] uppercase tracking-wide text-[#666]">
-                  {documentCountLabel(collection.document_count)}
-                </span>
-              </button>
+                <div className="flex items-center justify-between gap-2 px-3 py-3 pr-10">
+                  <span
+                    className={`truncate text-sm font-medium ${
+                      isActive ? "text-white" : "text-[#d4d4d4]"
+                    }`}
+                  >
+                    {collection.name}
+                  </span>
+                  <span className="shrink-0 text-[0.68rem] uppercase tracking-wide text-[#666]">
+                    {documentCountLabel(collection.document_count)}
+                  </span>
+                </div>
+
+                <div
+                  className="absolute top-2 right-2"
+                  data-collection-menu={collection.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  <button
+                    className={`flex h-7 w-7 items-center justify-center border border-[#333] bg-[#252525] text-[#888] transition hover:border-[#444] hover:text-[#d4d4d4] ${
+                      openMenuCollectionId === collection.id
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    }`}
+                    onClick={() => {
+                      setOpenMenuCollectionId((current) =>
+                        current === collection.id ? null : collection.id,
+                      );
+                    }}
+                    title="Collection actions"
+                    type="button"
+                  >
+                    <LuEllipsis className="h-4 w-4" />
+                  </button>
+
+                  {openMenuCollectionId === collection.id && (
+                    <div className="absolute top-8 right-0 z-10 min-w-40 border border-[#333] bg-[#202020] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+                      <button
+                        className={`flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs transition ${
+                          isAttached
+                            ? "cursor-default text-[#666]"
+                            : "text-[#d4d4d4] hover:bg-[#2a2a2a]"
+                        }`}
+                        disabled={isAttached || isAttaching}
+                        onClick={() => {
+                          void handleAttach(collection);
+                        }}
+                        type="button"
+                      >
+                        <LuFolder className="h-3.5 w-3.5" />
+                        <span>
+                          {isAttached
+                            ? "Attached"
+                            : isAttaching
+                              ? "Attaching…"
+                              : "Attach to thread"}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
             );
           })
         )}

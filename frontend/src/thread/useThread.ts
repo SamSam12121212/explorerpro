@@ -20,6 +20,7 @@ export function useThread(): ThreadStore {
       setModel: service.setModel,
       setReasoningEffort: service.setReasoningEffort,
       setPendingDocuments: service.setPendingDocuments,
+      setPendingCollections: service.setPendingCollections,
       setPendingImages: service.setPendingImages,
       sendMessage: service.sendMessage,
       loadThread: service.loadThread,
@@ -28,6 +29,7 @@ export function useThread(): ThreadStore {
       resetConversation: service.resetConversation,
       addPendingFiles: service.addPendingFiles,
       attachDocument: service.attachDocument,
+      attachCollection: service.attachCollection,
       refreshThreadList: service.refreshThreadList,
     };
   }, [state, service]);

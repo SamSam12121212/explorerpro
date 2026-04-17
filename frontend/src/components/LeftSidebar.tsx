@@ -32,10 +32,13 @@ export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
     threadId,
     attachedDocuments,
     pendingDocuments,
+    attachedCollections,
+    pendingCollections,
     loadThread,
     archiveThread,
     deleteThread,
     attachDocument,
+    attachCollection,
   } = useThread();
 
   const handleSelectThread = (id: number) => {
@@ -46,6 +49,11 @@ export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
   const attachedDocumentIds = [
     ...attachedDocuments.map((d) => d.id),
     ...pendingDocuments.map((d) => d.id),
+  ];
+
+  const attachedCollectionIds = [
+    ...attachedCollections.map((c) => c.id),
+    ...pendingCollections.map((c) => c.id),
   ];
 
   return (
@@ -82,7 +90,10 @@ export function LeftSidebar({ activeTab, onTabChange }: LeftSidebarProps) {
             threads={threads}
           />
         ) : activeTab === "collections" ? (
-          <CollectionsView />
+          <CollectionsView
+            attachedCollectionIds={attachedCollectionIds}
+            onAttachCollection={attachCollection}
+          />
         ) : activeTab === "documents" ? (
           <DocumentsView
             attachedDocumentIds={attachedDocumentIds}

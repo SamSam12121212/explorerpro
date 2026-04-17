@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"explorer/internal/doccmd"
+	"explorer/internal/docprompt"
 	"explorer/internal/docsplitter"
 	"explorer/internal/docstore"
 	"explorer/internal/preparedinput"
+	"explorer/internal/threadcollectionstore"
 
 	"github.com/nats-io/nats.go"
 )
@@ -25,6 +27,10 @@ type threadDocumentStore interface {
 	ListDocuments(ctx context.Context, threadID int64, limit int64) ([]docstore.Document, error)
 }
 
+type threadCollectionStore interface {
+	ListAttached(ctx context.Context, threadID int64, limit int64) ([]threadcollectionstore.AttachedCollection, error)
+}
+
 type documentBlobStore interface {
 	Ref(parts ...string) string
 	ReadRef(ctx context.Context, ref string) ([]byte, error)
@@ -35,24 +41,26 @@ type documentBlobStore interface {
 // document-adjacent backend work. It is intentionally not the OpenAI
 // document executor; worker-owned document execution lives in the worker.
 type Service struct {
-	logger     *slog.Logger
-	nc         *nats.Conn
-	js         nats.JetStreamContext
-	docs       documentStore
-	threadDocs threadDocumentStore
-	blob       documentBlobStore
-	now        func() time.Time
+	logger            *slog.Logger
+	nc                *nats.Conn
+	js                nats.JetStreamContext
+	docs              documentStore
+	threadDocs        threadDocumentStore
+	threadCollections threadCollectionStore
+	blob              documentBlobStore
+	now               func() time.Time
 }
 
-func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, blob documentBlobStore) *Service {
+func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, threadCollections threadCollectionStore, blob documentBlobStore) *Service {
 	return &Service{
-		logger:     logger,
-		nc:         nc,
-		js:         js,
-		docs:       docs,
-		threadDocs: threadDocs,
-		blob:       blob,
-		now:        func() time.Time { return time.Now().UTC() },
+		logger:            logger,
+		nc:                nc,
+		js:                js,
+		docs:              docs,
+		threadDocs:        threadDocs,
+		threadCollections: threadCollections,
+		blob:              blob,
+		now:               func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -321,7 +329,19 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 		}
 	}
 
-	if len(documents) == 0 {
+	var collections []threadcollectionstore.AttachedCollection
+	if s.threadCollections != nil {
+		collections, err = s.threadCollections.ListAttached(ctx, req.ThreadID, 200)
+		if err != nil {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusError,
+				Error:     fmt.Sprintf("list attached collections: %v", err),
+			}
+		}
+	}
+
+	if len(documents) == 0 && len(collections) == 0 {
 		return doccmd.RuntimeContextResponse{
 			RequestID:    req.RequestID,
 			Status:       doccmd.PrepareStatusOK,
@@ -330,7 +350,7 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 		}
 	}
 
-	instructions = appendAvailableDocumentsBlock(instructions, documents)
+	instructions = docprompt.AppendAvailableDocumentsBlock(instructions, documents, collections)
 	tools, err = appendQueryDocumentTool(tools)
 	if err != nil {
 		return doccmd.RuntimeContextResponse{
@@ -368,8 +388,8 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(formatDocumentID(doc.ID)),
+			docprompt.EscapeAttribute(doc.Filename),
+			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
 			manifest.PageCount),
 	})
 
@@ -420,8 +440,8 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			escapePromptAttribute(doc.Filename),
-			escapePromptAttribute(formatDocumentID(doc.ID)),
+			docprompt.EscapeAttribute(doc.Filename),
+			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
 			manifest.PageCount),
 	})
 
@@ -473,71 +493,6 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	return inputJSON, nil
 }
 
-func escapePromptAttribute(value string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		`"`, "&quot;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\n", "&#10;",
-		"\r", "&#13;",
-		"\t", "&#9;",
-	)
-	return replacer.Replace(value)
-}
-
-func appendAvailableDocumentsBlock(base string, documents []docstore.Document) string {
-	block := formatAvailableDocumentsBlock(documents)
-	if block == "" {
-		return base
-	}
-
-	trimmedBase := strings.TrimRight(base, "\n")
-	if strings.TrimSpace(trimmedBase) == "" {
-		return block
-	}
-
-	return trimmedBase + "\n\n" + block
-}
-
-func formatAvailableDocumentsBlock(documents []docstore.Document) string {
-	var builder strings.Builder
-	count := 0
-
-	for _, document := range documents {
-		if document.ID <= 0 {
-			continue
-		}
-		id := formatDocumentID(document.ID)
-
-		name := strings.TrimSpace(document.Filename)
-		if name == "" {
-			name = id
-		}
-
-		if count == 0 {
-			builder.WriteString("<available_documents>\n")
-		}
-		builder.WriteString(`<document id="`)
-		builder.WriteString(escapePromptAttribute(id))
-		builder.WriteString(`" name="`)
-		builder.WriteString(escapePromptAttribute(name))
-		builder.WriteString(`" />`)
-		builder.WriteByte('\n')
-		count++
-	}
-
-	if count == 0 {
-		return ""
-	}
-
-	builder.WriteString("</available_documents>")
-	return builder.String()
-}
-
-func formatDocumentID(id int64) string {
-	return strconv.FormatInt(id, 10)
-}
 
 func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 	var tools []map[string]any

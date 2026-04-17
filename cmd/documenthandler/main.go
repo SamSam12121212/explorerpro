@@ -15,6 +15,7 @@ import (
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
 	"explorer/internal/logutil"
+	"explorer/internal/threadcollectionstore"
 	"explorer/internal/threaddocstore"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -80,7 +81,8 @@ func run() error {
 
 	docs := docstore.New(pool)
 	threadDocs := threaddocstore.New(pool)
-	svc := documenthandler.New(logger, nc, js, docs, threadDocs, blob)
+	threadCollections := threadcollectionstore.New(pool)
+	svc := documenthandler.New(logger, nc, js, docs, threadDocs, threadCollections, blob)
 
 	logger.Info("document handler service starting",
 		"nats", natsURL,

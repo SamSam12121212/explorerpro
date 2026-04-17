@@ -20,6 +20,7 @@ import (
 	"explorer/internal/platform"
 	"explorer/internal/postgresstore"
 	"explorer/internal/threadcmd"
+	"explorer/internal/threadcollectionstore"
 	"explorer/internal/threaddocstore"
 	"explorer/internal/threadhistory"
 	"explorer/internal/threadstore"
@@ -40,20 +41,21 @@ const (
 )
 
 type Service struct {
-	cfg          config.Config
-	logger       *slog.Logger
-	runtime      *platform.Runtime
-	dialer       openaiws.Dialer
-	openAIConfig openaiws.Config
-	workerID     int64
-	store        *postgresstore.Store
-	history      threadHistoryStore
-	threadDocs   *threaddocstore.Store
-	docClient    *documenthandler.Client
-	docStore     docActorDocStore
-	sweepStore   serviceSweepStore
-	relay        *eventrelay.Client
-	publishFn    func(ctx context.Context, subject string, cmd threadcmd.Command) error
+	cfg               config.Config
+	logger            *slog.Logger
+	runtime           *platform.Runtime
+	dialer            openaiws.Dialer
+	openAIConfig      openaiws.Config
+	workerID          int64
+	store             *postgresstore.Store
+	history           threadHistoryStore
+	threadDocs        *threaddocstore.Store
+	threadCollections *threadcollectionstore.Store
+	docClient         *documenthandler.Client
+	docStore          docActorDocStore
+	sweepStore        serviceSweepStore
+	relay             *eventrelay.Client
+	publishFn         func(ctx context.Context, subject string, cmd threadcmd.Command) error
 
 	actorsMu sync.Mutex
 	actors   map[int64]*threadActor
@@ -81,24 +83,26 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 	store := postgresstore.New(runtime.Postgres().Pool())
 	history := threadhistory.New(runtime.NATS().JetStream())
 	threadDocs := threaddocstore.New(runtime.Postgres().Pool())
+	threadCollections := threadcollectionstore.New(runtime.Postgres().Pool())
 	docs := docstore.New(runtime.Postgres().Pool())
 	docClient := documenthandler.NewClient(runtime.NATS().Conn())
 	relay := eventrelay.NewClient(logger, cfg.EventRelayAddr)
 
 	return &Service{
-		cfg:          cfg,
-		logger:       logger,
-		runtime:      runtime,
-		dialer:       dialer,
-		openAIConfig: openAIConfig,
-		store:        store,
-		history:      history,
-		threadDocs:   threadDocs,
-		docClient:    docClient,
-		docStore:     docs,
-		sweepStore:   store,
-		relay:        relay,
-		actors:       map[int64]*threadActor{},
+		cfg:               cfg,
+		logger:            logger,
+		runtime:           runtime,
+		dialer:            dialer,
+		openAIConfig:      openAIConfig,
+		store:             store,
+		history:           history,
+		threadDocs:        threadDocs,
+		threadCollections: threadCollections,
+		docClient:         docClient,
+		docStore:          docs,
+		sweepStore:        store,
+		relay:             relay,
+		actors:            map[int64]*threadActor{},
 	}, nil
 }
 
@@ -260,20 +264,21 @@ func (s *Service) getActor(ctx context.Context, threadID int64) *threadActor {
 	}
 
 	actor := newThreadActor(ctx, threadActorConfig{
-		ThreadID:       threadID,
-		WorkerID:       s.workerID,
-		Logger:         s.logger.With("thread_id", threadID),
-		Store:          s.store,
-		History:        s.history,
-		ThreadDocs:     s.threadDocs,
-		DocRuntime:     s.docClient,
-		DocStore:       s.docStore,
-		PreparedInputs: s.docClient,
-		Blob:           s.runtime.Blob(),
-		OpenAIConfig:   s.openAIConfig,
-		Publish:        s.publishCommand,
-		PublishEvent:   s.publishThreadEvent,
-		SessionFactory: func() *openaiws.Session { return openaiws.NewSession(s.openAIConfig, s.dialer) },
+		ThreadID:          threadID,
+		WorkerID:          s.workerID,
+		Logger:            s.logger.With("thread_id", threadID),
+		Store:             s.store,
+		History:           s.history,
+		ThreadDocs:        s.threadDocs,
+		ThreadCollections: s.threadCollections,
+		DocRuntime:        s.docClient,
+		DocStore:          s.docStore,
+		PreparedInputs:    s.docClient,
+		Blob:              s.runtime.Blob(),
+		OpenAIConfig:      s.openAIConfig,
+		Publish:           s.publishCommand,
+		PublishEvent:      s.publishThreadEvent,
+		SessionFactory:    func() *openaiws.Session { return openaiws.NewSession(s.openAIConfig, s.dialer) },
 	})
 
 	s.actors[threadID] = actor

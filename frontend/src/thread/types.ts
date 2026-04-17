@@ -1,4 +1,5 @@
 import type {
+  AttachedCollection,
   AttachedDocument,
   ThreadMessage,
   HealthState,
@@ -23,6 +24,8 @@ export interface ThreadState {
   model: string;
   attachedDocuments: AttachedDocument[];
   pendingDocuments: AttachedDocument[];
+  attachedCollections: AttachedCollection[];
+  pendingCollections: AttachedCollection[];
   pendingImages: UploadedImage[];
   draft: string;
   reasoningEffort: ReasoningEffort;
@@ -41,14 +44,21 @@ export interface ThreadActions {
   setModel: (value: string) => void;
   setReasoningEffort: (value: ReasoningEffort) => void;
   setPendingDocuments: (updater: AttachedDocument[] | ((current: AttachedDocument[]) => AttachedDocument[])) => void;
+  setPendingCollections: (updater: AttachedCollection[] | ((current: AttachedCollection[]) => AttachedCollection[])) => void;
   setPendingImages: (updater: UploadedImage[] | ((current: UploadedImage[]) => UploadedImage[])) => void;
-  sendMessage: (text: string, images: UploadedImage[], documents: AttachedDocument[]) => Promise<void>;
+  sendMessage: (
+    text: string,
+    images: UploadedImage[],
+    documents: AttachedDocument[],
+    collections: AttachedCollection[],
+  ) => Promise<void>;
   loadThread: (threadId: number) => Promise<void>;
   archiveThread: (threadId: number) => Promise<void>;
   deleteThread: (threadId: number) => Promise<void>;
   resetConversation: () => void;
   addPendingFiles: (files: File[]) => Promise<void>;
   attachDocument: (document: AttachedDocument) => void;
+  attachCollection: (collection: AttachedCollection) => void;
   refreshThreadList: () => void;
 }
 

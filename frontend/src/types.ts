@@ -42,6 +42,7 @@ export interface ThreadResponse {
     model?: string;
   };
   attached_documents?: AttachedDocument[];
+  attached_collections?: AttachedCollection[];
 }
 
 export interface ThreadCreateResponse {
@@ -105,6 +106,12 @@ export interface AttachedDocument {
   filename: string;
   page_count: number;
   status: string;
+}
+
+export interface AttachedCollection {
+  id: string;
+  name: string;
+  documents: AttachedDocument[];
 }
 
 export interface DocumentListResponse {
