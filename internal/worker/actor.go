@@ -2409,7 +2409,40 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 				meta.LastResponseID = responseID
 			}
 			meta.ActiveResponseID = ""
+			// Refuse turns that mix tool kinds the dispatch can't fan out
+			// in parallel. Spawning a locator/query group and returning
+			// sync-tool outputs in the same barrier cycle would leave
+			// whichever kind lost the priority chain with dangling
+			// function_calls (no matching function_call_output in the
+			// follow-up turn, which OpenAI rejects). Fall back to
+			// waiting_tool so the mix surfaces as an explicit stuck
+			// state instead of a silent drop. Matches how malformed
+			// tool args already behave.
+			pendingKinds := 0
 			if pendingSpawn != nil {
+				pendingKinds++
+			}
+			if len(pendingDocQueries) > 0 {
+				pendingKinds++
+			}
+			if len(pendingCitationCalls) > 0 {
+				pendingKinds++
+			}
+			if len(pendingPageReads) > 0 {
+				pendingKinds++
+			}
+			if pendingKinds > 1 {
+				a.logger.Warn("mixed tool kinds in one response, refusing dispatch",
+					appendThreadGraphAttrs([]any{
+						"pending_spawn", pendingSpawn != nil,
+						"pending_doc_queries", len(pendingDocQueries),
+						"pending_citation_calls", len(pendingCitationCalls),
+						"pending_page_reads", len(pendingPageReads),
+					}, meta)...,
+				)
+				waitingTool = true
+			}
+			if pendingSpawn != nil && !waitingTool {
 				spawnGroupID, err := a.startSpawnGroup(meta, pendingSpawnCallID, *pendingSpawn)
 				if err != nil {
 					return nil, err

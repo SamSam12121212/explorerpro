@@ -42,14 +42,24 @@ function parseCitationHref(href: string | undefined): number | null {
 // custom href scheme hooks into the `a` renderer below and produces a
 // real CitationChip.
 //
-// The pattern deliberately only matches positive integers in the id
-// slot so ordinary markdown reference-style links (which use text ids
-// like `[example][1]` → `[1]: https://...`) still work when the
-// definition exists below.
+// Text-id reference links like `[example][footnote1]` paired with a
+// `[footnote1]: https://...` definition work unchanged (the pattern
+// only matches numeric ids). Numeric-id reference links like
+// `[example][1]` paired with `[1]: https://...` collide — below we
+// collect ref-definition ids first and skip rewrites for them so
+// real markdown ref links still resolve.
 const CITATION_INLINE_PATTERN = /\[([^\]\n]+?)\]\[(\d+)\]/g;
+const MARKDOWN_REF_DEFINITION_PATTERN = /^[ \t]*\[(\d+)\]:[ \t]+\S/gm;
 
 function preprocessCitations(text: string): string {
-  return text.replace(CITATION_INLINE_PATTERN, "[$1](citation:$2)");
+  const definedRefs = new Set<string>();
+  for (const match of text.matchAll(MARKDOWN_REF_DEFINITION_PATTERN)) {
+    definedRefs.add(match[1]);
+  }
+  return text.replace(CITATION_INLINE_PATTERN, (full, display: string, id: string) => {
+    if (definedRefs.has(id)) return full;
+    return `[${display}](citation:${id})`;
+  });
 }
 
 const COMPONENTS: Components = {
