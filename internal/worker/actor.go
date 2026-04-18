@@ -911,14 +911,15 @@ func (a *threadActor) handleChildResult(cmd threadcmd.Command, fallbackStatus st
 	}
 
 	stored, results, err := a.store.UpsertSpawnResult(a.ctx, spawnGroupID, threadstore.SpawnChildResult{
-		ChildThreadID:   body.ChildThreadID,
-		Status:          status,
-		ChildResponseID: body.ChildResponseID,
-		AssistantText:   body.AssistantText,
-		ResultRef:       body.ResultRef,
-		SummaryRef:      body.SummaryRef,
-		ErrorRef:        body.ErrorRef,
-		UpdatedAt:       time.Now().UTC(),
+		ChildThreadID:    body.ChildThreadID,
+		Status:           status,
+		ChildResponseID:  body.ChildResponseID,
+		AssistantText:    body.AssistantText,
+		ResultRef:        body.ResultRef,
+		SummaryRef:       body.SummaryRef,
+		ErrorRef:         body.ErrorRef,
+		ToolCallArgsJSON: body.ToolCallArgsJSON,
+		UpdatedAt:        time.Now().UTC(),
 	})
 	if err != nil {
 		return err
@@ -2489,7 +2490,15 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 					return nil, err
 				}
 			}
-			if statusSupportsIdleSocket(meta.Status) {
+			// One-shot children (e.g. the evidence locator) are explicitly single-
+			// response: we disconnect the socket right after reporting instead of
+			// holding it warm for a follow-up that will never come. The parent
+			// barrier already has the result; the child has nothing more to do.
+			if publishMeta.OneShot {
+				socketID := a.currentOpenAISocketID()
+				a.disconnectOpenAISocket(socketID, "one_shot_complete")
+				a.resetSession("one_shot_complete")
+			} else if statusSupportsIdleSocket(meta.Status) {
 				a.startIdleLoop(meta)
 			}
 			return nil, nil
@@ -2721,6 +2730,37 @@ func (a *threadActor) loadLatestAssistantText(threadID int64) (string, error) {
 		}
 		if text != "" {
 			return text, nil
+		}
+	}
+
+	return "", nil
+}
+
+// loadLatestToolCallArgs walks the child's output items in reverse and
+// returns the arguments string of the most recent function_call. Used by
+// publishChildInvocationResult to surface forced-tool-call output (e.g.
+// the evidence locator's emit_bboxes call) up to the parent barrier.
+// Returns "" without error when the child never emitted a function_call.
+func (a *threadActor) loadLatestToolCallArgs(threadID int64) (string, error) {
+	items, err := a.store.ListItems(a.ctx, threadID, threadstore.ListOptions{Limit: 100})
+	if err != nil {
+		return "", err
+	}
+
+	for index := len(items) - 1; index >= 0; index-- {
+		item := items[index]
+		if item.Direction != "output" || item.ItemType != "function_call" {
+			continue
+		}
+
+		var payload struct {
+			Arguments string `json:"arguments"`
+		}
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			return "", fmt.Errorf("decode function_call item: %w", err)
+		}
+		if strings.TrimSpace(payload.Arguments) != "" {
+			return payload.Arguments, nil
 		}
 	}
 
@@ -4171,12 +4211,22 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 		assistantText = ""
 	}
 
+	toolCallArgs, err := a.loadLatestToolCallArgs(meta.ID)
+	if err != nil {
+		a.logger.Warn("failed to load child tool call arguments",
+			"spawn_group_id", meta.ActiveSpawnGroupID,
+			"error", err,
+		)
+		toolCallArgs = ""
+	}
+
 	body, err := json.Marshal(threadcmd.ChildResultBody{
-		SpawnGroupID:    meta.ActiveSpawnGroupID,
-		ChildThreadID:   meta.ID,
-		ChildResponseID: meta.LastResponseID,
-		Status:          resultStatus,
-		AssistantText:   assistantText,
+		SpawnGroupID:     meta.ActiveSpawnGroupID,
+		ChildThreadID:    meta.ID,
+		ChildResponseID:  meta.LastResponseID,
+		Status:           resultStatus,
+		AssistantText:    assistantText,
+		ToolCallArgsJSON: toolCallArgs,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal child terminal body: %w", err)
