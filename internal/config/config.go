@@ -218,6 +218,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("OPENAI_MAX_MESSAGE_BYTES must be positive or -1")
 	}
 
+	if cfg.OpenAI.MaxConcurrentSockets <= 0 {
+		return Config{}, fmt.Errorf("OPENAI_MAX_CONCURRENT_SOCKETS must be positive")
+	}
+
 	cfg.NATS.ClientName = getEnv("NATS_CLIENT_NAME", cfg.ServiceName)
 
 	return cfg, nil

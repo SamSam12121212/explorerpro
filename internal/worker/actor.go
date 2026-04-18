@@ -1537,16 +1537,31 @@ func (a *threadActor) reconnectSession() error {
 	return nil
 }
 
+// openFreshSession dials a new OpenAI websocket session. The process-wide
+// socket budget tracks "actor has any session", not "session opens". A slot
+// is reserved only when transitioning from no-session to has-session;
+// reconnect/rotate paths that already hold a slot (because a.session != nil)
+// inherit it for the new session, so a budget-ceiling situation can still
+// recover instead of being wedged at N+1 reservations for a 1-for-1 swap.
+//
+// On Connect failure we only release if we just reserved (i.e. there was no
+// existing session to inherit the slot from).
 func (a *threadActor) openFreshSession() (*openaiws.Session, error) {
-	if a.budgetReserve != nil {
-		if err := a.budgetReserve(); err != nil {
-			return nil, fmt.Errorf("%w: %v", errSocketBudgetExhausted, err)
+	a.mu.Lock()
+	alreadyHaveSession := a.session != nil
+	a.mu.Unlock()
+
+	if !alreadyHaveSession {
+		if a.budgetReserve != nil {
+			if err := a.budgetReserve(); err != nil {
+				return nil, fmt.Errorf("%w: %v", errSocketBudgetExhausted, err)
+			}
 		}
 	}
 
 	session := a.sessionFactory()
 	if err := session.Connect(a.ctx); err != nil {
-		if a.budgetRelease != nil {
+		if !alreadyHaveSession && a.budgetRelease != nil {
 			a.budgetRelease()
 		}
 		return nil, err
@@ -1554,15 +1569,25 @@ func (a *threadActor) openFreshSession() (*openaiws.Session, error) {
 	return session, nil
 }
 
-// closeAndRelease closes a session and releases its budget slot. Use this
-// instead of calling session.Close() directly so the process-wide socket
-// budget stays accurate.
+// closeAndRelease closes a session and conditionally releases the budget
+// slot. The slot is only released if a.session is now nil after the close —
+// in the replacement path (rotate/reconnect) the new session has already
+// been swapped in, so the slot is still held for that new session and we
+// must not release it here.
+//
+// Use this instead of calling session.Close() directly so the process-wide
+// socket budget stays accurate across all close paths.
 func (a *threadActor) closeAndRelease(session *openaiws.Session) error {
 	if session == nil {
 		return nil
 	}
 	err := session.Close()
-	if a.budgetRelease != nil {
+
+	a.mu.Lock()
+	hasReplacement := a.session != nil
+	a.mu.Unlock()
+
+	if !hasReplacement && a.budgetRelease != nil {
 		a.budgetRelease()
 	}
 	return err

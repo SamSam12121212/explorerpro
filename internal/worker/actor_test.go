@@ -1270,6 +1270,120 @@ func TestFilterChildThreadToolChoiceDropsEmptyAllowedTools(t *testing.T) {
 	}
 }
 
+func TestOpenFreshSessionReplacementDoesNotGrowBudget(t *testing.T) {
+	t.Parallel()
+
+	// Budget at ceiling = 1. The actor already holds a session (and
+	// therefore the slot). A reconnect-style openFreshSession must succeed
+	// because the new session inherits the slot from the old one — the
+	// fix for the N+1-slot wedge bugbot caught.
+	used := 0
+	max := 1
+	reserve := func() error {
+		if used >= max {
+			return errors.New("budget exhausted")
+		}
+		used++
+		return nil
+	}
+	release := func() {
+		if used > 0 {
+			used--
+		}
+	}
+
+	cfg := testOpenAIConfig()
+	oldConn := &actorTestConn{}
+	oldSession := openaiws.NewSession(cfg, &actorTestDialer{conn: oldConn})
+	if err := oldSession.Connect(context.Background()); err != nil {
+		t.Fatalf("oldSession.Connect() error = %v", err)
+	}
+	used = 1 // simulate the slot the old session is holding
+
+	freshConn := &actorTestConn{}
+	actor := &threadActor{
+		threadID:      tid("thread_test"),
+		logger:        testActorLogger(),
+		cfg:           cfg,
+		ctx:           context.Background(),
+		session:       oldSession,
+		budgetReserve: reserve,
+		budgetRelease: release,
+		sessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(cfg, &actorTestDialer{conn: freshConn})
+		},
+	}
+
+	freshSession, err := actor.openFreshSession()
+	if err != nil {
+		t.Fatalf("openFreshSession() error = %v", err)
+	}
+	if freshSession == nil {
+		t.Fatal("openFreshSession returned nil session")
+	}
+	if used != 1 {
+		t.Fatalf("budget used = %d after replacement open, want 1 (slot inherited)", used)
+	}
+
+	// Now simulate the rest of the reconnect/rotate flow: swap and close
+	// old. closeAndRelease must NOT release because a.session is the new
+	// one (the swap target).
+	prev, _ := actor.swapSessionState(freshSession, "")
+	if prev != oldSession {
+		t.Fatal("swapSessionState did not return old session")
+	}
+	if err := actor.closeAndRelease(prev); err != nil {
+		t.Fatalf("closeAndRelease(old) error = %v", err)
+	}
+	if used != 1 {
+		t.Fatalf("budget used = %d after replacement complete, want 1 (slot still held by new)", used)
+	}
+
+	// Final teardown: close the new session — slot must release now.
+	final, _ := actor.swapSessionState(nil, "")
+	if final != freshSession {
+		t.Fatal("swapSessionState did not return fresh session for teardown")
+	}
+	if err := actor.closeAndRelease(final); err != nil {
+		t.Fatalf("closeAndRelease(fresh) error = %v", err)
+	}
+	if used != 0 {
+		t.Fatalf("budget used = %d after teardown, want 0", used)
+	}
+}
+
+func TestOpenFreshSessionColdReleasesOnConnectFailure(t *testing.T) {
+	t.Parallel()
+
+	// Cold path: no existing session. Reserve happens, Connect fails →
+	// release must fire so the slot doesn't leak.
+	used := 0
+	reserve := func() error { used++; return nil }
+	release := func() { used-- }
+
+	cfg := testOpenAIConfig()
+	dialErr := errors.New("dial blew up")
+	actor := &threadActor{
+		threadID:      tid("thread_test"),
+		logger:        testActorLogger(),
+		cfg:           cfg,
+		ctx:           context.Background(),
+		budgetReserve: reserve,
+		budgetRelease: release,
+		sessionFactory: func() *openaiws.Session {
+			return openaiws.NewSession(cfg, &actorTestDialer{err: dialErr})
+		},
+	}
+
+	_, err := actor.openFreshSession()
+	if err == nil {
+		t.Fatal("openFreshSession should have returned the dial error")
+	}
+	if used != 0 {
+		t.Fatalf("budget used = %d after cold-open failure, want 0 (slot released)", used)
+	}
+}
+
 func TestEnsureSessionReusesConnectedSessionWithoutPing(t *testing.T) {
 	t.Parallel()
 
@@ -2275,6 +2389,7 @@ func testActorLogger() *slog.Logger {
 
 type actorTestDialer struct {
 	conn openaiws.Conn
+	err  error
 }
 
 type fakeThreadDocumentStore struct {
@@ -2376,6 +2491,9 @@ func (c *fakeDocActorPreparedInputClient) PrepareInput(_ context.Context, req do
 }
 
 func (d *actorTestDialer) Dial(_ context.Context, _ openaiws.DialRequest) (openaiws.Conn, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
 	return d.conn, nil
 }
 

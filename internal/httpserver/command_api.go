@@ -534,20 +534,44 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *commandAPI) handleArchiveThread(w http.ResponseWriter, r *http.Request, threadID int64) {
-	// Always cascade-disconnect first so an archive cannot leave the worker
-	// holding live OpenAI sockets for a thread the user thinks is gone.
-	cascade, err := a.cascadeDisconnectSession(r.Context(), threadID)
+	// Load via the raw store (NOT loadThreadForRead) so we don't 404 on an
+	// already-archived thread — POST /threads/{id}/archive must stay
+	// idempotent across retries / accidental double-clicks.
+	existing, err := a.store.LoadThread(r.Context(), threadID)
 	if err != nil {
-		switch {
-		case errors.Is(err, threadstore.ErrThreadNotFound):
+		if errors.Is(err, threadstore.ErrThreadNotFound) {
 			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
-		case errors.Is(err, threadstore.ErrThreadNotRoot):
-			writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
-		default:
-			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("disconnect session for thread %d: %v", threadID, err))
+			return
 		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
 		return
 	}
+	if existing.ParentThreadID > 0 {
+		writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+		return
+	}
+
+	var cascade cascadeDisconnectResult
+	if existing.ArchivedAt.IsZero() {
+		// First archive: cascade-disconnect so we don't leave the worker
+		// holding live OpenAI sockets for a thread the user thinks is gone.
+		cascade, err = a.cascadeDisconnectSession(r.Context(), threadID)
+		if err != nil {
+			switch {
+			case errors.Is(err, threadstore.ErrThreadNotFound):
+				writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+			case errors.Is(err, threadstore.ErrThreadNotRoot):
+				writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+			default:
+				writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("disconnect session for thread %d: %v", threadID, err))
+			}
+			return
+		}
+	}
+	// On a retry where the thread is already archived, sockets are already
+	// gone (or expired) and `cascade` stays zero-valued — the response
+	// reflects "nothing newly cancelled / disconnected", which is the
+	// correct idempotent answer.
 
 	meta, err := a.store.ArchiveRootThread(r.Context(), threadID)
 	if err != nil {
@@ -563,9 +587,9 @@ func (a *commandAPI) handleArchiveThread(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":              "archived",
-		"thread":              presentThreadMeta(meta),
-		"cancelled_thread_ids":  cascade.CancelledThreadIDs,
+		"status":                  "archived",
+		"thread":                  presentThreadMeta(meta),
+		"cancelled_thread_ids":    cascade.CancelledThreadIDs,
 		"disconnected_thread_ids": cascade.DisconnectedThreadIDs,
 	})
 }
