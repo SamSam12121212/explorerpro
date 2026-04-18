@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"explorer/internal/blobstore"
+	"explorer/internal/citationstore"
 	"explorer/internal/config"
 	"explorer/internal/docstore"
 	"explorer/internal/documenthandler"
@@ -82,7 +83,8 @@ func run() error {
 	docs := docstore.New(pool)
 	threadDocs := threaddocstore.New(pool)
 	threadCollections := threadcollectionstore.New(pool)
-	svc := documenthandler.New(logger, nc, js, docs, threadDocs, threadCollections, blob)
+	citations := citationstore.New(pool)
+	svc := documenthandler.New(logger, nc, js, docs, threadDocs, threadCollections, blob, citations)
 
 	logger.Info("document handler service starting",
 		"nats", natsURL,

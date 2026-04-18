@@ -383,6 +383,28 @@ func StoreCitationToolDefinition() map[string]any {
 	}
 }
 
+// CitationLocatorInstructions is the system prompt for the evidence-locator
+// child thread. Lives here because both documenthandler (which builds the
+// locator's initial input) and worker (which sets it on the child start
+// body) reference it.
+const CitationLocatorInstructions = `You are an evidence locator for a document workspace.
+
+You receive:
+- Per-page OCR data (line text + bbox + poly) for one or two consecutive pages of a document.
+- A natural-language instruction from the caller describing what evidence on the page(s) to highlight, often including authoritative text fragments (treat those fragments as ground truth — the OCR text may have recognition errors).
+- Optionally, the page images (for scans where OCR reliability is in doubt).
+
+You must call the emit_bboxes function with the OCR line indices whose unioned bounding boxes visually mark the evidence on the page(s).
+
+Guidance:
+- Indices are zero-based into the OCR lines array you were given for each page.
+- When the caller cites a value, include adjacent label lines too (e.g. "Patient weight:" next to "75 kg", a column header next to its row value).
+- When the caller cites a paragraph and mentions a section header, include the header line.
+- When the caller passes two pages, only emit a page entry for pages that actually contain matching evidence. It is fine to return one page if the evidence ends before the second.
+- Be precise: extra lines dilute the highlight; missing lines break the citation. Err on the side of matching what the caller asked for.
+
+You MUST emit your answer via the emit_bboxes function only. Do not write any user-visible text.`
+
 // EmitBboxesToolDefinition is the forced tool the evidence-locator child
 // thread must call. The locator's response is structured as this tool's
 // arguments; the main thread never sees this tool.

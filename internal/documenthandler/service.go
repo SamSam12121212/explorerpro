@@ -48,10 +48,11 @@ type Service struct {
 	threadDocs        threadDocumentStore
 	threadCollections threadCollectionStore
 	blob              documentBlobStore
+	citations         citationStoreWriter
 	now               func() time.Time
 }
 
-func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, threadCollections threadCollectionStore, blob documentBlobStore) *Service {
+func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs documentStore, threadDocs threadDocumentStore, threadCollections threadCollectionStore, blob documentBlobStore, citations citationStoreWriter) *Service {
 	return &Service{
 		logger:            logger,
 		nc:                nc,
@@ -60,6 +61,7 @@ func New(logger *slog.Logger, nc *nats.Conn, js nats.JetStreamContext, docs docu
 		threadDocs:        threadDocs,
 		threadCollections: threadCollections,
 		blob:              blob,
+		citations:         citations,
 		now:               func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -212,6 +214,10 @@ func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputReque
 		ref, err = s.prepareDocumentQueryInput(ctx, req)
 	case doccmd.PrepareKindPageRead:
 		ref, err = s.preparePageReadInput(ctx, req)
+	case doccmd.PrepareKindStoreCitationSpawn:
+		ref, err = s.prepareStoreCitationSpawnInput(ctx, req)
+	case doccmd.PrepareKindStoreCitationFinalize:
+		ref, err = s.prepareStoreCitationFinalizeInput(ctx, req)
 	default:
 		return doccmd.PrepareInputResponse{
 			RequestID: req.RequestID,

@@ -302,6 +302,7 @@ func (a *threadActor) buildCitationLocatorChildStartCommand(parentMeta threadsto
 
 	startBody := map[string]any{
 		"model":              "gpt-5.4-mini",
+		"instructions":       doccmd.CitationLocatorInstructions,
 		"reasoning":          map[string]any{"effort": "medium"},
 		"tools":              toolsAny,
 		"tool_choice":        toolChoiceAny,
@@ -330,6 +331,7 @@ func (a *threadActor) buildCitationLocatorChildStartCommand(parentMeta threadsto
 		Depth:          parentMeta.Depth + 1,
 		Status:         threadstore.ThreadStatusNew,
 		Model:          "gpt-5.4-mini",
+		Instructions:   doccmd.CitationLocatorInstructions,
 		MetadataJSON:   string(metadataJSON),
 		ChildKind:      "citation_locator",
 		DocumentID:     call.Request.DocumentID,

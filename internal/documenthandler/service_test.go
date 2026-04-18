@@ -51,7 +51,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 				PageCount:   1,
 			},
 		},
-	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob, nil)
 	svc.now = func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -151,7 +151,7 @@ func TestPrepareInputBuildsPageReadArtifact(t *testing.T) {
 				PageCount:   10,
 			},
 		},
-	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob, nil)
 	svc.now = func() time.Time { return time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -412,7 +412,7 @@ func assertPageTagsIncludeDimensions(t *testing.T, raw json.RawMessage, wantTags
 }
 
 func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.prepareInput(context.Background(), doccmd.PrepareInputRequest{
 		RequestID:  "req_unsupported",
@@ -435,7 +435,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 				{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 			},
 		},
-	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
@@ -477,7 +477,7 @@ func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
 				{ID: 1, Filename: "report.pdf"},
 			},
 		},
-	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:      "docctx_456",
@@ -506,7 +506,7 @@ func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
 }
 
 func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
