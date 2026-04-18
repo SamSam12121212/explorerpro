@@ -8,11 +8,11 @@ Working agreement and project context for Claude sessions on this repo. Read thi
 
 ## Today's mission
 
-**Get PaddleOCR fully functional and integrated into the pipeline.** The OCR microservice is deployed and validated (PR #21, still pending merge). The painter ships in #20. Closing the loop means:
+**Close the evidence-chain loop.** Split → render → OCR is live as of last night (#24). The manifest now carries `pages[i].ocr_ref` pointing at per-page PaddleOCR JSON (pixel coords, top-left origin). What's left:
 
-1. **`dococr` Go worker** — subscribes to a post-split NATS subject, POSTs each page PNG to PaddleOCR `/ocr`, persists per-page OCR JSON in blob storage, extends the manifest with `pages[i].ocr_ref`.
-2. **Manifest extension** in `internal/docsplitter/manifest.go` — add the OCR ref field, bump `Version`.
-3. **`query_document` enrichment** — return bbox(es) for the cited region alongside the answer text.
+1. ~~`dococr` Go worker~~ ✅ shipped in #24
+2. ~~Manifest extension (`ocr_ref`, bump `Version`)~~ ✅ shipped in #24 (now `v2`)
+3. **`query_document` enrichment** — load the OCR JSON for each matched page, find the lines that correspond to the cited text, return bbox(es) alongside the answer text. Per-line bboxes or a unioned region — decide when we see what the model needs.
 4. **Model prompt update** — tell the model to emit `?cite=page,x,y,w,h` URLs using the bboxes the tool returns.
 5. **End-to-end smoke test** — model answers a question over a real doc, citation link lands on the exact pixel region in the viewer. Loop closed.
 
@@ -72,14 +72,16 @@ We move fast. Sam ships PRs all day; pacing matches.
 - #19: The actual fix — `?page=N` jumps never landed in #17/#18 because passing `src` to `PDFViewer` made embedpdf auto-generate its own document ID; switched to `documentManager.initialDocuments` with explicit ID
 - #20: Paint citation bounding boxes from `?cite=page,x,y,w,h` URL params via embedpdf's annotation plugin (`autoCommit:false`, `locked:All` — ephemeral overlay, never flushed to PDF). Bugbot caught `parseFloat("1.5")` sailing past `page >= 1`; fixed with `Number.isInteger`
 
-**This morning (still open)**
-- **#21:** PaddleOCR FastAPI service on a DO GPU droplet (RTX 6000 Ada, 48GB VRAM). Three endpoints (`/ocr`, `/ocr/visualize`, `/structure`), bearer auth, GPU passthrough, `127.0.0.1:8000` bind. Smoke-tested end-to-end (88 lines on the cat doc, 0.97-1.00 confidences, ~1s warm)
+**Overnight + this morning (all merged)**
+- **#21:** PaddleOCR FastAPI service on a DO GPU droplet (RTX 6000 Ada, 48GB VRAM). Three endpoints (`/ocr`, `/ocr/visualize`, `/structure`), bearer auth, GPU passthrough. Smoke-tested end-to-end (88 lines on the cat doc, 0.97-1.00 confidences, ~1s warm). Compose now binds `0.0.0.0:8000` behind a DO Cloud Firewall locked to the home IP — no SSH tunnel in the dev loop
 - **#22:** README refresh — replaced dated `Notes` with `Rough edges`, turned `Aims` into `What it does`, added an `Evidence chain` walkthrough
+- **#23:** Split backend Docker builds per service + `.dockerignore` — each Go service gets its own Dockerfile, build context shrinks from the whole repo to just what each binary needs
+- **#24:** `dococr` worker — subscribes to `doc.split.done` on the `DOC_OCR` JetStream, POSTs each page PNG to PaddleOCR `/ocr`, persists per-page OCR JSON, stamps `pages[i].ocr_ref` onto the manifest, publishes `doc.ocr.done`. Three rounds of bugbot: (1) Nak on publish failure instead of silent-ack, (2) publish before `UpdateStatus(ready)` so Nak'd redeliveries don't regress status, (3) `mergeExistingOCRRefs` preserves ocr_refs on redelivery manifest rewrite when page SHA matches (pdftocairo is deterministic → same PNG bytes = same OCR, no reason to redo the GPU work). Covered by `merge_test.go`
 
 ## Where things live
 
-- `cmd/` — Go entry points (worker, docsplitter, app, etc.)
-- `internal/` — Go internals (`docsplitter`, `blobstore`, `doccmd`, `docstore`, `natsbootstrap`, `docprompt`, ...)
+- `cmd/` — Go entry points (worker, docsplitter, dococr, app, etc.)
+- `internal/` — Go internals (`docsplitter`, `dococr`, `blobstore`, `doccmd`, `ocrcmd`, `docstore`, `natsbootstrap`, `docprompt`, ...). `ocrcmd` owns the `DOC_OCR` JetStream + `doc.split.done` / `doc.ocr.done` subjects
 - `frontend/` — React + Vite + React Compiler + react-router + embedpdf
 - `services/paddleocr/` — Dockerfile + FastAPI app for the OCR microservice. Deployed separately on the DO GPU droplet — **not** in the main `compose.yaml`
 - `db/` — Postgres migrations
@@ -94,4 +96,5 @@ We move fast. Sam ships PRs all day; pacing matches.
 - **GPU droplet costs $1.57/hr.** Power off via `ssh paddle-ocr 'shutdown -h now'` between sessions. **Verify in DO billing whether GPU droplets keep billing while off** — historically yes (reserved hardware); destroy + snapshot is the only true-zero option.
 - **Bundled vLLM container** on the droplet has `restart=unless-stopped`. Run `docker update --restart=no vllm` before any reboot or it resurrects and contends for the GPU.
 - **Cursor bugbot reviews every PR.** Address its findings in a follow-up commit on the same branch; pre-empt deliberate-looking choices in the bugbot brief section of the PR body.
+- **JetStream redelivery is not hypothetical.** Any handler that writes blob state + updates Postgres + publishes a follow-up event has to survive being replayed. Three ordering/idempotency bugs landed in #24 that all looked fine on the happy path. Before shipping a new consumer: write out the Nak-at-each-step cases and check that redelivery converges, not clobbers.
 - **`paddle-ocr` SSH alias** lives in `~/.ssh/config` (uses `~/.ssh/droplet`). Service config + bearer token live at `/root/paddleocr/` on the droplet. See `~/.claude/projects/-Users-detachedhead-explorer/memory/reference_paddle_ocr_droplet.md` for full details.
