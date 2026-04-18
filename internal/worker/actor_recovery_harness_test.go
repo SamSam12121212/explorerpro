@@ -263,7 +263,7 @@ func (s *fakeActorStore) CreateSpawnGroup(_ context.Context, meta threadstore.Sp
 	return nil
 }
 
-func (s *fakeActorStore) LoadOrCreateDocumentQuerySpawnGroup(_ context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
+func (s *fakeActorStore) LoadOrCreateSpawnGroup(_ context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
 	spawnGroupID := stableDocumentSpawnGroupID(meta.ParentThreadID, meta.StableKey)
 	if existing, ok := s.spawnGroups[spawnGroupID]; ok {
 		return existing, nil

@@ -49,9 +49,14 @@ type ThreadMeta struct {
 	ChildKind          string
 	DocumentID         int64
 	DocumentPhase      string
-	ArchivedAt         time.Time
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// OneShot marks a child thread that must emit a single response.create
+	// and then release its socket without entering the warm/idle loop.
+	// Used today by citation_locator children; general-purpose so other
+	// short-lived child flavours can reuse the behaviour.
+	OneShot    bool
+	ArchivedAt time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type ItemLogEntry struct {
@@ -136,7 +141,11 @@ type SpawnChildResult struct {
 	ResultRef       string    `json:"result_ref,omitempty"`
 	SummaryRef      string    `json:"summary_ref,omitempty"`
 	ErrorRef        string    `json:"error_ref,omitempty"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// ToolCallArgsJSON is the forced-tool-call arguments emitted by a
+	// one-shot child (e.g. the evidence locator). Only populated for
+	// child kinds that force structured output via tool_choice.
+	ToolCallArgsJSON string    `json:"tool_call_args_json,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type OwnerRecord struct {

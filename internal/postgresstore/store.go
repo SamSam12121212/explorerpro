@@ -93,7 +93,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -119,7 +120,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO NOTHING
 `,
@@ -148,6 +150,7 @@ ON CONFLICT (id) DO NOTHING
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread create %d: %w", meta.ID, err)
@@ -183,7 +186,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -209,7 +213,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -235,7 +240,8 @@ ON CONFLICT (id) DO UPDATE SET
     document_phase = EXCLUDED.document_phase,
     archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
-    updated_at = EXCLUDED.updated_at
+    updated_at = EXCLUDED.updated_at,
+    one_shot = EXCLUDED.one_shot
 `,
 		meta.ID,
 		meta.RootThreadID,
@@ -262,6 +268,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
@@ -838,10 +845,16 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) LoadOrCreateDocumentQuerySpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
+// LoadOrCreateSpawnGroup idempotently creates a spawn group keyed by
+// (parent_thread_id, group_kind, stable_key). Used by both the
+// document_query and citation_locator paths to survive NAK redelivery
+// of the parent command without double-spawning children. group_kind
+// comes from meta — the caller is responsible for passing a kind
+// consistent with the aggregation path it expects at barrier close.
+func (s *Store) LoadOrCreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("begin document query spawn group tx: %w", err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("begin spawn group tx: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
@@ -865,7 +878,6 @@ INSERT INTO spawn_groups (
 ) VALUES (
     $1,
     $2,
-    'document_query',
     $3,
     $4,
     $5,
@@ -875,7 +887,8 @@ INSERT INTO spawn_groups (
     $9,
     $10,
     $11,
-    $12
+    $12,
+    $13
 )
 ON CONFLICT (parent_thread_id, group_kind, stable_key) WHERE stable_key IS NOT NULL DO NOTHING
 RETURNING
@@ -896,6 +909,7 @@ RETURNING
 `,
 		meta.ParentThreadID,
 		meta.ParentCallID,
+		meta.GroupKind,
 		meta.StableKey,
 		meta.Expected,
 		meta.Completed,
@@ -911,17 +925,17 @@ RETURNING
 	resolved, err := scanSpawnGroupScanner(row)
 	if err != nil {
 		if !isNoRows(err) {
-			return threadstore.SpawnGroupMeta{}, fmt.Errorf("insert document query spawn group for thread %d: %w", meta.ParentThreadID, err)
+			return threadstore.SpawnGroupMeta{}, fmt.Errorf("insert spawn group (kind=%s) for thread %d: %w", meta.GroupKind, meta.ParentThreadID, err)
 		}
 
-		resolved, err = loadDocumentQuerySpawnGroupTx(ctx, tx, meta.ParentThreadID, meta.StableKey)
+		resolved, err = loadSpawnGroupByKeyTx(ctx, tx, meta.ParentThreadID, meta.GroupKind, meta.StableKey)
 		if err != nil {
 			return threadstore.SpawnGroupMeta{}, err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("commit document query spawn group tx: %w", err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("commit spawn group tx: %w", err)
 	}
 
 	return resolved, nil
@@ -1041,6 +1055,7 @@ INSERT INTO spawn_group_children (
     result_ref,
     summary_ref,
     error_ref,
+    tool_call_args_json,
     created_at,
     updated_at
 ) VALUES (
@@ -1052,8 +1067,9 @@ INSERT INTO spawn_group_children (
     $6,
     $7,
     $8,
-    $9,
-    $10
+    $9::jsonb,
+    $10,
+    $11
 )
 ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
     status = EXCLUDED.status,
@@ -1062,6 +1078,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
     result_ref = EXCLUDED.result_ref,
     summary_ref = EXCLUDED.summary_ref,
     error_ref = EXCLUDED.error_ref,
+    tool_call_args_json = EXCLUDED.tool_call_args_json,
     updated_at = EXCLUDED.updated_at
 `,
 		spawnGroupID,
@@ -1072,6 +1089,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 		nullIfBlank(result.ResultRef),
 		nullIfBlank(result.SummaryRef),
 		nullIfBlank(result.ErrorRef),
+		optionalJSON(result.ToolCallArgsJSON),
 		nonZeroTime(result.UpdatedAt),
 		nonZeroTime(result.UpdatedAt),
 	)
@@ -1118,7 +1136,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE id = $1
 `, threadID)
@@ -1154,6 +1173,7 @@ WHERE id = $1
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -1199,7 +1219,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE parent_thread_id = $1
   AND child_kind = 'document'
@@ -1238,6 +1259,7 @@ LIMIT 1
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -1319,6 +1341,7 @@ SELECT
     t.archived_at,
     t.created_at,
     t.updated_at,
+    t.one_shot,
     COALESCE(first_item.payload_json, '{}'::jsonb)::text,
     COALESCE(latest_item.payload_json, '{}'::jsonb)::text,
     COALESCE(latest_item.direction, ''),
@@ -1390,6 +1413,7 @@ LIMIT $1
 			&archivedAt,
 			&meta.CreatedAt,
 			&meta.UpdatedAt,
+			&meta.OneShot,
 			&firstPayloadText,
 			&latestPayloadText,
 			&latestDirection,
@@ -1845,6 +1869,7 @@ SELECT
     COALESCE(sgc.result_ref, ''),
     COALESCE(sgc.summary_ref, ''),
     COALESCE(sgc.error_ref, ''),
+    COALESCE(sgc.tool_call_args_json::text, ''),
     sgc.updated_at
 FROM spawn_group_children AS sgc
 LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
@@ -1868,6 +1893,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 			&result.ResultRef,
 			&result.SummaryRef,
 			&result.ErrorRef,
+			&result.ToolCallArgsJSON,
 			&result.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan spawn result row: %w", err)
@@ -1881,7 +1907,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 	return results, nil
 }
 
-func loadDocumentQuerySpawnGroupTx(ctx context.Context, tx pgx.Tx, parentThreadID int64, stableKey string) (threadstore.SpawnGroupMeta, error) {
+func loadSpawnGroupByKeyTx(ctx context.Context, tx pgx.Tx, parentThreadID int64, groupKind, stableKey string) (threadstore.SpawnGroupMeta, error) {
 	row := tx.QueryRow(ctx, `
 SELECT
     id,
@@ -1900,16 +1926,16 @@ SELECT
     updated_at
 FROM spawn_groups
 WHERE parent_thread_id = $1
-  AND group_kind = 'document_query'
-  AND stable_key = $2
-`, parentThreadID, stableKey)
+  AND group_kind = $2
+  AND stable_key = $3
+`, parentThreadID, groupKind, stableKey)
 
 	meta, err := scanSpawnGroupScanner(row)
 	if err != nil {
 		if isNoRows(err) {
 			return threadstore.SpawnGroupMeta{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load document query spawn group for thread %d/%s: %w", parentThreadID, stableKey, err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load spawn group (kind=%s) for thread %d/%s: %w", groupKind, parentThreadID, stableKey, err)
 	}
 	return meta, nil
 }
@@ -2279,7 +2305,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -2305,7 +2332,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -2331,7 +2359,8 @@ ON CONFLICT (id) DO UPDATE SET
     document_phase = EXCLUDED.document_phase,
     archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
-    updated_at = EXCLUDED.updated_at
+    updated_at = EXCLUDED.updated_at,
+    one_shot = EXCLUDED.one_shot
 `,
 		meta.ID,
 		meta.RootThreadID,
@@ -2358,6 +2387,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
@@ -2392,7 +2422,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE id = $1
 FOR UPDATE
@@ -2429,6 +2460,7 @@ FOR UPDATE
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -2510,6 +2542,7 @@ SELECT
     COALESCE(sgc.result_ref, ''),
     COALESCE(sgc.summary_ref, ''),
     COALESCE(sgc.error_ref, ''),
+    COALESCE(sgc.tool_call_args_json::text, ''),
     sgc.updated_at
 FROM spawn_group_children AS sgc
 LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
@@ -2533,6 +2566,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 			&result.ResultRef,
 			&result.SummaryRef,
 			&result.ErrorRef,
+			&result.ToolCallArgsJSON,
 			&result.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan spawn result row: %w", err)

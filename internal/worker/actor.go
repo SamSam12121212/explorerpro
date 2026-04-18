@@ -92,7 +92,7 @@ type actorStore interface {
 	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error)
 	SaveResponseRaw(ctx context.Context, threadID int64, responseID string, payload json.RawMessage) error
 	ListItems(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.ItemRecord, error)
-	LoadOrCreateDocumentQuerySpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error)
+	LoadOrCreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error)
 	CreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta, childThreadIDs []int64) error
 	LoadSpawnGroup(ctx context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error)
 	SaveSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) error
@@ -911,14 +911,15 @@ func (a *threadActor) handleChildResult(cmd threadcmd.Command, fallbackStatus st
 	}
 
 	stored, results, err := a.store.UpsertSpawnResult(a.ctx, spawnGroupID, threadstore.SpawnChildResult{
-		ChildThreadID:   body.ChildThreadID,
-		Status:          status,
-		ChildResponseID: body.ChildResponseID,
-		AssistantText:   body.AssistantText,
-		ResultRef:       body.ResultRef,
-		SummaryRef:      body.SummaryRef,
-		ErrorRef:        body.ErrorRef,
-		UpdatedAt:       time.Now().UTC(),
+		ChildThreadID:    body.ChildThreadID,
+		Status:           status,
+		ChildResponseID:  body.ChildResponseID,
+		AssistantText:    body.AssistantText,
+		ResultRef:        body.ResultRef,
+		SummaryRef:       body.SummaryRef,
+		ErrorRef:         body.ErrorRef,
+		ToolCallArgsJSON: body.ToolCallArgsJSON,
+		UpdatedAt:        time.Now().UTC(),
 	})
 	if err != nil {
 		return err
@@ -950,7 +951,7 @@ func (a *threadActor) handleChildResult(cmd threadcmd.Command, fallbackStatus st
 	)
 
 	if spawn.AggregateSubmittedAt.IsZero() && spawn.Completed+spawn.Failed+spawn.Cancelled >= spawn.Expected {
-		outputItem, err := aggregateSpawnOutputItem(spawn, results)
+		outputItem, err := a.aggregateSpawnOutputItemForGroup(spawn, results)
 		if err != nil {
 			return err
 		}
@@ -1367,7 +1368,7 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 		return nil
 	}
 
-	outputItem, err := aggregateSpawnOutputItem(spawn, results)
+	outputItem, err := a.aggregateSpawnOutputItemForGroup(spawn, results)
 	if err != nil {
 		return err
 	}
@@ -2222,6 +2223,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 	var pendingSpawnCallID string
 	var pendingDocQueries []docQueryCall
 	var pendingPageReads []pageReadCall
+	var pendingCitationCalls []citationLocatorCall
 	prevStatus := meta.Status
 	eventCount := 0
 	deltaLogs := map[openaiws.EventType]*deltaLogState{}
@@ -2359,6 +2361,28 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 								Request: req,
 							})
 						}
+					} else if err == nil && call.Name == doccmd.ToolNameStoreCitation {
+						if len(pendingCitationCalls) >= maxCitationsPerTurn {
+							a.logger.Warn("store_citation per-turn cap exceeded, halting spawn",
+								"cap", maxCitationsPerTurn,
+								"call_id", call.CallID,
+							)
+							waitingTool = true
+						} else {
+							req, err := decodeCitationLocatorRequest(call.Arguments)
+							if err != nil {
+								a.logger.Warn("invalid store_citation arguments, falling back to waiting_tool",
+									"call_id", call.CallID,
+									"error", err,
+								)
+								waitingTool = true
+							} else {
+								pendingCitationCalls = append(pendingCitationCalls, citationLocatorCall{
+									CallID:  call.CallID,
+									Request: req,
+								})
+							}
+						}
 					} else {
 						waitingTool = true
 					}
@@ -2385,7 +2409,40 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 				meta.LastResponseID = responseID
 			}
 			meta.ActiveResponseID = ""
+			// Refuse turns that mix tool kinds the dispatch can't fan out
+			// in parallel. Spawning a locator/query group and returning
+			// sync-tool outputs in the same barrier cycle would leave
+			// whichever kind lost the priority chain with dangling
+			// function_calls (no matching function_call_output in the
+			// follow-up turn, which OpenAI rejects). Fall back to
+			// waiting_tool so the mix surfaces as an explicit stuck
+			// state instead of a silent drop. Matches how malformed
+			// tool args already behave.
+			pendingKinds := 0
 			if pendingSpawn != nil {
+				pendingKinds++
+			}
+			if len(pendingDocQueries) > 0 {
+				pendingKinds++
+			}
+			if len(pendingCitationCalls) > 0 {
+				pendingKinds++
+			}
+			if len(pendingPageReads) > 0 {
+				pendingKinds++
+			}
+			if pendingKinds > 1 {
+				a.logger.Warn("mixed tool kinds in one response, refusing dispatch",
+					appendThreadGraphAttrs([]any{
+						"pending_spawn", pendingSpawn != nil,
+						"pending_doc_queries", len(pendingDocQueries),
+						"pending_citation_calls", len(pendingCitationCalls),
+						"pending_page_reads", len(pendingPageReads),
+					}, meta)...,
+				)
+				waitingTool = true
+			}
+			if pendingSpawn != nil && !waitingTool {
 				spawnGroupID, err := a.startSpawnGroup(meta, pendingSpawnCallID, *pendingSpawn)
 				if err != nil {
 					return nil, err
@@ -2394,6 +2451,13 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 				meta.Status = threadstore.ThreadStatusWaitingChildren
 			} else if len(pendingDocQueries) > 0 && !waitingTool {
 				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueries)
+				if err != nil {
+					return nil, err
+				}
+				meta.ActiveSpawnGroupID = spawnGroupID
+				meta.Status = threadstore.ThreadStatusWaitingChildren
+			} else if len(pendingCitationCalls) > 0 && !waitingTool {
+				spawnGroupID, err := a.startCitationLocatorGroup(meta, pendingCitationCalls)
 				if err != nil {
 					return nil, err
 				}
@@ -2467,10 +2531,19 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 			// stream we must not execute the tool calls it emitted, because
 			// meta.Status is already Failed/Incomplete and we'd be firing a
 			// new response.create on a terminated thread.
+			//
+			// Also gated on no pendingCitationCalls: the response.completed
+			// dispatch above gives citation locator spawn priority over page
+			// reads, transitioning the thread to WaitingChildren. If we
+			// returned pendingPageReads here anyway, sendAndStream would fire
+			// a follow-up response.create on a thread already waiting on the
+			// citation barrier — racing barrier close against the page-read
+			// continuation.
 			if event.Type == openaiws.EventTypeResponseCompleted &&
 				len(pendingPageReads) > 0 &&
 				pendingSpawn == nil &&
 				len(pendingDocQueries) == 0 &&
+				len(pendingCitationCalls) == 0 &&
 				!waitingTool {
 				return pendingPageReads, nil
 			}
@@ -2489,7 +2562,15 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 					return nil, err
 				}
 			}
-			if statusSupportsIdleSocket(meta.Status) {
+			// One-shot children (e.g. the evidence locator) are explicitly single-
+			// response: we disconnect the socket right after reporting instead of
+			// holding it warm for a follow-up that will never come. The parent
+			// barrier already has the result; the child has nothing more to do.
+			if publishMeta.OneShot {
+				socketID := a.currentOpenAISocketID()
+				a.disconnectOpenAISocket(socketID, "one_shot_complete")
+				a.resetSession("one_shot_complete")
+			} else if statusSupportsIdleSocket(meta.Status) {
 				a.startIdleLoop(meta)
 			}
 			return nil, nil
@@ -2721,6 +2802,37 @@ func (a *threadActor) loadLatestAssistantText(threadID int64) (string, error) {
 		}
 		if text != "" {
 			return text, nil
+		}
+	}
+
+	return "", nil
+}
+
+// loadLatestToolCallArgs walks the child's output items in reverse and
+// returns the arguments string of the most recent function_call. Used by
+// publishChildInvocationResult to surface forced-tool-call output (e.g.
+// the evidence locator's emit_bboxes call) up to the parent barrier.
+// Returns "" without error when the child never emitted a function_call.
+func (a *threadActor) loadLatestToolCallArgs(threadID int64) (string, error) {
+	items, err := a.store.ListItems(a.ctx, threadID, threadstore.ListOptions{Limit: 100})
+	if err != nil {
+		return "", err
+	}
+
+	for index := len(items) - 1; index >= 0; index-- {
+		item := items[index]
+		if item.Direction != "output" || item.ItemType != "function_call" {
+			continue
+		}
+
+		var payload struct {
+			Arguments string `json:"arguments"`
+		}
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			return "", fmt.Errorf("decode function_call item: %w", err)
+		}
+		if strings.TrimSpace(payload.Arguments) != "" {
+			return payload.Arguments, nil
 		}
 	}
 
@@ -3172,6 +3284,17 @@ func summarizeSpawnResults(results []threadstore.SpawnChildResult) (completed, f
 	return completed, failed, cancelled
 }
 
+// aggregateSpawnOutputItemForGroup dispatches aggregation on the spawn
+// group's kind. citation_locator groups need a finalize RPC round-trip
+// per child (to persist rows + build per-call function_call_output);
+// everything else falls through to the existing assistant-text aggregation.
+func (a *threadActor) aggregateSpawnOutputItemForGroup(spawn threadstore.SpawnGroupMeta, results []threadstore.SpawnChildResult) (json.RawMessage, error) {
+	if spawn.GroupKind == "citation_locator" {
+		return a.aggregateCitationLocatorOutputs(spawn, results)
+	}
+	return aggregateSpawnOutputItem(spawn, results)
+}
+
 func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []threadstore.SpawnChildResult) (json.RawMessage, error) {
 	children := make([]map[string]any, 0, len(results))
 	for _, result := range results {
@@ -3481,7 +3604,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		return 0, err
 	}
 
-	spawnMeta, err := a.store.LoadOrCreateDocumentQuerySpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
+	spawnMeta, err := a.store.LoadOrCreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
 		ParentThreadID: parentMeta.ID,
 		ParentCallID:   encodedParentCallID,
 		GroupKind:      "document_query",
@@ -4171,12 +4294,22 @@ func (a *threadActor) publishChildInvocationResult(meta threadstore.ThreadMeta, 
 		assistantText = ""
 	}
 
+	toolCallArgs, err := a.loadLatestToolCallArgs(meta.ID)
+	if err != nil {
+		a.logger.Warn("failed to load child tool call arguments",
+			"spawn_group_id", meta.ActiveSpawnGroupID,
+			"error", err,
+		)
+		toolCallArgs = ""
+	}
+
 	body, err := json.Marshal(threadcmd.ChildResultBody{
-		SpawnGroupID:    meta.ActiveSpawnGroupID,
-		ChildThreadID:   meta.ID,
-		ChildResponseID: meta.LastResponseID,
-		Status:          resultStatus,
-		AssistantText:   assistantText,
+		SpawnGroupID:     meta.ActiveSpawnGroupID,
+		ChildThreadID:    meta.ID,
+		ChildResponseID:  meta.LastResponseID,
+		Status:           resultStatus,
+		AssistantText:    assistantText,
+		ToolCallArgsJSON: toolCallArgs,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal child terminal body: %w", err)

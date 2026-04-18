@@ -1,6 +1,7 @@
 import type {
   AttachedCollection,
   AttachedDocument,
+  CitationPayload,
   ThreadMessage,
   HealthState,
   ReasoningEffort,
@@ -40,6 +41,10 @@ export interface ThreadState {
   // call_ids of in-flight `read_document_page` tool calls. Same lifecycle as
   // pendingDocumentQueries.
   pendingPageReads: string[];
+  // Citations attached to the root thread, keyed by id. Fetched from
+  // /threads/:id/citations on thread load and after response.completed
+  // events (when new citations may have been materialized during the turn).
+  citations: Record<number, CitationPayload>;
 }
 
 export interface ThreadActions {

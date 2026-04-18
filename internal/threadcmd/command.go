@@ -60,6 +60,9 @@ type StartBody struct {
 	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
 	Store              *bool           `json:"store,omitempty"`
 	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	// OneShot asks the worker to release the socket immediately after the
+	// child's terminal response rather than entering the warm/idle loop.
+	OneShot bool `json:"one_shot,omitempty"`
 }
 
 type ResumeBody struct {
@@ -102,6 +105,10 @@ type ChildResultBody struct {
 	ResultRef       string `json:"result_ref,omitempty"`
 	SummaryRef      string `json:"summary_ref,omitempty"`
 	ErrorRef        string `json:"error_ref,omitempty"`
+	// ToolCallArgsJSON carries a forced-tool-call's arguments string from
+	// child to parent when the child's terminal output is a function_call
+	// (e.g. citation_locator via emit_bboxes).
+	ToolCallArgsJSON string `json:"tool_call_args_json,omitempty"`
 }
 
 func InputKind(inputItems json.RawMessage, preparedInputRef string) string {

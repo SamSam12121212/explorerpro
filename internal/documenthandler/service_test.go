@@ -51,7 +51,7 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 				PageCount:   1,
 			},
 		},
-	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob, nil)
 	svc.now = func() time.Time { return time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -151,7 +151,7 @@ func TestPrepareInputBuildsPageReadArtifact(t *testing.T) {
 				PageCount:   10,
 			},
 		},
-	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob, nil)
 	svc.now = func() time.Time { return time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC) }
 
 	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
@@ -412,7 +412,7 @@ func assertPageTagsIncludeDimensions(t *testing.T, raw json.RawMessage, wantTags
 }
 
 func TestPrepareInputRejectsUnsupportedKind(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.prepareInput(context.Background(), doccmd.PrepareInputRequest{
 		RequestID:  "req_unsupported",
@@ -435,7 +435,7 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 				{ID: 1, Filename: `Quarterly "Report" <Draft>.pdf`},
 			},
 		},
-	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",
@@ -459,14 +459,17 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	if err := json.Unmarshal(resp.Tools, &tools); err != nil {
 		t.Fatalf("json.Unmarshal(tools) error = %v", err)
 	}
-	if len(tools) != 3 {
-		t.Fatalf("tools length = %d, want 3 (lookup + query_document + read_document_page for root thread)", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("tools length = %d, want 4 (lookup + query_document + read_document_page + store_citation for root thread)", len(tools))
 	}
 	if tools[1]["name"] != doccmd.ToolNameQueryDocument {
 		t.Fatalf("tools[1] name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryDocument)
 	}
 	if tools[2]["name"] != doccmd.ToolNameReadDocumentPage {
 		t.Fatalf("tools[2] name = %v, want %q", tools[2]["name"], doccmd.ToolNameReadDocumentPage)
+	}
+	if tools[3]["name"] != doccmd.ToolNameStoreCitation {
+		t.Fatalf("tools[3] name = %v, want %q", tools[3]["name"], doccmd.ToolNameStoreCitation)
 	}
 }
 
@@ -477,7 +480,7 @@ func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
 				{ID: 1, Filename: "report.pdf"},
 			},
 		},
-	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:      "docctx_456",
@@ -496,17 +499,20 @@ func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
 		t.Fatalf("json.Unmarshal(tools) error = %v", err)
 	}
 	if len(tools) != 2 {
-		t.Fatalf("tools length = %d, want 2 (lookup + query_document; no read_document_page on child threads)", len(tools))
+		t.Fatalf("tools length = %d, want 2 (lookup + query_document; no read_document_page or store_citation on child threads)", len(tools))
 	}
 	for _, tool := range tools {
 		if tool["name"] == doccmd.ToolNameReadDocumentPage {
 			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameReadDocumentPage)
 		}
+		if tool["name"] == doccmd.ToolNameStoreCitation {
+			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameStoreCitation)
+		}
 	}
 }
 
 func TestRuntimeContextLeavesBaseWhenNoDocumentsAttached(t *testing.T) {
-	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, newTestBlobStore(t), nil)
 
 	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
 		RequestID:    "docctx_123",

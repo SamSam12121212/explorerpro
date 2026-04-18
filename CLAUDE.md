@@ -8,17 +8,18 @@ Working agreement and project context for Claude sessions on this repo. Read thi
 
 ## Today's mission
 
-**Build the evidence locator — the terminal "where is this on the page?" agent.** `read_document_page` (#26) landed yesterday and proved the post-terminal sync-tool resume pattern works end-to-end: the main thread can now pull a specific page image into its own context as a `function_call_output`. We now need the reciprocal primitive: given a quoted span from a page, return the bbox that paints that quote on the PDF.
+**Evidence chain closed.** The citation system landed as one epic PR on branch `claude/evidence-locator-alpha`. The `locate_citation` fuzzy-quote design from the earlier draft of this block was replaced with a cleaner shape after the design conversation — two-phase PrepareInput into documenthandler, evidence-locator spawned as a one-shot child thread (new socket behaviour), forced structured output via `tool_choice: emit_bboxes`, citations persisted in DB and referenced by integer id.
 
-1. **Tool** — `locate_citation(document_id, page_number, quoted_text)` in `doccmd`, root-thread gated the same way as `read_document_page` (`ParentThreadID == 0`).
-2. **`PrepareKindLocate` handler** in `documenthandler` — load `manifest.pages[i].ocr_ref`, find the OCR lines whose text covers the quoted span (substring first; fuzzy later if needed), compute the unioned bbox in manifest pixels, return `{line_indices, page, x, y, w, h}` inside a `function_call_output`.
-3. **Structural safety by construction** — the model never produces raw coord numbers; it gets either materialized line-backed bboxes or an error-shaped output saying "text not found on page." That's the hallucination gate. Matches the idea we anchored on: model emits *line identity*, Go materializes coords from OCR data.
-4. **Prompt nudge** — update `DEFAULT_INSTRUCTIONS` so the model pairs `read_document_page` → reasoning → `locate_citation` before emitting `?cite=page,x,y,w,h`. First time citations are guaranteed correct by construction instead of trusted.
-5. **End-to-end smoke test** — ask a question over the cat-allergy doc, model reads the page, cites a line, locator resolves to a bbox, painter lights it up yellow. Closes the loop mission started two days ago.
+The shape the model now works with:
+1. **`store_citation(document_id, pages, instruction, include_images)`** — root-thread-only tool. `pages` is 1 or 2 consecutive entries (N or [N, N+1]); `instruction` is natural language including the model's authoritative quoted text as an anchor; `include_images` is false by default, true only for noisy scans.
+2. **Two-phase flow**: worker sees the call, fires `PrepareKindStoreCitationSpawn` → documenthandler loads OCR for the pages and builds the locator child's first-turn input. Locator is a new child thread (ChildKind=`citation_locator`, OneShot=true — a new flag on `threads.one_shot` that releases the socket immediately after the single response instead of warm-idling). Locator runs with `gpt-5.4-mini` / medium reasoning, forced through `emit_bboxes` tool call. Barrier closes when all spawned locators return; worker fires `PrepareKindStoreCitationFinalize` per child with `ToolCallArgsJSON`, documenthandler validates indices against OCR, persists `citations` + `citation_bboxes`, returns `{"citation_id": N}` as function_call_output for the parent's turn 2.
+3. **Main thread never sees OCR text or bbox numbers.** Only `{citation_id}` comes back, and the model embeds it as `[display text][citation_id]` in its reply. Frontend preprocessor swaps that for a `CitationChip`; click navigates to `/doc/{id}?page={first}&citation={id}`; painter reads bboxes from thread context (fetched from `GET /threads/:id/citations`), no URL coordinates.
+4. **Structural hallucination gate** preserved through every layer: tool args validate pages (1-2 consecutive), locator indices validate in-range against OCR lines, emit_bboxes JSON schema is strict. The model physically cannot emit a bbox that isn't a real OCR line.
+5. **Per-turn cap** of 20 parallel `store_citation` calls (separate from query_document's 50). Each is its own OpenAI session so the cap is a real cost control.
 
-When in doubt today, ask: "does this move us closer to a model-emitted bbox that's structurally a real OCR line?" If no, defer it.
+The `?cite=page,x,y,w,h` URL format and `MOCK_CITATIONS` test fixture are gone. `?page=N` stays as the jump mechanism; `?citation={id}` selects the highlight set.
 
-**Next after this:** extend `?cite=` URL format to accept OCR line indices (`?cite=page,lines=3,4,5`) so the painter can pull from OCR JSON directly — decouples citations from the pixel-coord form and survives OCR re-runs when page SHA is stable (#24's `mergeExistingOCRRefs` already preserves indices across redelivery). Defer until the locator itself is proven.
+**Next after this lands:** end-to-end smoke test on the cat-allergy doc + the EMA bipolar guideline (has the 4.7.1.10 continuation case and the 4.7.1.8 single-page case). Watch for locator hallucinating line indices, cost per citation, and OCR coverage on the pharma doc (we haven't OCR'd it yet on the droplet). If quality is tight, add 2-3 few-shot examples to `doccmd.CitationLocatorInstructions`.
 
 ## Working style
 
