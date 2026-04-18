@@ -22,6 +22,7 @@ import (
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/natsbootstrap"
+	"explorer/internal/ocrcmd"
 
 	"github.com/nats-io/nats.go"
 )
@@ -45,6 +46,9 @@ func New(logger *slog.Logger, js nats.JetStreamContext, docs *docstore.Store, bl
 func (s *Service) Run(ctx context.Context) error {
 	if err := natsbootstrap.EnsureDocCommandStream(s.js); err != nil {
 		return fmt.Errorf("bootstrap doc command stream: %w", err)
+	}
+	if err := natsbootstrap.EnsureDocOCRStream(s.js); err != nil {
+		return fmt.Errorf("bootstrap doc ocr stream: %w", err)
 	}
 
 	ch := make(chan *nats.Msg, 64)
@@ -106,6 +110,19 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
+	// Publish the ocr-pipeline trigger BEFORE marking the document ready.
+	// A Nak here redelivers the split command while the doc is still in
+	// "splitting" state, so redelivery's initial UpdateStatus(splitting,...)
+	// is a no-op rather than a regression from "ready" back to empty metadata.
+	if err := s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount); err != nil {
+		s.logger.Error("failed to signal ocr pipeline; will retry on redelivery",
+			"document_id", cmd.DocumentID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
 	if err := s.docs.UpdateStatus(ctx, cmd.DocumentID, "ready", manifestRef, pageCount, ""); err != nil {
 		s.logger.Error("failed to update document status to ready", "document_id", cmd.DocumentID, "error", err)
 		_ = msg.Nak()
@@ -119,6 +136,21 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 	)
 
 	_ = msg.Ack()
+}
+
+func (s *Service) publishSplitDone(documentID int64, manifestRef string, pageCount int) error {
+	data, err := ocrcmd.EncodeSplitDone(ocrcmd.SplitDoneEvent{
+		DocumentID:  documentID,
+		ManifestRef: manifestRef,
+		PageCount:   pageCount,
+	})
+	if err != nil {
+		return fmt.Errorf("encode split done event: %w", err)
+	}
+	if _, err := s.js.Publish(ocrcmd.SplitDoneSubject, data); err != nil {
+		return fmt.Errorf("publish %s: %w", ocrcmd.SplitDoneSubject, err)
+	}
+	return nil
 }
 
 func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string, int, error) {
@@ -204,8 +236,16 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		})
 	}
 
+	manifestRef := s.blob.Ref("documents", documentID, "manifest.json")
+
+	// On redelivery of an already-processed split, dococr may have already
+	// written ocr_ref fields onto the previous manifest. Carry those refs
+	// forward for any page whose PNG bytes (sha256) are unchanged — the OCR
+	// output would be byte-identical, so there's no reason to redo the work.
+	mergeExistingOCRRefs(ctx, s.blob, manifestRef, pages)
+
 	manifest := Manifest{
-		Version:              "v1",
+		Version:              "v2",
 		DocumentID:           cmd.DocumentID,
 		Filename:             doc.Filename,
 		CreatedAt:            now.Format(time.RFC3339),
@@ -225,12 +265,32 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		return "", 0, fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	manifestRef := s.blob.Ref("documents", documentID, "manifest.json")
 	if err := s.blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
 		return "", 0, fmt.Errorf("write manifest to blob: %w", err)
 	}
 
 	return manifestRef, len(pages), nil
+}
+
+func mergeExistingOCRRefs(ctx context.Context, blob *blobstore.LocalStore, manifestRef string, pages []PageEntry) {
+	existing, err := blob.ReadRef(ctx, manifestRef)
+	if err != nil {
+		return
+	}
+	var prev Manifest
+	if err := json.Unmarshal(existing, &prev); err != nil {
+		return
+	}
+	prevByPage := make(map[int]PageEntry, len(prev.Pages))
+	for _, p := range prev.Pages {
+		prevByPage[p.PageNumber] = p
+	}
+	for i := range pages {
+		prior, ok := prevByPage[pages[i].PageNumber]
+		if ok && prior.OCRRef != "" && prior.SHA256 == pages[i].SHA256 {
+			pages[i].OCRRef = prior.OCRRef
+		}
+	}
 }
 
 func pngDimensions(data []byte) (int, int, error) {

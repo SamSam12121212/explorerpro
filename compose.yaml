@@ -185,6 +185,28 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  dococr:
+    build:
+      context: .
+      dockerfile: cmd/dococr/Dockerfile
+    environment:
+      SERVICE_NAME: explorer-dococr
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      NATS_URL: nats://nats:4222
+      NATS_CLIENT_NAME: explorer-dococr
+      BLOB_STORAGE_DIR: /data/blob-storage
+      PADDLEOCR_URL: "${PADDLEOCR_URL:-http://host.docker.internal:8000}"
+      PADDLEOCR_BEARER_TOKEN: "${PADDLEOCR_BEARER_TOKEN:-}"
+      PADDLEOCR_REQUEST_TIMEOUT_SECONDS: "${PADDLEOCR_REQUEST_TIMEOUT_SECONDS:-120}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./blob-storage:/data/blob-storage
+    depends_on:
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   frontend_node_modules:
   nats_data:
