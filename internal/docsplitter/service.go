@@ -110,6 +110,19 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
+	// Publish the ocr-pipeline trigger BEFORE marking the document ready.
+	// A Nak here redelivers the split command while the doc is still in
+	// "splitting" state, so redelivery's initial UpdateStatus(splitting,...)
+	// is a no-op rather than a regression from "ready" back to empty metadata.
+	if err := s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount); err != nil {
+		s.logger.Error("failed to signal ocr pipeline; will retry on redelivery",
+			"document_id", cmd.DocumentID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
 	if err := s.docs.UpdateStatus(ctx, cmd.DocumentID, "ready", manifestRef, pageCount, ""); err != nil {
 		s.logger.Error("failed to update document status to ready", "document_id", cmd.DocumentID, "error", err)
 		_ = msg.Nak()
@@ -121,15 +134,6 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 		"manifest_ref", manifestRef,
 		"page_count", pageCount,
 	)
-
-	if err := s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount); err != nil {
-		s.logger.Error("failed to signal ocr pipeline; will retry on redelivery",
-			"document_id", cmd.DocumentID,
-			"error", err,
-		)
-		_ = msg.Nak()
-		return
-	}
 
 	_ = msg.Ack()
 }
