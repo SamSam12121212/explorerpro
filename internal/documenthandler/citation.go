@@ -248,11 +248,20 @@ func buildCitationLocatorContent(documentID int64, filename string, pages []docs
 		data := ocrPages[page.PageNumber]
 		var linesBuilder strings.Builder
 		for index, line := range data.Lines {
-			fmt.Fprintf(&linesBuilder, "[%d] %s\n", index, line.Text)
+			if len(line.Bbox) >= 4 {
+				// bbox is [x0, y0, x1, y1] in manifest pixels, top-left
+				// origin. Gives the locator layout signal for tables,
+				// forms, and multi-column prose where text order alone
+				// isn't enough to tell which lines belong together.
+				// Poly is omitted — bbox is enough for row/label
+				// grouping, polys double the token cost for little gain.
+				fmt.Fprintf(&linesBuilder, "[%d] bbox=[%d,%d,%d,%d] %s\n",
+					index, line.Bbox[0], line.Bbox[1], line.Bbox[2], line.Bbox[3], line.Text)
+			} else {
+				fmt.Fprintf(&linesBuilder, "[%d] %s\n", index, line.Text)
+			}
 		}
 
-		// OCR lines: index + text only. bboxes are implicit in the index —
-		// the locator just returns indices, Go materializes coords downstream.
 		pageBlock := fmt.Sprintf(`<page number="%d" width="%d" height="%d">
 <ocr_lines>
 %s</ocr_lines>
