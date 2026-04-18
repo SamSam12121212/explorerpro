@@ -951,7 +951,7 @@ func (a *threadActor) handleChildResult(cmd threadcmd.Command, fallbackStatus st
 	)
 
 	if spawn.AggregateSubmittedAt.IsZero() && spawn.Completed+spawn.Failed+spawn.Cancelled >= spawn.Expected {
-		outputItem, err := aggregateSpawnOutputItem(spawn, results)
+		outputItem, err := a.aggregateSpawnOutputItemForGroup(spawn, results)
 		if err != nil {
 			return err
 		}
@@ -1368,7 +1368,7 @@ func (a *threadActor) recoverWaitingChildren(meta threadstore.ThreadMeta, cmdID 
 		return nil
 	}
 
-	outputItem, err := aggregateSpawnOutputItem(spawn, results)
+	outputItem, err := a.aggregateSpawnOutputItemForGroup(spawn, results)
 	if err != nil {
 		return err
 	}
@@ -2223,6 +2223,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 	var pendingSpawnCallID string
 	var pendingDocQueries []docQueryCall
 	var pendingPageReads []pageReadCall
+	var pendingCitationCalls []citationLocatorCall
 	prevStatus := meta.Status
 	eventCount := 0
 	deltaLogs := map[openaiws.EventType]*deltaLogState{}
@@ -2360,6 +2361,28 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 								Request: req,
 							})
 						}
+					} else if err == nil && call.Name == doccmd.ToolNameStoreCitation {
+						if len(pendingCitationCalls) >= maxCitationsPerTurn {
+							a.logger.Warn("store_citation per-turn cap exceeded, halting spawn",
+								"cap", maxCitationsPerTurn,
+								"call_id", call.CallID,
+							)
+							waitingTool = true
+						} else {
+							req, err := decodeCitationLocatorRequest(call.Arguments)
+							if err != nil {
+								a.logger.Warn("invalid store_citation arguments, falling back to waiting_tool",
+									"call_id", call.CallID,
+									"error", err,
+								)
+								waitingTool = true
+							} else {
+								pendingCitationCalls = append(pendingCitationCalls, citationLocatorCall{
+									CallID:  call.CallID,
+									Request: req,
+								})
+							}
+						}
 					} else {
 						waitingTool = true
 					}
@@ -2395,6 +2418,13 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 				meta.Status = threadstore.ThreadStatusWaitingChildren
 			} else if len(pendingDocQueries) > 0 && !waitingTool {
 				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueries)
+				if err != nil {
+					return nil, err
+				}
+				meta.ActiveSpawnGroupID = spawnGroupID
+				meta.Status = threadstore.ThreadStatusWaitingChildren
+			} else if len(pendingCitationCalls) > 0 && !waitingTool {
+				spawnGroupID, err := a.startCitationLocatorGroup(meta, pendingCitationCalls)
 				if err != nil {
 					return nil, err
 				}
@@ -3210,6 +3240,17 @@ func summarizeSpawnResults(results []threadstore.SpawnChildResult) (completed, f
 	}
 
 	return completed, failed, cancelled
+}
+
+// aggregateSpawnOutputItemForGroup dispatches aggregation on the spawn
+// group's kind. citation_locator groups need a finalize RPC round-trip
+// per child (to persist rows + build per-call function_call_output);
+// everything else falls through to the existing assistant-text aggregation.
+func (a *threadActor) aggregateSpawnOutputItemForGroup(spawn threadstore.SpawnGroupMeta, results []threadstore.SpawnChildResult) (json.RawMessage, error) {
+	if spawn.GroupKind == "citation_locator" {
+		return a.aggregateCitationLocatorOutputs(spawn, results)
+	}
+	return aggregateSpawnOutputItem(spawn, results)
 }
 
 func aggregateSpawnOutputItem(spawn threadstore.SpawnGroupMeta, results []threadstore.SpawnChildResult) (json.RawMessage, error) {
