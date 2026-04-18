@@ -8,15 +8,17 @@ Working agreement and project context for Claude sessions on this repo. Read thi
 
 ## Today's mission
 
-**Close the evidence-chain loop.** Split → render → OCR is live as of last night (#24). The manifest now carries `pages[i].ocr_ref` pointing at per-page PaddleOCR JSON (pixel coords, top-left origin). What's left:
+**Build the evidence locator — the terminal "where is this on the page?" agent.** `read_document_page` (#26) landed yesterday and proved the post-terminal sync-tool resume pattern works end-to-end: the main thread can now pull a specific page image into its own context as a `function_call_output`. We now need the reciprocal primitive: given a quoted span from a page, return the bbox that paints that quote on the PDF.
 
-1. ~~`dococr` Go worker~~ ✅ shipped in #24
-2. ~~Manifest extension (`ocr_ref`, bump `Version`)~~ ✅ shipped in #24 (now `v2`)
-3. **`query_document` enrichment** — load the OCR JSON for each matched page, find the lines that correspond to the cited text, return bbox(es) alongside the answer text. Per-line bboxes or a unioned region — decide when we see what the model needs.
-4. **Model prompt update** — tell the model to emit `?cite=page,x,y,w,h` URLs using the bboxes the tool returns.
-5. **End-to-end smoke test** — model answers a question over a real doc, citation link lands on the exact pixel region in the viewer. Loop closed.
+1. **Tool** — `locate_citation(document_id, page_number, quoted_text)` in `doccmd`, root-thread gated the same way as `read_document_page` (`ParentThreadID == 0`).
+2. **`PrepareKindLocate` handler** in `documenthandler` — load `manifest.pages[i].ocr_ref`, find the OCR lines whose text covers the quoted span (substring first; fuzzy later if needed), compute the unioned bbox in manifest pixels, return `{line_indices, page, x, y, w, h}` inside a `function_call_output`.
+3. **Structural safety by construction** — the model never produces raw coord numbers; it gets either materialized line-backed bboxes or an error-shaped output saying "text not found on page." That's the hallucination gate. Matches the idea we anchored on: model emits *line identity*, Go materializes coords from OCR data.
+4. **Prompt nudge** — update `DEFAULT_INSTRUCTIONS` so the model pairs `read_document_page` → reasoning → `locate_citation` before emitting `?cite=page,x,y,w,h`. First time citations are guaranteed correct by construction instead of trusted.
+5. **End-to-end smoke test** — ask a question over the cat-allergy doc, model reads the page, cites a line, locator resolves to a bbox, painter lights it up yellow. Closes the loop mission started two days ago.
 
-When in doubt today, ask: "does this move us closer to citation #5?" If no, defer it.
+When in doubt today, ask: "does this move us closer to a model-emitted bbox that's structurally a real OCR line?" If no, defer it.
+
+**Next after this:** extend `?cite=` URL format to accept OCR line indices (`?cite=page,lines=3,4,5`) so the painter can pull from OCR JSON directly — decouples citations from the pixel-coord form and survives OCR re-runs when page SHA is stable (#24's `mergeExistingOCRRefs` already preserves indices across redelivery). Defer until the locator itself is proven.
 
 ## Working style
 
@@ -42,7 +44,7 @@ We move fast. Sam ships PRs all day; pacing matches.
 - **Worker is oblivious.** The core worker manages OpenAI websockets + thread ops + event persistence. It does not know about consumers; consumers subscribe to events. Keep that boundary clean.
 - **npm staleness.** AI agents recommend packages unmaintained for years — always check. If popular but stale, look for an active fork.
 
-## Yesterday's marathon (2026-04-16/17, ~16h, 21 merged + 1 pending)
+## Recent marathon (2026-04-16 → 2026-04-18, 26 PRs merged)
 
 **Foundations (#1-5)** — Responses API event stream correctness
 - #1: Don't pass child thread deltas to wsserver
@@ -72,11 +74,15 @@ We move fast. Sam ships PRs all day; pacing matches.
 - #19: The actual fix — `?page=N` jumps never landed in #17/#18 because passing `src` to `PDFViewer` made embedpdf auto-generate its own document ID; switched to `documentManager.initialDocuments` with explicit ID
 - #20: Paint citation bounding boxes from `?cite=page,x,y,w,h` URL params via embedpdf's annotation plugin (`autoCommit:false`, `locked:All` — ephemeral overlay, never flushed to PDF). Bugbot caught `parseFloat("1.5")` sailing past `page >= 1`; fixed with `Number.isInteger`
 
-**Overnight + this morning (all merged)**
+**OCR pipeline (2026-04-17 overnight → morning, #21-24, all merged)**
 - **#21:** PaddleOCR FastAPI service on a DO GPU droplet (RTX 6000 Ada, 48GB VRAM). Three endpoints (`/ocr`, `/ocr/visualize`, `/structure`), bearer auth, GPU passthrough. Smoke-tested end-to-end (88 lines on the cat doc, 0.97-1.00 confidences, ~1s warm). Compose now binds `0.0.0.0:8000` behind a DO Cloud Firewall locked to the home IP — no SSH tunnel in the dev loop
 - **#22:** README refresh — replaced dated `Notes` with `Rough edges`, turned `Aims` into `What it does`, added an `Evidence chain` walkthrough
 - **#23:** Split backend Docker builds per service + `.dockerignore` — each Go service gets its own Dockerfile, build context shrinks from the whole repo to just what each binary needs
 - **#24:** `dococr` worker — subscribes to `doc.split.done` on the `DOC_OCR` JetStream, POSTs each page PNG to PaddleOCR `/ocr`, persists per-page OCR JSON, stamps `pages[i].ocr_ref` onto the manifest, publishes `doc.ocr.done`. Three rounds of bugbot: (1) Nak on publish failure instead of silent-ack, (2) publish before `UpdateStatus(ready)` so Nak'd redeliveries don't regress status, (3) `mergeExistingOCRRefs` preserves ocr_refs on redelivery manifest rewrite when page SHA matches (pdftocairo is deterministic → same PNG bytes = same OCR, no reason to redo the GPU work). Covered by `merge_test.go`
+
+**Page-into-main-thread primitive (2026-04-18, #25-26, all merged)**
+- **#25:** CLAUDE.md refresh — rolled OCR-pipeline work into history, pointed next mission at evidence-chain closure via `query_document` bbox enrichment. (Mission since pivoted — see "Today's mission" above.)
+- **#26:** `read_document_page` tool, root threads only. The reciprocal of `query_document` — where query delegates reasoning to a child thread with the whole doc baked in, read_document_page pulls a single specific page directly into the main thread's context as an image inside a `function_call_output` (list-form `output` array). Three prep commits before the feature: shared `<pdf>`/`<pdf_page>` envelope helper with width/height attributes, blob-ref lowering extended to walk `function_call_output.output` arrays (so the NATS wire stays blob-ref-only until the OpenAI-bound edge), then the tool itself. **New pattern:** post-terminal sync-tool resume in `sendAndStream` — the function is now a loop that reloads `meta`, fires `PrepareInput` RPCs on pending calls, and issues a follow-up `response.create` with the outputs as input. Stack stays flat, no recursion. Per-call failures surface as error-shaped `function_call_output` strings so one bad call doesn't kill the turn. One bugbot round caught three real bugs: `read_document_page` missing from `isInternalRuntimeToolName` (would leak into child threads if ever stored in `ToolsJSON`), reused `cmdID` across loop iterations meant `Nats-Msg-Id` dedup silently dropped follow-up history entries (fixed with a `-turn-N` suffix for iterations > 0), and the terminal bail-out didn't gate on `response.completed` (would execute pending tools on failed responses). End-to-end smoke test working — model reads a page, answers with real content and correct details from it.
 
 ## Where things live
 
@@ -97,4 +103,6 @@ We move fast. Sam ships PRs all day; pacing matches.
 - **Bundled vLLM container** on the droplet has `restart=unless-stopped`. Run `docker update --restart=no vllm` before any reboot or it resurrects and contends for the GPU.
 - **Cursor bugbot reviews every PR.** Address its findings in a follow-up commit on the same branch; pre-empt deliberate-looking choices in the bugbot brief section of the PR body.
 - **JetStream redelivery is not hypothetical.** Any handler that writes blob state + updates Postgres + publishes a follow-up event has to survive being replayed. Three ordering/idempotency bugs landed in #24 that all looked fine on the happy path. Before shipping a new consumer: write out the Nak-at-each-step cases and check that redelivery converges, not clobbers.
+- **Responses API `function_call_output.output` accepts list-form content.** Not just a string — the union is `string | []{input_text | input_image | input_file}`. The Go SDK types (`github.com/openai/openai-go/v3/responses`) are authoritative. Sub-agent summaries have gotten this wrong; don't trust a paraphrase, check the SDK source in `~/go/pkg/mod/github.com/openai/openai-go/`.
+- **Post-terminal sync-tool resume is a new actor pattern (#26).** `sendAndStream` is a loop, not a one-shot. When `streamUntilTerminal` returns pending sync-tool calls (currently only `read_document_page`), the loop executes them via `PrepareInput` RPCs and issues a follow-up `response.create`. Follow-up turns must use a unique `eventID` (we append `-turn-N` from turn 1 onward) or JetStream dedup silently drops the history checkpoint entries. If you add a new sync-tool kind, reuse this pattern — don't invent a new one.
 - **`paddle-ocr` SSH alias** lives in `~/.ssh/config` (uses `~/.ssh/droplet`). Service config + bearer token live at `/root/paddleocr/` on the droplet. See `~/.claude/projects/-Users-detachedhead-explorer/memory/reference_paddle_ocr_droplet.md` for full details.
