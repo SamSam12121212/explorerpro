@@ -24,7 +24,8 @@ import type { ScrollCapability, ScrollPlugin } from "@embedpdf/plugin-scroll";
 import { LuRotateCcw, LuX } from "react-icons/lu";
 import { apiGet, apiPatch } from "../api";
 import { DEFAULT_MODEL, DEFAULT_REASONING, MODEL_OPTIONS, REASONING_OPTIONS } from "../constants";
-import type { DocumentEntry, DocumentResponse, ReasoningEffort } from "../types";
+import { useThread } from "../thread";
+import type { CitationBbox, DocumentEntry, DocumentResponse, ReasoningEffort } from "../types";
 
 const MAIN_TOOLBAR_ID = "main-toolbar";
 const SIDEBAR_PANEL_ID = "sidebar-panel";
@@ -328,50 +329,20 @@ function parseTargetPage(value: string | null): number | null {
   return parsed;
 }
 
-// A citation is a bounding box on a specific page, supplied in manifest pixel
-// coordinates (top-left origin). The format matches what OCR tools like
-// PaddleOCR emit directly — page-indexed, integer pixels. Conversion to
-// embedpdf's PDF-point page-space happens at render time using the document's
-// DPI (both share a top-left origin, so no y-flip).
-export interface Citation {
-  page: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-// Repeated `?cite=page,x,y,w,h` params. Malformed entries are dropped
-// silently so one bad cite doesn't poison the whole highlight set.
-function parseCitations(values: string[]): Citation[] {
-  const out: Citation[] = [];
-  for (const raw of values) {
-    const parts = raw.split(",");
-    if (parts.length !== 5) continue;
-    const nums = parts.map((p) => Number.parseFloat(p));
-    if (nums.some((n) => !Number.isFinite(n))) continue;
-    const [page, x, y, width, height] = nums;
-    if (!Number.isInteger(page) || page < 1) continue;
-    if (width <= 0 || height <= 0) continue;
-    if (x < 0 || y < 0) continue;
-    out.push({ page, x, y, width, height });
-  }
-  return out;
-}
-
-// Stand-in citations until a real producer wires this up. Toggle with
-// `?mock=1` on the URL — lets us visually verify the overlay pipeline
-// without constructing cite params by hand.
-const MOCK_CITATIONS: Citation[] = [
-  { page: 1, x: 200, y: 300, width: 900, height: 80 },
-  { page: 1, x: 200, y: 500, width: 700, height: 60 },
-  { page: 2, x: 150, y: 400, width: 1000, height: 120 },
-];
-
 // Manifest pixels → PDF points (embedpdf's page-space unit). Both are
 // top-left-origin so no y-flip; it's a single uniform scale factor.
 function pixelsToPoints(pixels: number, dpi: number): number {
   return (pixels * 72) / dpi;
+}
+
+// `?citation=N` on the URL resolves to a citation id. The actual bboxes
+// live in thread state (fetched from /threads/:id/citations) — the URL
+// carries only the id so deep links and reloads survive.
+function parseCitationId(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return parsed;
 }
 
 const CITATION_COLOR = "#ffcc00";
@@ -433,20 +404,23 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
   //     (doc stayed loaded), effect fires and jumps.
   const [searchParams] = useSearchParams();
   const pageParam = searchParams.get("page");
-  const mockCitations = searchParams.get("mock") === "1";
-  const citeParams = searchParams.getAll("cite");
+  const citationParam = searchParams.get("citation");
   const scrollCapRef = useRef<ScrollCapability | null>(null);
   const annotationCapRef = useRef<AnnotationCapability | null>(null);
   const [isScrollReady, setIsScrollReady] = useState(false);
 
-  // Parsing depends only on the raw param strings, not array identity — memo
-  // so the draw effect below isn't re-running on every render.
-  const citations = useMemo<Citation[]>(() => {
-    if (mockCitations) return MOCK_CITATIONS;
-    return parseCitations(citeParams);
-    // Join keeps the effect's reactivity without citing the unstable array.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mockCitations, citeParams.join("|")]);
+  // Citation bboxes come from thread state (fetched by ThreadService from
+  // GET /threads/:id/citations) — the URL carries only the citation id,
+  // the actual paint data lives in React context so reloads and deep
+  // links resolve as long as the thread has loaded.
+  const { citations: threadCitations } = useThread();
+  const citationBboxes = useMemo<CitationBbox[]>(() => {
+    const id = parseCitationId(citationParam);
+    if (id === null) return [];
+    const citation = threadCitations[id];
+    if (!citation) return [];
+    return citation.bboxes;
+  }, [citationParam, threadCitations]);
 
   useEffect(() => {
     // PDFViewer's key={documentId} remounts the viewer on doc change and
@@ -483,21 +457,21 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     if (docDpi <= 0) return;
     const annotationCap = annotationCapRef.current;
     if (annotationCap === null) return;
-    if (citations.length === 0) return;
+    if (citationBboxes.length === 0) return;
 
     const scope = annotationCap.forDocument(documentId);
     const created: { pageIndex: number; id: string }[] = [];
-    for (const cite of citations) {
+    for (const bbox of citationBboxes) {
       const id = crypto.randomUUID();
-      const pageIndex = cite.page - 1;
+      const pageIndex = bbox.page - 1;
       const rect = {
         origin: {
-          x: pixelsToPoints(cite.x, docDpi),
-          y: pixelsToPoints(cite.y, docDpi),
+          x: pixelsToPoints(bbox.x, docDpi),
+          y: pixelsToPoints(bbox.y, docDpi),
         },
         size: {
-          width: pixelsToPoints(cite.width, docDpi),
-          height: pixelsToPoints(cite.height, docDpi),
+          width: pixelsToPoints(bbox.width, docDpi),
+          height: pixelsToPoints(bbox.height, docDpi),
         },
       };
       scope.createAnnotation(pageIndex, {
@@ -523,7 +497,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
         cleanupScope.purgeAnnotation(entry.pageIndex, entry.id);
       }
     };
-  }, [citations, documentId, isScrollReady, docMatchesRoute, docDpi]);
+  }, [citationBboxes, documentId, isScrollReady, docMatchesRoute, docDpi]);
 
   useEffect(() => {
     let cancelled = false;

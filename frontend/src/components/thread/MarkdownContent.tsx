@@ -1,6 +1,7 @@
 import Markdown, { type Components } from "react-markdown";
 import { Link } from "react-router";
 import remarkGfm from "remark-gfm";
+import { CitationChip } from "./CitationChip";
 
 const REMARK_PLUGINS = [remarkGfm];
 
@@ -18,6 +19,39 @@ function isInternalHref(href: string | undefined): href is string {
   return !href.startsWith("//");
 }
 
+// The custom citation href scheme: the preprocessor rewrites
+// `[display text][citation_id]` in the model's output to a markdown link
+// with href `citation:citation_id`, so react-markdown sees a normal link
+// and the `a` renderer below swaps it for a CitationChip. Non-matching
+// hrefs fall through to the internal/external link handling above.
+const CITATION_HREF_PREFIX = "citation:";
+
+function parseCitationHref(href: string | undefined): number | null {
+  if (typeof href !== "string") return null;
+  if (!href.startsWith(CITATION_HREF_PREFIX)) return null;
+  const raw = href.slice(CITATION_HREF_PREFIX.length);
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+// `[display text][citation_id]` → `[display text](citation:citation_id)`.
+// react-markdown's default handling of reference-style links treats
+// undefined references as literal text, which would keep the bracket
+// syntax in the rendered output. Rewriting to an inline link with a
+// custom href scheme hooks into the `a` renderer below and produces a
+// real CitationChip.
+//
+// The pattern deliberately only matches positive integers in the id
+// slot so ordinary markdown reference-style links (which use text ids
+// like `[example][1]` → `[1]: https://...`) still work when the
+// definition exists below.
+const CITATION_INLINE_PATTERN = /\[([^\]\n]+?)\]\[(\d+)\]/g;
+
+function preprocessCitations(text: string): string {
+  return text.replace(CITATION_INLINE_PATTERN, "[$1](citation:$2)");
+}
+
 const COMPONENTS: Components = {
   p: ({ children }) => <p className="m-0 mb-2 last:mb-0">{children}</p>,
   ul: ({ children }) => <ul className="m-0 mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
@@ -27,6 +61,10 @@ const COMPONENTS: Components = {
   em: ({ children }) => <em className="italic">{children}</em>,
   del: ({ children }) => <del className="opacity-70">{children}</del>,
   a: ({ children, href }) => {
+    const citationId = parseCitationHref(href);
+    if (citationId !== null) {
+      return <CitationChip citationId={citationId}>{children}</CitationChip>;
+    }
     if (isInternalHref(href)) {
       return (
         <Link className={LINK_CLASS} to={href}>
@@ -72,7 +110,7 @@ export function MarkdownContent({ text }: { text: string }) {
   return (
     <div className="markdown-content">
       <Markdown components={COMPONENTS} remarkPlugins={REMARK_PLUGINS}>
-        {text}
+        {preprocessCitations(text)}
       </Markdown>
     </div>
   );
