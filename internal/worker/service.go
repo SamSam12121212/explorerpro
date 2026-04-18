@@ -120,7 +120,10 @@ func (s *Service) reserveSocketSlot() error {
 	s.socketBudgetMu.Lock()
 	defer s.socketBudgetMu.Unlock()
 
-	if s.socketBudgetMax > 0 && s.socketBudgetUsed >= s.socketBudgetMax {
+	// openaiws.Config.Validate already rejects MaxConcurrentSockets <= 0
+	// at startup, so socketBudgetMax is always positive here. No "unbounded
+	// when zero" escape hatch — the budget is the contract.
+	if s.socketBudgetUsed >= s.socketBudgetMax {
 		return fmt.Errorf("socket budget exhausted: %d/%d in use", s.socketBudgetUsed, s.socketBudgetMax)
 	}
 	s.socketBudgetUsed++

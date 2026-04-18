@@ -108,17 +108,6 @@ func TestSocketBudgetReserveAndRelease(t *testing.T) {
 	}
 }
 
-func TestSocketBudgetUnboundedWhenMaxNonPositive(t *testing.T) {
-	t.Parallel()
-
-	s := &Service{socketBudgetMax: 0}
-	for i := 0; i < 1000; i++ {
-		if err := s.reserveSocketSlot(); err != nil {
-			t.Fatalf("reserve %d unexpectedly failed: %v", i, err)
-		}
-	}
-}
-
 func TestRecoverySweepStatusesExcludesPassiveThreads(t *testing.T) {
 	t.Parallel()
 

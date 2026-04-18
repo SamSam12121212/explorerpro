@@ -182,6 +182,9 @@ export class ThreadService {
   };
 
   dispose() {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pagehide", this.handlePageHide);
+    }
     for (const url of this.previewUrls) {
       URL.revokeObjectURL(url);
     }
