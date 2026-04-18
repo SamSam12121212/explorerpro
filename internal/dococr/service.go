@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
 
 	"explorer/internal/blobstore"
@@ -88,17 +89,30 @@ func (s *Service) Run(ctx context.Context) error {
 		"paddleocr_url", s.cfg.PaddleOCRURL,
 	)
 
+	// Each subscription drains on its own goroutine so a slow multi-page
+	// document OCR doesn't block image OCR messages (or vice versa) from being
+	// consumed within their AckWait windows.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go s.runHandlerLoop(ctx, &wg, splitCh, s.handleSplitDone)
+	go s.runHandlerLoop(ctx, &wg, imageCh, s.handleImageOCRRequested)
+
+	<-ctx.Done()
+	_ = splitSub.Drain()
+	_ = imageSub.Drain()
+	wg.Wait()
+	s.logger.Info("dococr service stopping", "reason", ctx.Err())
+	return nil
+}
+
+func (s *Service) runHandlerLoop(ctx context.Context, wg *sync.WaitGroup, ch <-chan *nats.Msg, handle func(context.Context, *nats.Msg)) {
+	defer wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
-			_ = splitSub.Drain()
-			_ = imageSub.Drain()
-			s.logger.Info("dococr service stopping", "reason", ctx.Err())
-			return nil
-		case msg := <-splitCh:
-			s.handleSplitDone(ctx, msg)
-		case msg := <-imageCh:
-			s.handleImageOCRRequested(ctx, msg)
+			return
+		case msg := <-ch:
+			handle(ctx, msg)
 		}
 	}
 }
