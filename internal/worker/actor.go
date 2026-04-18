@@ -2498,10 +2498,19 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 			// stream we must not execute the tool calls it emitted, because
 			// meta.Status is already Failed/Incomplete and we'd be firing a
 			// new response.create on a terminated thread.
+			//
+			// Also gated on no pendingCitationCalls: the response.completed
+			// dispatch above gives citation locator spawn priority over page
+			// reads, transitioning the thread to WaitingChildren. If we
+			// returned pendingPageReads here anyway, sendAndStream would fire
+			// a follow-up response.create on a thread already waiting on the
+			// citation barrier — racing barrier close against the page-read
+			// continuation.
 			if event.Type == openaiws.EventTypeResponseCompleted &&
 				len(pendingPageReads) > 0 &&
 				pendingSpawn == nil &&
 				len(pendingDocQueries) == 0 &&
+				len(pendingCitationCalls) == 0 &&
 				!waitingTool {
 				return pendingPageReads, nil
 			}

@@ -120,10 +120,6 @@ func (s *Service) prepareStoreCitationFinalizeInput(ctx context.Context, req doc
 	if err != nil {
 		return "", err
 	}
-	pageEntryByNumber := make(map[int]docsplitter.PageEntry, len(pageEntries))
-	for _, p := range pageEntries {
-		pageEntryByNumber[p.PageNumber] = p
-	}
 
 	ocrPages, err := s.loadOCRForPages(ctx, pageEntries)
 	if err != nil {
@@ -188,7 +184,6 @@ func (s *Service) prepareStoreCitationFinalizeInput(ctx context.Context, req doc
 		"pages", req.Pages,
 		"child_thread_id", req.ChildThreadID,
 	)
-	_ = doc
 	return ref, nil
 }
 
