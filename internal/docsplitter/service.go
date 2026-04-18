@@ -236,6 +236,14 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		})
 	}
 
+	manifestRef := s.blob.Ref("documents", documentID, "manifest.json")
+
+	// On redelivery of an already-processed split, dococr may have already
+	// written ocr_ref fields onto the previous manifest. Carry those refs
+	// forward for any page whose PNG bytes (sha256) are unchanged — the OCR
+	// output would be byte-identical, so there's no reason to redo the work.
+	mergeExistingOCRRefs(ctx, s.blob, manifestRef, pages)
+
 	manifest := Manifest{
 		Version:              "v2",
 		DocumentID:           cmd.DocumentID,
@@ -257,12 +265,32 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 		return "", 0, fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	manifestRef := s.blob.Ref("documents", documentID, "manifest.json")
 	if err := s.blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
 		return "", 0, fmt.Errorf("write manifest to blob: %w", err)
 	}
 
 	return manifestRef, len(pages), nil
+}
+
+func mergeExistingOCRRefs(ctx context.Context, blob *blobstore.LocalStore, manifestRef string, pages []PageEntry) {
+	existing, err := blob.ReadRef(ctx, manifestRef)
+	if err != nil {
+		return
+	}
+	var prev Manifest
+	if err := json.Unmarshal(existing, &prev); err != nil {
+		return
+	}
+	prevByPage := make(map[int]PageEntry, len(prev.Pages))
+	for _, p := range prev.Pages {
+		prevByPage[p.PageNumber] = p
+	}
+	for i := range pages {
+		prior, ok := prevByPage[pages[i].PageNumber]
+		if ok && prior.OCRRef != "" && prior.SHA256 == pages[i].SHA256 {
+			pages[i].OCRRef = prior.OCRRef
+		}
+	}
 }
 
 func pngDimensions(data []byte) (int, int, error) {
