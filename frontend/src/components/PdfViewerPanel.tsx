@@ -419,7 +419,7 @@ export function PdfViewerPanel({ documentId }: PdfViewerPanelProps) {
     if (id === null) return [];
     const citation = threadCitations[id];
     if (!citation) return [];
-    return citation.bboxes;
+    return citation.bboxes ?? [];
   }, [citationParam, threadCitations]);
 
   useEffect(() => {

@@ -25,7 +25,7 @@ export function CitationChip({
     return <span className="text-[#9aa0a6]">{children}</span>;
   }
 
-  const firstPage = citation.bboxes[0]?.page ?? 1;
+  const firstPage = citation.bboxes?.[0]?.page ?? 1;
   const href = `/doc/${citation.document_id.toString()}?page=${firstPage.toString()}&citation=${citationId.toString()}`;
 
   return (

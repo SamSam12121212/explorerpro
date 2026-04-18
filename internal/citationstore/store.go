@@ -184,9 +184,15 @@ ORDER BY created_at ASC, id ASC
 }
 
 // loadBboxes returns bboxes grouped by citation_id, ordered by page then id
-// within each group.
+// within each group. Every requested id is pre-populated with an empty
+// slice so callers assigning out[id] to Citation.Bboxes never land a nil
+// slice (which would marshal to JSON null and crash the frontend, whose
+// CitationChip reads bboxes[0] directly).
 func (s *Store) loadBboxes(ctx context.Context, citationIDs []int64) (map[int64][]Bbox, error) {
 	out := make(map[int64][]Bbox, len(citationIDs))
+	for _, id := range citationIDs {
+		out[id] = []Bbox{}
+	}
 	if len(citationIDs) == 0 {
 		return out, nil
 	}
