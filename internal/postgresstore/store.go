@@ -93,7 +93,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -119,7 +120,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO NOTHING
 `,
@@ -148,6 +150,7 @@ ON CONFLICT (id) DO NOTHING
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread create %d: %w", meta.ID, err)
@@ -183,7 +186,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -209,7 +213,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -235,7 +240,8 @@ ON CONFLICT (id) DO UPDATE SET
     document_phase = EXCLUDED.document_phase,
     archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
-    updated_at = EXCLUDED.updated_at
+    updated_at = EXCLUDED.updated_at,
+    one_shot = EXCLUDED.one_shot
 `,
 		meta.ID,
 		meta.RootThreadID,
@@ -262,6 +268,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
@@ -1041,6 +1048,7 @@ INSERT INTO spawn_group_children (
     result_ref,
     summary_ref,
     error_ref,
+    tool_call_args_json,
     created_at,
     updated_at
 ) VALUES (
@@ -1052,8 +1060,9 @@ INSERT INTO spawn_group_children (
     $6,
     $7,
     $8,
-    $9,
-    $10
+    $9::jsonb,
+    $10,
+    $11
 )
 ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
     status = EXCLUDED.status,
@@ -1062,6 +1071,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
     result_ref = EXCLUDED.result_ref,
     summary_ref = EXCLUDED.summary_ref,
     error_ref = EXCLUDED.error_ref,
+    tool_call_args_json = EXCLUDED.tool_call_args_json,
     updated_at = EXCLUDED.updated_at
 `,
 		spawnGroupID,
@@ -1072,6 +1082,7 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 		nullIfBlank(result.ResultRef),
 		nullIfBlank(result.SummaryRef),
 		nullIfBlank(result.ErrorRef),
+		optionalJSON(result.ToolCallArgsJSON),
 		nonZeroTime(result.UpdatedAt),
 		nonZeroTime(result.UpdatedAt),
 	)
@@ -1118,7 +1129,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE id = $1
 `, threadID)
@@ -1154,6 +1166,7 @@ WHERE id = $1
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -1199,7 +1212,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE parent_thread_id = $1
   AND child_kind = 'document'
@@ -1238,6 +1252,7 @@ LIMIT 1
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -1319,6 +1334,7 @@ SELECT
     t.archived_at,
     t.created_at,
     t.updated_at,
+    t.one_shot,
     COALESCE(first_item.payload_json, '{}'::jsonb)::text,
     COALESCE(latest_item.payload_json, '{}'::jsonb)::text,
     COALESCE(latest_item.direction, ''),
@@ -1390,6 +1406,7 @@ LIMIT $1
 			&archivedAt,
 			&meta.CreatedAt,
 			&meta.UpdatedAt,
+			&meta.OneShot,
 			&firstPayloadText,
 			&latestPayloadText,
 			&latestDirection,
@@ -1845,6 +1862,7 @@ SELECT
     COALESCE(sgc.result_ref, ''),
     COALESCE(sgc.summary_ref, ''),
     COALESCE(sgc.error_ref, ''),
+    COALESCE(sgc.tool_call_args_json::text, ''),
     sgc.updated_at
 FROM spawn_group_children AS sgc
 LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
@@ -1868,6 +1886,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 			&result.ResultRef,
 			&result.SummaryRef,
 			&result.ErrorRef,
+			&result.ToolCallArgsJSON,
 			&result.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan spawn result row: %w", err)
@@ -2279,7 +2298,8 @@ INSERT INTO threads (
     document_phase,
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 ) VALUES (
     $1,
     $2,
@@ -2305,7 +2325,8 @@ INSERT INTO threads (
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
 )
 ON CONFLICT (id) DO UPDATE SET
     root_thread_id = EXCLUDED.root_thread_id,
@@ -2331,7 +2352,8 @@ ON CONFLICT (id) DO UPDATE SET
     document_phase = EXCLUDED.document_phase,
     archived_at = COALESCE(EXCLUDED.archived_at, threads.archived_at),
     created_at = EXCLUDED.created_at,
-    updated_at = EXCLUDED.updated_at
+    updated_at = EXCLUDED.updated_at,
+    one_shot = EXCLUDED.one_shot
 `,
 		meta.ID,
 		meta.RootThreadID,
@@ -2358,6 +2380,7 @@ ON CONFLICT (id) DO UPDATE SET
 		nullIfZeroTime(meta.ArchivedAt),
 		nonZeroTime(meta.CreatedAt),
 		nonZeroTime(meta.UpdatedAt),
+		meta.OneShot,
 	)
 	if err != nil {
 		return fmt.Errorf("persist thread snapshot %d: %w", meta.ID, err)
@@ -2392,7 +2415,8 @@ SELECT
     COALESCE(document_phase, ''),
     archived_at,
     created_at,
-    updated_at
+    updated_at,
+    one_shot
 FROM threads
 WHERE id = $1
 FOR UPDATE
@@ -2429,6 +2453,7 @@ FOR UPDATE
 		&archivedAt,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
+		&meta.OneShot,
 	); err != nil {
 		if isNoRows(err) {
 			return threadstore.ThreadMeta{}, threadstore.ErrThreadNotFound
@@ -2510,6 +2535,7 @@ SELECT
     COALESCE(sgc.result_ref, ''),
     COALESCE(sgc.summary_ref, ''),
     COALESCE(sgc.error_ref, ''),
+    COALESCE(sgc.tool_call_args_json::text, ''),
     sgc.updated_at
 FROM spawn_group_children AS sgc
 LEFT JOIN threads AS t ON t.id = sgc.child_thread_id
@@ -2533,6 +2559,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 			&result.ResultRef,
 			&result.SummaryRef,
 			&result.ErrorRef,
+			&result.ToolCallArgsJSON,
 			&result.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan spawn result row: %w", err)
