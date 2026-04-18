@@ -30,6 +30,7 @@ const (
 	defaultOpenAIWriteTimeout          = 10 * time.Second
 	defaultOpenAIPingInterval          = 30 * time.Second
 	defaultOpenAIMaxMessageBytes int64 = 16 * 1024 * 1024
+	defaultOpenAIMaxConcurrentSockets  = 60
 )
 
 type Config struct {
@@ -69,16 +70,17 @@ type BlobConfig struct {
 }
 
 type OpenAIConfig struct {
-	APIKey             string
-	BaseURL            string
-	ResponsesSocketURL string
-	Organization       string
-	Project            string
-	DialTimeout        time.Duration
-	ReadTimeout        time.Duration
-	WriteTimeout       time.Duration
-	PingInterval       time.Duration
-	MaxMessageBytes    int64
+	APIKey                 string
+	BaseURL                string
+	ResponsesSocketURL     string
+	Organization           string
+	Project                string
+	DialTimeout            time.Duration
+	ReadTimeout            time.Duration
+	WriteTimeout           time.Duration
+	PingInterval           time.Duration
+	MaxMessageBytes        int64
+	MaxConcurrentSockets   int
 }
 
 func Load() (Config, error) {
@@ -106,16 +108,17 @@ func Load() (Config, error) {
 			StorageDir: getEnv("BLOB_STORAGE_DIR", defaultBlobStorageDir),
 		},
 		OpenAI: OpenAIConfig{
-			APIKey:             getEnv("OPENAI_API_KEY", ""),
-			BaseURL:            getEnv("OPENAI_BASE_URL", defaultOpenAIBaseURL),
-			ResponsesSocketURL: getEnv("OPENAI_RESPONSES_WS_URL", defaultOpenAIResponsesURL),
-			Organization:       getEnv("OPENAI_ORG_ID", ""),
-			Project:            getEnv("OPENAI_PROJECT_ID", ""),
-			DialTimeout:        defaultOpenAIDialTimeout,
-			ReadTimeout:        defaultOpenAIReadTimeout,
-			WriteTimeout:       defaultOpenAIWriteTimeout,
-			PingInterval:       defaultOpenAIPingInterval,
-			MaxMessageBytes:    defaultOpenAIMaxMessageBytes,
+			APIKey:               getEnv("OPENAI_API_KEY", ""),
+			BaseURL:              getEnv("OPENAI_BASE_URL", defaultOpenAIBaseURL),
+			ResponsesSocketURL:   getEnv("OPENAI_RESPONSES_WS_URL", defaultOpenAIResponsesURL),
+			Organization:         getEnv("OPENAI_ORG_ID", ""),
+			Project:              getEnv("OPENAI_PROJECT_ID", ""),
+			DialTimeout:          defaultOpenAIDialTimeout,
+			ReadTimeout:          defaultOpenAIReadTimeout,
+			WriteTimeout:         defaultOpenAIWriteTimeout,
+			PingInterval:         defaultOpenAIPingInterval,
+			MaxMessageBytes:      defaultOpenAIMaxMessageBytes,
+			MaxConcurrentSockets: defaultOpenAIMaxConcurrentSockets,
 		},
 		EventRelayAddr: getEnv("EVENT_RELAY_ADDR", "wsserver:9090"),
 	}
@@ -182,6 +185,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	cfg.OpenAI.MaxConcurrentSockets, err = intFromEnv("OPENAI_MAX_CONCURRENT_SOCKETS", cfg.OpenAI.MaxConcurrentSockets)
+	if err != nil {
+		return Config{}, err
+	}
+
 	if _, err := strconv.Atoi(cfg.HTTP.Port); err != nil {
 		return Config{}, fmt.Errorf("invalid PORT %q: %w", cfg.HTTP.Port, err)
 	}
@@ -208,6 +216,10 @@ func Load() (Config, error) {
 
 	if cfg.OpenAI.MaxMessageBytes == 0 || cfg.OpenAI.MaxMessageBytes < -1 {
 		return Config{}, fmt.Errorf("OPENAI_MAX_MESSAGE_BYTES must be positive or -1")
+	}
+
+	if cfg.OpenAI.MaxConcurrentSockets <= 0 {
+		return Config{}, fmt.Errorf("OPENAI_MAX_CONCURRENT_SOCKETS must be positive")
 	}
 
 	cfg.NATS.ClientName = getEnv("NATS_CLIENT_NAME", cfg.ServiceName)
@@ -245,6 +257,20 @@ func int64FromEnv(key string, fallback int64) (int64, error) {
 	}
 
 	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", key, raw, err)
+	}
+
+	return value, nil
+}
+
+func intFromEnv(key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s %q: %w", key, raw, err)
 	}

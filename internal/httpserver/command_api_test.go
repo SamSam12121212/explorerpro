@@ -119,6 +119,13 @@ func TestParseThreadRoute(t *testing.T) {
 	if route.ThreadID != 123 || route.Resource != "archive" {
 		t.Fatalf("unexpected archive route: %+v", route)
 	}
+	route, ok = parseThreadRoute("/threads/123/disconnect_session")
+	if !ok {
+		t.Fatal("expected disconnect_session path to parse")
+	}
+	if route.ThreadID != 123 || route.Resource != "disconnect_session" {
+		t.Fatalf("unexpected disconnect_session route: %+v", route)
+	}
 	route, ok = parseThreadRoute("/threads/123/spawn-groups/123")
 	if !ok {
 		t.Fatal("expected spawn group path to parse")

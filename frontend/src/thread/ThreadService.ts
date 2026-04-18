@@ -1,5 +1,5 @@
 import { appStreamManager } from "../stream/appStream";
-import { apiDelete, apiGet, apiPost, checkHealthApi, uploadImage } from "../api";
+import { apiDelete, apiGet, apiPost, checkHealthApi, sendKeepaliveApiPost, uploadImage } from "../api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "../constants";
 import type {
   AttachedCollection,
@@ -144,6 +144,11 @@ export class ThreadService {
   private initialized = false;
   private lastThreadStatus: string | null = null;
   private readonly previewUrls = new Set<string>();
+  // Monotonic counter incremented at the top of every loadThread() call.
+  // Each in-flight call snapshots the value and bails before any setState
+  // if a newer call has started — protects against the user clicking
+  // thread B then C and B's network tail beating C to the finish line.
+  private loadGeneration = 0;
 
   subscribe = (listener: Listener): (() => void) => {
     this.listeners.add(listener);
@@ -165,9 +170,26 @@ export class ThreadService {
     if (persistedThreadId) void this.loadThread(persistedThreadId);
 
     void this.fetchThreadList();
+
+    // Best-effort: when the user closes the tab, release the active thread's
+    // OpenAI sockets so we don't leave the worker holding warm child sockets
+    // for an idle conversation. The runtime allows up to 50 sockets per
+    // thread; freeing them on unload keeps the budget honest.
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", this.handlePageHide);
+    }
   }
 
+  private readonly handlePageHide = () => {
+    const threadId = this.state.threadId;
+    if (threadId === null) return;
+    sendKeepaliveApiPost(`/threads/${threadId.toString()}/disconnect_session`, {});
+  };
+
   dispose() {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pagehide", this.handlePageHide);
+    }
     for (const url of this.previewUrls) {
       URL.revokeObjectURL(url);
     }
@@ -249,7 +271,44 @@ export class ThreadService {
   loadThread = async (nextThreadId: number) => {
     if (nextThreadId === this.state.threadId) return;
 
-    this.setState((s) => ({ ...s, phase: "loading", thinking: false }));
+    // Snapshot a per-call generation. If the user clicks B then C while
+    // B's awaits are still pending, our snapshot becomes stale and every
+    // setState below short-circuits — preventing B's late tail from
+    // overwriting C's selection.
+    const generation = ++this.loadGeneration;
+    const isStale = () => generation !== this.loadGeneration;
+
+    // Single-active-thread invariant: before switching, tear down the
+    // previous root's OpenAI sockets (parent + warm doc-query children).
+    // Idle threads are released silently; in-flight turns prompt for
+    // confirmation since switching cancels them.
+    const prevThreadId = this.state.threadId;
+    if (prevThreadId !== null) {
+      const inFlight = this.state.phase === "streaming" || this.state.thinking;
+      if (inFlight) {
+        const ok = typeof window !== "undefined" ? window.confirm(
+          "This thread is still processing a request. Switching will cancel it. Continue?",
+        ) : true;
+        if (!ok) {
+          // Roll back the generation bump so a subsequent legitimate
+          // switch isn't treated as stale.
+          if (this.loadGeneration === generation) {
+            this.loadGeneration--;
+          }
+          return;
+        }
+      }
+      try {
+        await apiPost(`/threads/${prevThreadId.toString()}/disconnect_session`, {});
+      } catch (err) {
+        // Don't block the switch if cascade fails — worker will sweep
+        // stale sockets eventually. Just log it.
+        console.warn("disconnect_session failed", err);
+      }
+      if (isStale()) return;
+    }
+
+    this.setState((s) => (isStale() ? s : { ...s, phase: "loading", thinking: false }));
 
     try {
       const [threadInfo, payload] = await Promise.all([
@@ -257,12 +316,14 @@ export class ThreadService {
         apiGet<ThreadItemsResponse>(`/threads/${nextThreadId.toString()}/items?limit=200`),
       ]);
 
+      if (isStale()) return;
+
       const nextStatus = threadInfo.thread?.status ?? null;
       const nextThinking = deriveThinkingFromItems(payload.items) ?? false;
       this.lastThreadStatus = nextStatus;
       writePersistedActiveThreadId(nextThreadId);
 
-      this.setState((s) => ({
+      this.setState((s) => (isStale() ? s : {
         ...s,
         threadId: nextThreadId,
         model: threadInfo.thread?.model ?? DEFAULT_MODEL,
@@ -279,11 +340,12 @@ export class ThreadService {
         draft: "",
       }));
     } catch (error) {
+      if (isStale()) return;
       this.lastThreadStatus = null;
       writePersistedActiveThreadId(null);
       const message = error instanceof Error ? error.message : "Failed to load thread";
       if (message.toLowerCase().includes("not found")) {
-        this.setState((s) => ({
+        this.setState((s) => (isStale() ? s : {
           ...initialState,
           apiStatus: s.apiStatus,
           threads: s.threads,
@@ -291,7 +353,7 @@ export class ThreadService {
         }));
         return;
       }
-      this.setState((s) => ({
+      this.setState((s) => (isStale() ? s : {
         ...s,
         messages: [{ id: crypto.randomUUID(), role: "error", text: message }],
         phase: "error",
@@ -306,6 +368,15 @@ export class ThreadService {
   };
 
   archiveThread = async (threadId: number) => {
+    if (threadId === this.state.threadId) {
+      const inFlight = this.state.phase === "streaming" || this.state.thinking;
+      if (inFlight) {
+        const ok = typeof window !== "undefined" ? window.confirm(
+          "This thread is still processing a request. Archiving will cancel it. Continue?",
+        ) : true;
+        if (!ok) return;
+      }
+    }
     await apiPost(`/threads/${threadId.toString()}/archive`, {});
     if (threadId === this.state.threadId) {
       this.resetConversation();

@@ -23,7 +23,8 @@ export const READ_DOCUMENT_PAGE_TOOL_NAME = "read_document_page";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
-  "If parallel work would materially help, you may call spawn_threads once with up to 10 child threads.",
+  "If parallel work would materially help, you may call spawn_threads once with up to 50 child threads per turn.",
+  "When attached documents are available, you may issue up to 50 query_document calls in parallel per turn. If you need more parallelism than that, do follow-up turns rather than exceeding the cap — calls beyond the cap will be rejected.",
   "Only use child threads when the task benefits from decomposition; otherwise answer normally.",
   "After child results return, synthesize one final answer for the user.",
   "When you cite a page from an attached document, format the citation as a markdown link pointing at the document, e.g. `[page 25](/doc/123?page=25)` where `123` is the `id` attribute from the matching `<document>` entry inside `<available_documents>`. Always use a relative `/doc/{id}?page={n}` path — the frontend intercepts these as in-app navigation. Only link to documents that appear in `<available_documents>`; never invent ids.",
@@ -43,7 +44,7 @@ export const EXPLORER_TOOLS = [
     type: "function",
     name: "spawn_threads",
     description:
-      "Launch up to 10 focused child threads for parallel work and synthesize their results back in the parent thread.",
+      "Launch up to 50 focused child threads for parallel work and synthesize their results back in the parent thread.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -51,7 +52,7 @@ export const EXPLORER_TOOLS = [
         children: {
           type: "array",
           minItems: 1,
-          maxItems: 10,
+          maxItems: 50,
           items: {
             type: "object",
             additionalProperties: false,

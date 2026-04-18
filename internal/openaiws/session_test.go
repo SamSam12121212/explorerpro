@@ -79,7 +79,8 @@ func TestSessionConnectSendReceiveClose(t *testing.T) {
 		ReadTimeout:        testTimeout,
 		WriteTimeout:       testTimeout,
 		PingInterval:       testTimeout,
-		MaxMessageBytes:    1024,
+		MaxMessageBytes:      1024,
+		MaxConcurrentSockets: 8,
 	}, dialer)
 
 	if err := session.Connect(context.Background()); err != nil {
@@ -154,7 +155,8 @@ func TestSessionSendDisconnectsOnTransportError(t *testing.T) {
 		ReadTimeout:        testTimeout,
 		WriteTimeout:       testTimeout,
 		PingInterval:       testTimeout,
-		MaxMessageBytes:    1024,
+		MaxMessageBytes:      1024,
+		MaxConcurrentSockets: 8,
 	}, dialer)
 
 	if err := session.Connect(context.Background()); err != nil {

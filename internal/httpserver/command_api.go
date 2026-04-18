@@ -152,6 +152,12 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		a.handleArchiveThread(w, r, route.ThreadID)
+	case "disconnect_session":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		a.handleDisconnectSession(w, r, route.ThreadID)
 	case "responses":
 		if route.ResourceID == "" {
 			http.NotFound(w, r)
@@ -201,8 +207,12 @@ func (a *commandAPI) handleCreateThread(w http.ResponseWriter, r *http.Request) 
 		writeErrorJSON(w, http.StatusBadRequest, "model is required")
 		return
 	}
-	if strings.TrimSpace(req.PreviousResponseID) != "" && req.Store != nil && !*req.Store {
-		writeErrorJSON(w, http.StatusBadRequest, "previous_response_id requires store=true")
+	// store=false is incompatible with the WebSocket-mode continuation,
+	// rotation, and recovery paths this runtime depends on. Reject it
+	// outright at the API boundary so a caller cannot accidentally land in
+	// `previous_response_not_found` territory after a reconnect.
+	if req.Store != nil && !*req.Store {
+		writeErrorJSON(w, http.StatusBadRequest, "store=false is not supported; this runtime requires store=true for cross-socket continuation")
 		return
 	}
 
@@ -524,6 +534,45 @@ func (a *commandAPI) handleSubmitCommand(w http.ResponseWriter, r *http.Request,
 }
 
 func (a *commandAPI) handleArchiveThread(w http.ResponseWriter, r *http.Request, threadID int64) {
+	// Load via the raw store (NOT loadThreadForRead) so we don't 404 on an
+	// already-archived thread — POST /threads/{id}/archive must stay
+	// idempotent across retries / accidental double-clicks.
+	existing, err := a.store.LoadThread(r.Context(), threadID)
+	if err != nil {
+		if errors.Is(err, threadstore.ErrThreadNotFound) {
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+			return
+		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
+		return
+	}
+	if existing.ParentThreadID > 0 {
+		writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+		return
+	}
+
+	var cascade cascadeDisconnectResult
+	if existing.ArchivedAt.IsZero() {
+		// First archive: cascade-disconnect so we don't leave the worker
+		// holding live OpenAI sockets for a thread the user thinks is gone.
+		cascade, err = a.cascadeDisconnectSession(r.Context(), threadID)
+		if err != nil {
+			switch {
+			case errors.Is(err, threadstore.ErrThreadNotFound):
+				writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+			case errors.Is(err, threadstore.ErrThreadNotRoot):
+				writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+			default:
+				writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("disconnect session for thread %d: %v", threadID, err))
+			}
+			return
+		}
+	}
+	// On a retry where the thread is already archived, sockets are already
+	// gone (or expired) and `cascade` stays zero-valued — the response
+	// reflects "nothing newly cancelled / disconnected", which is the
+	// correct idempotent answer.
+
 	meta, err := a.store.ArchiveRootThread(r.Context(), threadID)
 	if err != nil {
 		switch {
@@ -538,9 +587,131 @@ func (a *commandAPI) handleArchiveThread(w http.ResponseWriter, r *http.Request,
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "archived",
-		"thread": presentThreadMeta(meta),
+		"status":                  "archived",
+		"thread":                  presentThreadMeta(meta),
+		"cancelled_thread_ids":    cascade.CancelledThreadIDs,
+		"disconnected_thread_ids": cascade.DisconnectedThreadIDs,
 	})
+}
+
+func (a *commandAPI) handleDisconnectSession(w http.ResponseWriter, r *http.Request, threadID int64) {
+	cascade, err := a.cascadeDisconnectSession(r.Context(), threadID)
+	if err != nil {
+		switch {
+		case errors.Is(err, threadstore.ErrThreadNotFound):
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+		case errors.Is(err, threadstore.ErrThreadNotRoot):
+			writeErrorJSON(w, http.StatusConflict, fmt.Sprintf("thread %d is not a root thread", threadID))
+		default:
+			writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("disconnect session for thread %d: %v", threadID, err))
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status":                  "accepted",
+		"thread_id":               threadID,
+		"cancelled_thread_ids":    cascade.CancelledThreadIDs,
+		"disconnected_thread_ids": cascade.DisconnectedThreadIDs,
+		"skipped_thread_ids":      cascade.SkippedThreadIDs,
+	})
+}
+
+type cascadeDisconnectResult struct {
+	CancelledThreadIDs    []int64
+	DisconnectedThreadIDs []int64
+	SkippedThreadIDs      []int64
+}
+
+// cascadeDisconnectSession walks the thread subtree rooted at rootThreadID and
+// dispatches the appropriate command per thread:
+//
+//   - active turn (running/reconciling/waiting_children) → thread.cancel
+//   - idle but holding a socket (ready/waiting_tool)    → thread.disconnect_socket
+//   - terminal/new                                       → skip
+//
+// This is idempotent at the JetStream layer (every command is dedup'd by its
+// per-thread cmd_id). The HTTP response returns once all commands have been
+// published; actors process them async.
+func (a *commandAPI) cascadeDisconnectSession(ctx context.Context, rootThreadID int64) (cascadeDisconnectResult, error) {
+	rootMeta, err := a.loadThreadForRead(ctx, rootThreadID)
+	if err != nil {
+		return cascadeDisconnectResult{}, err
+	}
+	if rootMeta.ParentThreadID > 0 {
+		return cascadeDisconnectResult{}, threadstore.ErrThreadNotRoot
+	}
+
+	threads, err := a.store.ListSubtreeThreads(ctx, rootThreadID)
+	if err != nil {
+		return cascadeDisconnectResult{}, fmt.Errorf("list subtree for thread %d: %w", rootThreadID, err)
+	}
+
+	var result cascadeDisconnectResult
+	for _, t := range threads {
+		kind := cascadeCommandForStatus(t.Status)
+		if kind == "" {
+			result.SkippedThreadIDs = append(result.SkippedThreadIDs, t.ThreadID)
+			continue
+		}
+
+		cmdID, err := a.store.LoadOrCreateCommandID(ctx, "thread", string(kind), cascadeDedupeKey(rootMeta.ID, t.ThreadID, t.SocketGeneration, kind))
+		if err != nil {
+			return cascadeDisconnectResult{}, fmt.Errorf("reserve cascade cmd id for thread %d: %w", t.ThreadID, err)
+		}
+
+		cmd := threadcmd.Command{
+			CmdID:                    cmdID,
+			Kind:                     kind,
+			ThreadID:                 t.ThreadID,
+			RootThreadID:             rootThreadID,
+			ExpectedSocketGeneration: t.SocketGeneration,
+			CreatedAt:                time.Now().UTC().Format(time.RFC3339),
+			Body:                     json.RawMessage(`{}`),
+		}
+
+		subject, _, _, err := a.resolveCommandSubject(ctx, t.ThreadID, kind)
+		if err != nil {
+			return cascadeDisconnectResult{}, fmt.Errorf("resolve cascade subject for thread %d: %w", t.ThreadID, err)
+		}
+
+		if err := a.publishCommand(ctx, subject, cmd); err != nil {
+			return cascadeDisconnectResult{}, fmt.Errorf("publish cascade %s for thread %d: %w", kind, t.ThreadID, err)
+		}
+
+		switch kind {
+		case threadcmd.KindThreadCancel:
+			result.CancelledThreadIDs = append(result.CancelledThreadIDs, t.ThreadID)
+		case threadcmd.KindThreadDisconnectSocket:
+			result.DisconnectedThreadIDs = append(result.DisconnectedThreadIDs, t.ThreadID)
+		}
+	}
+
+	a.logger.Info("cascade disconnect session dispatched",
+		"root_thread_id", rootThreadID,
+		"cancelled_count", len(result.CancelledThreadIDs),
+		"disconnected_count", len(result.DisconnectedThreadIDs),
+		"skipped_count", len(result.SkippedThreadIDs),
+	)
+
+	return result, nil
+}
+
+func cascadeCommandForStatus(status threadstore.ThreadStatus) threadcmd.Kind {
+	switch status {
+	case threadstore.ThreadStatusRunning,
+		threadstore.ThreadStatusReconciling,
+		threadstore.ThreadStatusWaitingChildren:
+		return threadcmd.KindThreadCancel
+	case threadstore.ThreadStatusReady, threadstore.ThreadStatusWaitingTool:
+		return threadcmd.KindThreadDisconnectSocket
+	default:
+		return ""
+	}
+}
+
+func cascadeDedupeKey(rootThreadID, threadID int64, socketGeneration uint64, kind threadcmd.Kind) string {
+	return fmt.Sprintf("cascade_%s_%d_%d_%d", strings.ReplaceAll(string(kind), ".", "_"), rootThreadID, threadID, socketGeneration)
 }
 
 func (a *commandAPI) handleDeleteThread(w http.ResponseWriter, r *http.Request, threadID int64) {

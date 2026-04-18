@@ -275,7 +275,7 @@ func QueryDocumentToolDefinition() map[string]any {
 	return map[string]any{
 		"type":        "function",
 		"name":        ToolNameQueryDocument,
-		"description": "Query a single attached document. Each document has all of its pages already loaded into a separate analysis session. Call this tool in parallel — once per document — when you need to ask multiple documents different questions in the same turn. The available document IDs and filenames are listed in the <available_documents> block. Describe what you need in the task field; mention specific page numbers there if needed.",
+		"description": "Query a single attached document. Each document has all of its pages already loaded into a separate analysis session. Call this tool in parallel — once per document — when you need to ask multiple documents different questions in the same turn. The available document IDs and filenames are listed in the <available_documents> block. Describe what you need in the task field; mention specific page numbers there if needed. Up to 50 query_document calls are accepted per turn; calls beyond the cap are rejected, so split into follow-up turns if you need more parallelism.",
 		"strict":      true,
 		"parameters": map[string]any{
 			"type":                 "object",

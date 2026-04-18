@@ -2122,6 +2122,72 @@ ORDER BY id ASC
 	return ids, nil
 }
 
+// SubtreeThread is the minimum information the cascade-disconnect orchestration
+// needs about each thread under a root: its id, its parent (so callers can
+// distinguish root from descendants), and its current status (so the right
+// command kind — cancel vs disconnect_socket — can be picked per-thread).
+type SubtreeThread struct {
+	ThreadID         int64
+	ParentThreadID   int64
+	RootThreadID     int64
+	Status           threadstore.ThreadStatus
+	OwnerWorkerID    int64
+	SocketGeneration uint64
+	LastResponseID   string
+}
+
+func (s *Store) ListSubtreeThreads(ctx context.Context, rootThreadID int64) ([]SubtreeThread, error) {
+	rows, err := s.pool.Query(ctx, `
+WITH RECURSIVE subtree AS (
+    SELECT id
+    FROM threads
+    WHERE id = $1
+    UNION ALL
+    SELECT child.id
+    FROM threads AS child
+    JOIN subtree AS parent ON child.parent_thread_id = parent.id
+)
+SELECT
+    t.id,
+    COALESCE(t.parent_thread_id, 0),
+    t.root_thread_id,
+    t.status,
+    COALESCE(t.owner_worker_id, 0),
+    t.socket_generation,
+    COALESCE(t.last_response_id, '')
+FROM threads AS t
+WHERE t.id IN (SELECT id FROM subtree)
+ORDER BY t.depth, t.id
+`, rootThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("list subtree threads %d: %w", rootThreadID, err)
+	}
+	defer rows.Close()
+
+	var out []SubtreeThread
+	for rows.Next() {
+		var record SubtreeThread
+		var threadID, parentID, rootID, ownerID int64
+		var socketGen int64
+		var status, lastResponseID string
+		if err := rows.Scan(&threadID, &parentID, &rootID, &status, &ownerID, &socketGen, &lastResponseID); err != nil {
+			return nil, fmt.Errorf("scan subtree row: %w", err)
+		}
+		record.ThreadID = threadID
+		record.ParentThreadID = parentID
+		record.RootThreadID = rootID
+		record.Status = threadstore.ThreadStatus(status)
+		record.OwnerWorkerID = ownerID
+		record.SocketGeneration = uint64(maxInt64(socketGen))
+		record.LastResponseID = lastResponseID
+		out = append(out, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate subtree rows: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) threadTreeBusyTx(ctx context.Context, tx pgx.Tx, threadID int64) (bool, error) {
 	var busy bool
 	if err := tx.QueryRow(ctx, `
