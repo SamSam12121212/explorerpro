@@ -15,6 +15,7 @@ import type {
 import type { ThreadEntry, ThreadState } from "./types";
 import {
   applyDocumentQueryAdded,
+  applyPageReadAdded,
   applyOutputItemAdded,
   applyOutputTextDelta,
   buildMessageFromOutputItemDone,
@@ -134,6 +135,7 @@ const initialState: ThreadState = {
   threadsLoading: true,
   uploadCount: 0,
   pendingDocumentQueries: [],
+  pendingPageReads: [],
 };
 
 export class ThreadService {
@@ -273,6 +275,7 @@ export class ThreadService {
         pendingCollections: [],
         pendingImages: [],
         pendingDocumentQueries: [],
+        pendingPageReads: [],
         draft: "",
       }));
     } catch (error) {
@@ -297,6 +300,7 @@ export class ThreadService {
         attachedDocuments: [],
         attachedCollections: [],
         pendingDocumentQueries: [],
+        pendingPageReads: [],
       }));
     }
   };
@@ -524,11 +528,10 @@ export class ThreadService {
     // set: any in-flight calls from the previous turn have been resolved
     // (their `function_call_output`s are inputs to this new response).
     if (payload.type === "response.created") {
-      this.setState((s) => (
-        s.pendingDocumentQueries.length === 0
-          ? s
-          : { ...s, pendingDocumentQueries: [] }
-      ));
+      this.setState((s) => {
+        if (s.pendingDocumentQueries.length === 0 && s.pendingPageReads.length === 0) return s;
+        return { ...s, pendingDocumentQueries: [], pendingPageReads: [] };
+      });
     }
 
     // New output item → seed a streaming stub for assistant messages. Deltas
@@ -542,8 +545,20 @@ export class ThreadService {
       this.setState((s) => {
         const nextMessages = applyOutputItemAdded(s.messages, event);
         const nextDocQueries = applyDocumentQueryAdded(s.pendingDocumentQueries, event);
-        if (nextMessages === s.messages && nextDocQueries === s.pendingDocumentQueries) return s;
-        return { ...s, messages: nextMessages, pendingDocumentQueries: nextDocQueries };
+        const nextPageReads = applyPageReadAdded(s.pendingPageReads, event);
+        if (
+          nextMessages === s.messages &&
+          nextDocQueries === s.pendingDocumentQueries &&
+          nextPageReads === s.pendingPageReads
+        ) {
+          return s;
+        }
+        return {
+          ...s,
+          messages: nextMessages,
+          pendingDocumentQueries: nextDocQueries,
+          pendingPageReads: nextPageReads,
+        };
       });
     }
 
@@ -596,6 +611,7 @@ export class ThreadService {
         thinking: false,
         messages: finalizeStreamingMessages(s.messages),
         pendingDocumentQueries: clearDocQueries ? [] : s.pendingDocumentQueries,
+        pendingPageReads: clearDocQueries ? [] : s.pendingPageReads,
       }));
 
       if (

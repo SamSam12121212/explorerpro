@@ -210,6 +210,8 @@ func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputReque
 		ref, err = s.prepareWarmupInput(ctx, req)
 	case doccmd.PrepareKindDocumentQuery:
 		ref, err = s.prepareDocumentQueryInput(ctx, req)
+	case doccmd.PrepareKindPageRead:
+		ref, err = s.preparePageReadInput(ctx, req)
 	default:
 		return doccmd.PrepareInputResponse{
 			RequestID: req.RequestID,
@@ -307,6 +309,43 @@ func (s *Service) prepareDocumentQueryInput(ctx context.Context, req doccmd.Prep
 	return ref, nil
 }
 
+func (s *Service) preparePageReadInput(ctx context.Context, req doccmd.PrepareInputRequest) (string, error) {
+	doc, err := s.docs.Get(ctx, req.DocumentID)
+	if err != nil {
+		return "", fmt.Errorf("load document: %w", err)
+	}
+	if strings.TrimSpace(doc.ManifestRef) == "" {
+		return "", fmt.Errorf("document has no manifest (not yet split)")
+	}
+
+	manifest, err := s.loadManifest(ctx, doc.ManifestRef)
+	if err != nil {
+		return "", err
+	}
+
+	inputJSON, err := buildReadDocumentPageInput(doc, manifest, req.PageNumber, req.CallID)
+	if err != nil {
+		return "", err
+	}
+
+	store, err := preparedinput.NewStore(s.blob)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := store.Write(ctx, req.RequestID, preparedinput.Artifact{
+		Version:    preparedinput.VersionV1,
+		Input:      inputJSON,
+		SourceKind: doccmd.PrepareKindPageRead,
+		CreatedAt:  s.now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return ref, nil
+}
+
 func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextRequest) doccmd.RuntimeContextResponse {
 	instructions := req.Instructions
 	tools := append(json.RawMessage(nil), req.Tools...)
@@ -359,6 +398,16 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 			Error:     err.Error(),
 		}
 	}
+	if req.ParentThreadID == 0 {
+		tools, err = appendReadDocumentPageTool(tools)
+		if err != nil {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusError,
+				Error:     err.Error(),
+			}
+		}
+	}
 
 	return doccmd.RuntimeContextResponse{
 		RequestID:    req.RequestID,
@@ -382,9 +431,11 @@ func (s *Service) loadManifest(ctx context.Context, manifestRef string) (docspli
 	return manifest, nil
 }
 
-func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (json.RawMessage, error) {
-	content := make([]any, 0, len(manifest.Pages)*3+2)
-
+// appendPdfEnvelopeItems appends the <pdf>...<pdf_page>...</pdf_page>...</pdf>
+// content items for the given pages. page_count on the outer tag reflects the
+// manifest total so the model can reason about the document as a whole even
+// when only a subset of pages is included.
+func appendPdfEnvelopeItems(content []any, doc docstore.Document, manifest docsplitter.Manifest, pages []docsplitter.PageEntry) []any {
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
@@ -393,10 +444,10 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 			manifest.PageCount),
 	})
 
-	for _, page := range manifest.Pages {
+	for _, page := range pages {
 		content = append(content, map[string]any{
 			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
+			"text": fmt.Sprintf(`<pdf_page number="%d" width="%d" height="%d">`, page.PageNumber, page.Width, page.Height),
 		})
 
 		image := map[string]any{
@@ -419,6 +470,13 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 		"type": "input_text",
 		"text": "</pdf>",
 	})
+
+	return content
+}
+
+func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (json.RawMessage, error) {
+	content := make([]any, 0, len(manifest.Pages)*3+2)
+	content = appendPdfEnvelopeItems(content, doc, manifest, manifest.Pages)
 
 	inputJSON, err := json.Marshal([]any{
 		map[string]any{
@@ -436,41 +494,7 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 
 func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifest, task string) (json.RawMessage, error) {
 	content := make([]any, 0, len(manifest.Pages)*3+3)
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			docprompt.EscapeAttribute(doc.Filename),
-			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
-			manifest.PageCount),
-	})
-
-	for _, page := range manifest.Pages {
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
-		})
-
-		image := map[string]any{
-			"type":      "image_ref",
-			"image_ref": page.ImageRef,
-			"detail":    "high",
-		}
-		if strings.TrimSpace(page.ContentType) != "" {
-			image["content_type"] = page.ContentType
-		}
-		content = append(content, image)
-
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": "</pdf_page>",
-		})
-	}
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": "</pdf>",
-	})
+	content = appendPdfEnvelopeItems(content, doc, manifest, manifest.Pages)
 
 	if strings.TrimSpace(task) != "" {
 		content = append(content, map[string]any{
@@ -493,8 +517,58 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	return inputJSON, nil
 }
 
+// buildReadDocumentPageInput emits a single function_call_output item whose
+// output array wraps the <pdf>/<pdf_page> envelope around the requested page
+// image. The image is carried as a blob ref and lowered to base64 at the
+// OpenAI-bound edge (worker/prepared_payload.go).
+func buildReadDocumentPageInput(doc docstore.Document, manifest docsplitter.Manifest, pageNumber int, callID string) (json.RawMessage, error) {
+	if pageNumber <= 0 {
+		return nil, fmt.Errorf("page_number must be positive, got %d", pageNumber)
+	}
+	if strings.TrimSpace(callID) == "" {
+		return nil, fmt.Errorf("call_id is required")
+	}
+
+	var page docsplitter.PageEntry
+	found := false
+	for _, p := range manifest.Pages {
+		if p.PageNumber == pageNumber {
+			page = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("page %d not found in manifest (page_count=%d)", pageNumber, manifest.PageCount)
+	}
+
+	output := make([]any, 0, 5)
+	output = appendPdfEnvelopeItems(output, doc, manifest, []docsplitter.PageEntry{page})
+
+	inputJSON, err := json.Marshal([]any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": callID,
+			"output":  output,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal page read input: %w", err)
+	}
+
+	return inputJSON, nil
+}
+
 
 func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissing(raw, doccmd.ToolNameQueryDocument, doccmd.QueryDocumentToolDefinition)
+}
+
+func appendReadDocumentPageTool(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissing(raw, doccmd.ToolNameReadDocumentPage, doccmd.ReadDocumentPageToolDefinition)
+}
+
+func appendToolIfMissing(raw json.RawMessage, name string, definition func() map[string]any) (json.RawMessage, error) {
 	var tools []map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {
@@ -503,13 +577,13 @@ func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 	}
 
 	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		if name == doccmd.ToolNameQueryDocument {
+		existing, _ := tool["name"].(string)
+		if existing == name {
 			return raw, nil
 		}
 	}
 
-	tools = append(tools, doccmd.QueryDocumentToolDefinition())
+	tools = append(tools, definition())
 	encoded, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("marshal runtime context tools: %w", err)

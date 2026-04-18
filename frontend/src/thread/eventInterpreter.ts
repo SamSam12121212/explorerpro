@@ -1,4 +1,4 @@
-import { QUERY_DOCUMENT_TOOL_NAME } from "../constants";
+import { QUERY_DOCUMENT_TOOL_NAME, READ_DOCUMENT_PAGE_TOOL_NAME } from "../constants";
 import type {
   MessageRole,
   ThreadItemsResponse,
@@ -287,6 +287,23 @@ export function applyDocumentQueryAdded(current: string[], event: Record<string,
   const item = event.item as FunctionCallItem | undefined;
   if (item?.type !== "function_call") return current;
   if (item.name !== QUERY_DOCUMENT_TOOL_NAME) return current;
+
+  const callID = item.call_id ?? item.id;
+  if (!callID) return current;
+  if (current.includes(callID)) return current;
+
+  return [...current, callID];
+}
+
+/**
+ * Tracks in-flight read_document_page tool calls for the pending indicator.
+ * Same contract as applyDocumentQueryAdded — returns input unchanged when no
+ * mutation is needed so callers can rely on referential equality.
+ */
+export function applyPageReadAdded(current: string[], event: Record<string, unknown>): string[] {
+  const item = event.item as FunctionCallItem | undefined;
+  if (item?.type !== "function_call") return current;
+  if (item.name !== READ_DOCUMENT_PAGE_TOOL_NAME) return current;
 
   const callID = item.call_id ?? item.id;
   if (!callID) return current;

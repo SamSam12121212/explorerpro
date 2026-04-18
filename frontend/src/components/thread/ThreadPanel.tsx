@@ -42,6 +42,7 @@ export function ThreadPanel() {
     attachedCollections,
     pendingCollections,
     pendingDocumentQueries,
+    pendingPageReads,
     pendingImages,
     reasoningEffort,
     sendMessage,
@@ -85,11 +86,12 @@ export function ThreadPanel() {
   );
 
   const docQueryCount = pendingDocumentQueries.length;
+  const pageReadCount = pendingPageReads.length;
 
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy, thinking, docQueryCount]);
+  }, [messages, busy, thinking, docQueryCount, pageReadCount]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -174,7 +176,17 @@ export function ThreadPanel() {
             </article>
           )}
 
-          {busy && !thinking && docQueryCount === 0 && !messages.some((m) => m.streaming && m.text) && (
+          {pageReadCount > 0 && (
+            <article className={bubbleClass("assistant")}>
+              <p className="m-0 text-[#888]">
+                {pageReadCount === 1
+                  ? "Loading 1 page..."
+                  : `Loading ${pageReadCount.toString()} pages...`}
+              </p>
+            </article>
+          )}
+
+          {busy && !thinking && docQueryCount === 0 && pageReadCount === 0 && !messages.some((m) => m.streaming && m.text) && (
             <div className="self-start px-4 py-3">
               <div className="inline-flex gap-1">
                 <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[#888]" />

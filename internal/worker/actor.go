@@ -20,6 +20,7 @@ import (
 	"explorer/internal/eventrelay"
 	"explorer/internal/idgen"
 	"explorer/internal/openaiws"
+	"explorer/internal/preparedinput"
 	"explorer/internal/threadcmd"
 	"explorer/internal/threadcollectionstore"
 	"explorer/internal/threadhistory"
@@ -1415,7 +1416,7 @@ func (a *threadActor) reconcileFromCheckpoint(meta threadstore.ThreadMeta, cmdID
 	if err != nil {
 		return err
 	}
-	if err := a.finalizeThreadResponseCreatePayload(meta.ID, payload); err != nil {
+	if err := a.finalizeThreadResponseCreatePayload(meta, payload); err != nil {
 		return err
 	}
 
@@ -1638,7 +1639,69 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 }
 
 func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, payload map[string]any, trigger string) error {
-	eventID := formatCommandIDLocal(cmdID)
+	turn := 0
+	for {
+		if err := a.submitResponseCreate(meta, cmdID, turn, payload, trigger); err != nil {
+			return err
+		}
+
+		pending, err := a.streamUntilTerminal(meta)
+		if err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+
+		// Sync tool outputs pending. Re-load meta (streamUntilTerminal persisted
+		// LastResponseID etc.), execute the tools, and loop with a follow-up
+		// response.create carrying their outputs as input.
+		refreshed, err := a.store.LoadThread(a.ctx, meta.ID)
+		if err != nil {
+			return fmt.Errorf("reload thread for page-read followup: %w", err)
+		}
+		meta = refreshed
+
+		inputItems, err := a.executePendingPageReads(meta, pending)
+		if err != nil {
+			return err
+		}
+		if err := a.appendInputItems(meta.ID, meta.LastResponseID, inputItems); err != nil {
+			return err
+		}
+
+		payload, err = a.buildThreadResponseCreatePayload(meta, map[string]any{
+			"model":                meta.Model,
+			"instructions":         meta.Instructions,
+			"input":                inputItems,
+			"previous_response_id": meta.LastResponseID,
+			"store":                true,
+		})
+		if err != nil {
+			return err
+		}
+		trigger = "page_read_followup"
+		turn++
+	}
+}
+
+// submitResponseCreateEventID derives a unique event identifier per submit
+// within a single sendAndStream invocation. The first turn reuses the raw
+// command id for backwards compatibility with existing telemetry; follow-up
+// turns (sync-tool resume) append a turn suffix so JetStream dedup on
+// Nats-Msg-Id doesn't silently drop the follow-up checkpoint / event-log
+// entries in threadhistory (see threadhistory/store.go — CheckpointMsgID and
+// EventMsgID both hash the passed-in id).
+func submitResponseCreateEventID(cmdID int64, turn int) string {
+	base := formatCommandIDLocal(cmdID)
+	if turn == 0 {
+		return base
+	}
+	return base + "-turn-" + strconv.Itoa(turn)
+}
+
+func (a *threadActor) submitResponseCreate(meta threadstore.ThreadMeta, cmdID int64, turn int, payload map[string]any, trigger string) error {
+	eventID := submitResponseCreateEventID(cmdID, turn)
 
 	logPayload, err := marshalResponseCreatePayload(payload)
 	if err != nil {
@@ -1716,7 +1779,7 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, pa
 		}
 	}
 
-	return a.streamUntilTerminal(meta)
+	return nil
 }
 
 func (a *threadActor) lowerResponseCreatePayload(payload map[string]any) (map[string]any, payloadLoweringStats, error) {
@@ -1859,11 +1922,12 @@ func (a *threadActor) continueWithPreparedInput(meta threadstore.ThreadMeta, cmd
 	return a.sendAndStream(meta, cmdID, payload, trigger)
 }
 
-func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[string]any) error {
+func (a *threadActor) applyDocumentRuntimeContext(meta threadstore.ThreadMeta, payload map[string]any) error {
 	if a.threadDocs == nil {
 		return nil
 	}
 
+	threadID := meta.ID
 	documents, err := a.threadDocs.ListDocuments(a.ctx, threadID, 200)
 	if err != nil {
 		return fmt.Errorf("list attached documents for runtime context: %w", err)
@@ -1879,7 +1943,7 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 		return nil
 	}
 	if a.docRuntime == nil {
-		return a.applyLocalDocumentRuntimeContext(payload, documents, collections)
+		return a.applyLocalDocumentRuntimeContext(meta, payload, documents, collections)
 	}
 
 	rawTools, err := marshalRuntimeContextTools(payload["tools"])
@@ -1889,22 +1953,23 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 
 	requestID := fmt.Sprintf("docctx_%d_%d", threadID, time.Now().UTC().UnixNano())
 	resp, err := a.docRuntime.RuntimeContext(a.ctx, doccmd.RuntimeContextRequest{
-		RequestID:    requestID,
-		ThreadID:     threadID,
-		Instructions: stringValue(payload["instructions"]),
-		Tools:        rawTools,
+		RequestID:      requestID,
+		ThreadID:       threadID,
+		ParentThreadID: meta.ParentThreadID,
+		Instructions:   stringValue(payload["instructions"]),
+		Tools:          rawTools,
 	})
 	if err != nil {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("load document runtime context: %w", err))
+		return a.fallbackDocumentRuntimeContext(meta, payload, documents, collections, fmt.Errorf("load document runtime context: %w", err))
 	}
 	if resp.RequestID != requestID {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID))
+		return a.fallbackDocumentRuntimeContext(meta, payload, documents, collections, fmt.Errorf("document runtime context request id mismatch: got %q want %q", resp.RequestID, requestID))
 	}
 	if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
 		if strings.TrimSpace(resp.Error) == "" {
 			resp.Error = fmt.Sprintf("runtime context returned status %q", resp.Status)
 		}
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("document runtime context: %s", resp.Error))
+		return a.fallbackDocumentRuntimeContext(meta, payload, documents, collections, fmt.Errorf("document runtime context: %s", resp.Error))
 	}
 
 	if strings.TrimSpace(resp.Instructions) == "" {
@@ -1920,13 +1985,13 @@ func (a *threadActor) applyDocumentRuntimeContext(threadID int64, payload map[st
 
 	decoded, err := decodeToolsParam(resp.Tools)
 	if err != nil {
-		return a.fallbackDocumentRuntimeContext(threadID, payload, documents, collections, fmt.Errorf("decode document runtime tools: %w", err))
+		return a.fallbackDocumentRuntimeContext(meta, payload, documents, collections, fmt.Errorf("decode document runtime tools: %w", err))
 	}
 	payload["tools"] = decoded
 	return nil
 }
 
-func (a *threadActor) fallbackDocumentRuntimeContext(_ int64, payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection, cause error) error {
+func (a *threadActor) fallbackDocumentRuntimeContext(meta threadstore.ThreadMeta, payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection, cause error) error {
 	if a.logger != nil {
 		a.logger.Warn("document runtime context unavailable, falling back to local augmentation",
 			"document_count", len(documents),
@@ -1934,10 +1999,10 @@ func (a *threadActor) fallbackDocumentRuntimeContext(_ int64, payload map[string
 			"error", cause,
 		)
 	}
-	return a.applyLocalDocumentRuntimeContext(payload, documents, collections)
+	return a.applyLocalDocumentRuntimeContext(meta, payload, documents, collections)
 }
 
-func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) error {
+func (a *threadActor) applyLocalDocumentRuntimeContext(meta threadstore.ThreadMeta, payload map[string]any, documents []docstore.Document, collections []threadcollectionstore.AttachedCollection) error {
 	instructions := docprompt.AppendAvailableDocumentsBlock(stringValue(payload["instructions"]), documents, collections)
 	if strings.TrimSpace(instructions) == "" {
 		delete(payload, "instructions")
@@ -1952,6 +2017,12 @@ func (a *threadActor) applyLocalDocumentRuntimeContext(payload map[string]any, d
 	rawTools, err = appendQueryDocumentToolLocal(rawTools)
 	if err != nil {
 		return err
+	}
+	if meta.ParentThreadID == 0 {
+		rawTools, err = appendReadDocumentPageToolLocal(rawTools)
+		if err != nil {
+			return err
+		}
 	}
 	if len(rawTools) == 0 {
 		delete(payload, "tools")
@@ -1979,6 +2050,14 @@ func marshalRuntimeContextTools(value any) (json.RawMessage, error) {
 }
 
 func appendQueryDocumentToolLocal(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissingLocal(raw, doccmd.ToolNameQueryDocument, doccmd.QueryDocumentToolDefinition)
+}
+
+func appendReadDocumentPageToolLocal(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissingLocal(raw, doccmd.ToolNameReadDocumentPage, doccmd.ReadDocumentPageToolDefinition)
+}
+
+func appendToolIfMissingLocal(raw json.RawMessage, name string, definition func() map[string]any) (json.RawMessage, error) {
 	var tools []map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {
@@ -1987,13 +2066,13 @@ func appendQueryDocumentToolLocal(raw json.RawMessage) (json.RawMessage, error) 
 	}
 
 	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		if name == doccmd.ToolNameQueryDocument {
+		existing, _ := tool["name"].(string)
+		if existing == name {
 			return raw, nil
 		}
 	}
 
-	tools = append(tools, doccmd.QueryDocumentToolDefinition())
+	tools = append(tools, definition())
 	encoded, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("marshal local document runtime tools: %w", err)
@@ -2036,12 +2115,36 @@ func decodeDocQueryRequest(arguments string) (docQueryRequest, error) {
 	return req, nil
 }
 
-func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
+type pageReadRequest struct {
+	DocumentID int64 `json:"document_id"`
+	PageNumber int   `json:"page_number"`
+}
+
+type pageReadCall struct {
+	CallID  string
+	Request pageReadRequest
+}
+
+func decodePageReadRequest(arguments string) (pageReadRequest, error) {
+	var req pageReadRequest
+	if err := json.Unmarshal([]byte(arguments), &req); err != nil {
+		return pageReadRequest{}, fmt.Errorf("decode %s arguments: %w", doccmd.ToolNameReadDocumentPage, err)
+	}
+	if req.DocumentID <= 0 {
+		return pageReadRequest{}, fmt.Errorf("%s requires a positive document_id", doccmd.ToolNameReadDocumentPage)
+	}
+	if req.PageNumber <= 0 {
+		return pageReadRequest{}, fmt.Errorf("%s requires a positive page_number", doccmd.ToolNameReadDocumentPage)
+	}
+	return req, nil
+}
+
+func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageReadCall, error) {
 	a.mu.Lock()
 	session := a.session
 	a.mu.Unlock()
 	if session == nil {
-		return openaiws.ErrNotConnected
+		return nil, openaiws.ErrNotConnected
 	}
 
 	a.logger.Info("streaming response events from openai",
@@ -2054,6 +2157,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 	var pendingSpawn *spawnRequest
 	var pendingSpawnCallID string
 	var pendingDocQueries []docQueryCall
+	var pendingPageReads []pageReadCall
 	prevStatus := meta.Status
 	eventCount := 0
 	deltaLogs := map[openaiws.EventType]*deltaLogState{}
@@ -2068,7 +2172,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				"events_received", eventCount,
 				"error", err,
 			)
-			return err
+			return nil, err
 		}
 		eventCount++
 		responseID := event.ResolvedResponseID()
@@ -2110,7 +2214,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 		}
 		if !isDelta {
 			if a.history == nil {
-				return fmt.Errorf("thread history store is not configured")
+				return nil, fmt.Errorf("thread history store is not configured")
 			}
 			if err := a.history.AppendEvent(a.ctx, threadstore.EventLogEntry{
 				ThreadID:         meta.ID,
@@ -2120,19 +2224,19 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 				PayloadJSON:      string(event.Raw),
 				CreatedAt:        time.Now().UTC(),
 			}, ""); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		if a.publishEvent != nil && (!suppressLiveDeltas || !isDelta) {
 			if err := a.publishEvent(a.ctx, meta.ID, meta.SocketGeneration, fmt.Sprintf("event-%d", eventCount), string(event.Type), injectThreadFields(meta, event.Raw)); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		if responsePayload := event.ResponsePayload(); len(responsePayload) > 0 {
 			if err := a.store.SaveResponseRaw(a.ctx, meta.ID, responseID, responsePayload); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
@@ -2151,7 +2255,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					if err == nil && call.Name == "spawn_threads" {
 						req, err := decodeSpawnRequest(call.Arguments, meta)
 						if err != nil {
-							return err
+							return nil, err
 						}
 						pendingSpawn = &req
 						pendingSpawnCallID = call.CallID
@@ -2165,6 +2269,20 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 							waitingTool = true
 						} else {
 							pendingDocQueries = append(pendingDocQueries, docQueryCall{
+								CallID:  call.CallID,
+								Request: req,
+							})
+						}
+					} else if err == nil && call.Name == doccmd.ToolNameReadDocumentPage {
+						req, err := decodePageReadRequest(call.Arguments)
+						if err != nil {
+							a.logger.Warn("invalid read_document_page arguments, falling back to waiting_tool",
+								"call_id", call.CallID,
+								"error", err,
+							)
+							waitingTool = true
+						} else {
+							pendingPageReads = append(pendingPageReads, pageReadCall{
 								CallID:  call.CallID,
 								Request: req,
 							})
@@ -2187,7 +2305,7 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					PayloadJSON: string(itemRaw),
 					CreatedAt:   time.Now().UTC(),
 				}); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		case openaiws.EventTypeResponseCompleted:
@@ -2198,17 +2316,22 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 			if pendingSpawn != nil {
 				spawnGroupID, err := a.startSpawnGroup(meta, pendingSpawnCallID, *pendingSpawn)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
 			} else if len(pendingDocQueries) > 0 && !waitingTool {
 				spawnGroupID, err := a.startDocumentQueryGroup(meta, pendingDocQueries)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				meta.ActiveSpawnGroupID = spawnGroupID
 				meta.Status = threadstore.ThreadStatusWaitingChildren
+			} else if len(pendingPageReads) > 0 && !waitingTool {
+				// Sync tool: stream terminates here but the thread is not done.
+				// Caller (sendAndStream loop) will execute the page reads and
+				// fire a follow-up response.create with their outputs as input.
+				meta.Status = threadstore.ThreadStatusRunning
 			} else if waitingTool {
 				meta.Status = threadstore.ThreadStatusWaitingTool
 			} else {
@@ -2245,15 +2368,15 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 
 		meta.UpdatedAt = time.Now().UTC()
 		if err := a.saveThreadMeta(meta); err != nil {
-			return err
+			return nil, err
 		}
 
 		if event.Type == openaiws.EventTypeError {
 			a.resetSession("remote_error_event")
 			if event.Error != nil && event.Error.Message != "" {
-				return fmt.Errorf("%w: %s", errRemotePermanent, event.Error.Message)
+				return nil, fmt.Errorf("%w: %s", errRemotePermanent, event.Error.Message)
 			}
-			return fmt.Errorf("%w: openai error event received", errRemotePermanent)
+			return nil, fmt.Errorf("%w: openai error event received", errRemotePermanent)
 		}
 
 		if event.Type.IsTerminal() {
@@ -2263,27 +2386,41 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) error {
 					"final_status", meta.Status,
 					"last_response_id", meta.LastResponseID,
 					"events_received", eventCount,
+					"pending_page_reads", len(pendingPageReads),
 				}, meta)...,
 			)
+			// Continuing with sync tool outputs — skip terminal cleanup and let
+			// sendAndStream fire the follow-up response.create. Gated on
+			// response.completed: if the response failed or incomplete'd mid-
+			// stream we must not execute the tool calls it emitted, because
+			// meta.Status is already Failed/Incomplete and we'd be firing a
+			// new response.create on a terminated thread.
+			if event.Type == openaiws.EventTypeResponseCompleted &&
+				len(pendingPageReads) > 0 &&
+				pendingSpawn == nil &&
+				len(pendingDocQueries) == 0 &&
+				!waitingTool {
+				return pendingPageReads, nil
+			}
 			publishMeta := meta
 			childResultStatus, ok := childInvocationResultStatus(meta.Status, childInvocationResultStatusForTerminalEvent(event.Type))
 			if shouldReleaseTerminalChildResources(meta) {
 				if err := a.releaseTerminalChildResources(&meta); err != nil {
-					return err
+					return nil, err
 				}
 			}
 			if err := a.clearCompletedInvocationState(&meta); err != nil {
-				return err
+				return nil, err
 			}
 			if shouldPublishChildInvocationResult(publishMeta, childResultStatus, ok) {
 				if err := a.publishChildInvocationResult(publishMeta, childResultStatus); err != nil {
-					return err
+					return nil, err
 				}
 			}
 			if statusSupportsIdleSocket(meta.Status) {
 				a.startIdleLoop(meta)
 			}
-			return nil
+			return nil, nil
 		}
 	}
 }
@@ -3121,6 +3258,109 @@ func decodeSpawnRequest(arguments string, parentMeta threadstore.ThreadMeta) (sp
 	}
 
 	return request, nil
+}
+
+// executePendingPageReads fires a PrepareInput RPC for each page-read call,
+// loads the resulting function_call_output artifacts, and returns the
+// concatenated item array as the input for the next response.create. Calls are
+// processed sequentially for simplicity; parallelization can come later if the
+// RPC becomes a latency bottleneck. Per-call errors (unattached doc, unknown
+// page, RPC failure) surface as error-shaped function_call_output items so the
+// model can reason about them instead of the whole thread dying.
+func (a *threadActor) executePendingPageReads(meta threadstore.ThreadMeta, calls []pageReadCall) (json.RawMessage, error) {
+	if len(calls) == 0 {
+		return nil, fmt.Errorf("executePendingPageReads called with no pending calls")
+	}
+	if a.preparedInputs == nil {
+		return nil, fmt.Errorf("prepared input client not configured")
+	}
+	if a.blob == nil {
+		return nil, fmt.Errorf("blob store not configured")
+	}
+
+	store, err := preparedinput.NewStore(a.blob)
+	if err != nil {
+		return nil, fmt.Errorf("open prepared input store: %w", err)
+	}
+
+	// Validate attachment once for all requested docs.
+	attachedSet := map[int64]bool{}
+	if a.threadDocs != nil {
+		docIDs := make([]int64, 0, len(calls))
+		for _, c := range calls {
+			docIDs = append(docIDs, c.Request.DocumentID)
+		}
+		attached, err := a.threadDocs.FilterAttached(a.ctx, meta.ID, docIDs)
+		if err != nil {
+			return nil, fmt.Errorf("validate attached documents: %w", err)
+		}
+		for _, id := range attached {
+			attachedSet[id] = true
+		}
+	}
+
+	items := make([]any, 0, len(calls))
+	for _, call := range calls {
+		if !attachedSet[call.Request.DocumentID] {
+			items = append(items, errorFunctionCallOutput(call.CallID, fmt.Sprintf("document %d is not attached to this thread", call.Request.DocumentID)))
+			continue
+		}
+
+		requestID := fmt.Sprintf("pr_%d_%d_%d_%d", meta.ID, call.Request.DocumentID, call.Request.PageNumber, time.Now().UTC().UnixNano())
+		resp, err := a.preparedInputs.PrepareInput(a.ctx, doccmd.PrepareInputRequest{
+			RequestID:  requestID,
+			Kind:       doccmd.PrepareKindPageRead,
+			ThreadID:   meta.ID,
+			DocumentID: call.Request.DocumentID,
+			PageNumber: call.Request.PageNumber,
+			CallID:     call.CallID,
+		})
+		if err != nil {
+			a.logger.Warn("page read prepare input failed",
+				"call_id", call.CallID,
+				"document_id", call.Request.DocumentID,
+				"page_number", call.Request.PageNumber,
+				"error", err,
+			)
+			items = append(items, errorFunctionCallOutput(call.CallID, fmt.Sprintf("failed to prepare page: %v", err)))
+			continue
+		}
+		if strings.TrimSpace(resp.Status) != doccmd.PrepareStatusOK {
+			msg := strings.TrimSpace(resp.Error)
+			if msg == "" {
+				msg = fmt.Sprintf("prepare input returned status %q", resp.Status)
+			}
+			items = append(items, errorFunctionCallOutput(call.CallID, msg))
+			continue
+		}
+
+		artifact, err := store.Read(a.ctx, resp.PreparedInputRef)
+		if err != nil {
+			items = append(items, errorFunctionCallOutput(call.CallID, fmt.Sprintf("read prepared input: %v", err)))
+			continue
+		}
+
+		var artifactItems []map[string]any
+		if err := json.Unmarshal(artifact.Input, &artifactItems); err != nil || len(artifactItems) != 1 {
+			items = append(items, errorFunctionCallOutput(call.CallID, "prepared page-read artifact was malformed"))
+			continue
+		}
+		items = append(items, artifactItems[0])
+	}
+
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("marshal page read input items: %w", err)
+	}
+	return raw, nil
+}
+
+func errorFunctionCallOutput(callID, message string) map[string]any {
+	return map[string]any{
+		"type":    "function_call_output",
+		"call_id": callID,
+		"output":  "error: " + message,
+	}
 }
 
 func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta, calls []docQueryCall) (int64, error) {

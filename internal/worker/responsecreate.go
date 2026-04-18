@@ -70,15 +70,15 @@ func (a *threadActor) buildThreadResponseCreatePayload(meta threadstore.ThreadMe
 		return nil, err
 	}
 
-	if err := a.finalizeThreadResponseCreatePayload(meta.ID, payload); err != nil {
+	if err := a.finalizeThreadResponseCreatePayload(meta, payload); err != nil {
 		return nil, err
 	}
 
 	return payload, nil
 }
 
-func (a *threadActor) finalizeThreadResponseCreatePayload(threadID int64, payload map[string]any) error {
-	if err := a.applyDocumentRuntimeContext(threadID, payload); err != nil {
+func (a *threadActor) finalizeThreadResponseCreatePayload(meta threadstore.ThreadMeta, payload map[string]any) error {
+	if err := a.applyDocumentRuntimeContext(meta, payload); err != nil {
 		return err
 	}
 
@@ -328,7 +328,7 @@ func toolDefinitionName(tool map[string]any) string {
 
 func isInternalRuntimeToolName(name string) bool {
 	switch name {
-	case "spawn_threads", doccmd.ToolNameQueryDocument:
+	case "spawn_threads", doccmd.ToolNameQueryDocument, doccmd.ToolNameReadDocumentPage:
 		return true
 	default:
 		return false

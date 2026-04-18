@@ -17,6 +17,10 @@ export const DOCUMENTS_CHANGED_EVENT = "explorer:documents-changed";
 // corresponding `function_call` items in the live stream.
 export const QUERY_DOCUMENT_TOOL_NAME = "query_document";
 
+// Worker-side tool name (internal/doccmd: ToolNameReadDocumentPage). Injected
+// by the worker on root threads when documents are attached.
+export const READ_DOCUMENT_PAGE_TOOL_NAME = "read_document_page";
+
 export const DEFAULT_INSTRUCTIONS = [
   "You are a helpful assistant. Be concise and clear.",
   "If parallel work would materially help, you may call spawn_threads once with up to 10 child threads.",
