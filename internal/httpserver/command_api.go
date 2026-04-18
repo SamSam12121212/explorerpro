@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"explorer/internal/citationstore"
 	"explorer/internal/collectionstore"
 	"explorer/internal/config"
 	"explorer/internal/docstore"
@@ -36,6 +37,7 @@ type commandAPI struct {
 	collections     *collectionstore.Store
 	links           *threaddocstore.Store
 	collectionLinks *threadcollectionstore.Store
+	citations       *citationstore.Store
 	history         eventHistoryStore
 }
 
@@ -96,6 +98,7 @@ func newCommandAPI(cfg config.Config, logger *slog.Logger, runtime *platform.Run
 		collections:     collectionstore.New(runtime.Postgres().Pool()),
 		links:           threaddocstore.New(runtime.Postgres().Pool()),
 		collectionLinks: threadcollectionstore.New(runtime.Postgres().Pool()),
+		citations:       citationstore.New(runtime.Postgres().Pool()),
 		history:         threadhistory.New(runtime.NATS().JetStream()),
 	}
 }
@@ -146,6 +149,12 @@ func (a *commandAPI) handleThreadRoutes(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		a.handleListEvents(w, r, route.ThreadID)
+	case "citations":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		a.handleListCitations(w, r, route.ThreadID)
 	case "archive":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -836,6 +845,36 @@ func (a *commandAPI) handleListItems(w http.ResponseWriter, r *http.Request, thr
 		"thread_id": threadID,
 		"items":     presented,
 		"page":      presentPage(query, pageBounds, len(items)),
+	})
+}
+
+// handleListCitations returns all citations attached to a root thread,
+// each with its bboxes. Used by the frontend to resolve [text][id]
+// citation markers to paintable regions without the worker pushing the
+// data through the WS event channel.
+func (a *commandAPI) handleListCitations(w http.ResponseWriter, r *http.Request, threadID int64) {
+	if _, err := a.loadThreadForRead(r.Context(), threadID); err != nil {
+		if errors.Is(err, threadstore.ErrThreadNotFound) {
+			writeErrorJSON(w, http.StatusNotFound, fmt.Sprintf("thread %d not found", threadID))
+			return
+		}
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("load thread %d: %v", threadID, err))
+		return
+	}
+
+	citations, err := a.citations.ListForThread(r.Context(), threadID)
+	if err != nil {
+		writeErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("list citations for thread %d: %v", threadID, err))
+		return
+	}
+
+	if citations == nil {
+		citations = []citationstore.Citation{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"thread_id": threadID,
+		"citations": citations,
 	})
 }
 
