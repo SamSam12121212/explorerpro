@@ -168,6 +168,14 @@ func (a *threadActor) startCitationLocatorGroup(parentMeta threadstore.ThreadMet
 		return 0, err
 	}
 	spawnGroupID := spawnMeta.ID
+	// Capture whether the row came back with a ParentCallID already set.
+	// If yes, this is a NAK redelivery and the first attempt already
+	// encoded bindings against its own reserved child thread ids — those
+	// children may have already run and inserted results into
+	// spawn_group_children. Overwriting ParentCallID here would invalidate
+	// aggregateCitationLocatorOutputs's lookup by child_thread_id at
+	// barrier close. Preserve the original.
+	existingParentCallID := strings.TrimSpace(spawnMeta.ParentCallID)
 
 	roundCalls := make([]citationRoundCall, 0, len(calls))
 	childCommands := make([]threadcmd.Command, 0, len(calls))
@@ -238,8 +246,20 @@ func (a *threadActor) startCitationLocatorGroup(parentMeta threadstore.ThreadMet
 	// it, CreateSpawnGroup's ON CONFLICT (id) DO NOTHING on the group row
 	// would leave parent_call_id empty, and aggregateCitationLocatorOutputs
 	// would error with "no parent call bindings" at barrier close.
-	if err := a.store.SaveSpawnGroup(a.ctx, spawnMeta); err != nil {
-		return 0, fmt.Errorf("persist citation locator spawn group parent_call_id: %w", err)
+	//
+	// Gated on the original row not already having a ParentCallID: on NAK
+	// redelivery we want to keep the first attempt's bindings so barrier
+	// close matches results against the children that actually ran (see
+	// existingParentCallID capture above).
+	if existingParentCallID == "" {
+		if err := a.store.SaveSpawnGroup(a.ctx, spawnMeta); err != nil {
+			return 0, fmt.Errorf("persist citation locator spawn group parent_call_id: %w", err)
+		}
+	} else {
+		// Redelivery: restore the bindings we captured before the local
+		// mutation above so anything reading spawnMeta afterwards sees the
+		// persisted value, not the just-computed-but-discarded one.
+		spawnMeta.ParentCallID = existingParentCallID
 	}
 	if err := a.store.CreateSpawnGroup(a.ctx, spawnMeta, childThreadIDs); err != nil {
 		return 0, err
