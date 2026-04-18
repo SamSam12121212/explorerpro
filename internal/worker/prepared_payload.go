@@ -107,32 +107,49 @@ func lowerInputValueWithBlob(ctx context.Context, blob *blobstore.LocalStore, va
 }
 
 func lowerInputItemWithBlob(ctx context.Context, blob *blobstore.LocalStore, item map[string]any, stats *payloadLoweringStats) (map[string]any, error) {
-	if item["type"] != "message" {
-		return item, nil
+	switch item["type"] {
+	case "message":
+		content, ok := item["content"].([]any)
+		if !ok {
+			return item, nil
+		}
+		lowered, err := lowerContentPartsWithBlob(ctx, blob, content, stats)
+		if err != nil {
+			return nil, err
+		}
+		item["content"] = lowered
+	case "function_call_output":
+		// output may be a string (text-only tool result) or an array of
+		// input_text / input_image / input_file parts. Only the array form
+		// can carry blob refs that need lowering.
+		output, ok := item["output"].([]any)
+		if !ok {
+			return item, nil
+		}
+		lowered, err := lowerContentPartsWithBlob(ctx, blob, output, stats)
+		if err != nil {
+			return nil, err
+		}
+		item["output"] = lowered
 	}
+	return item, nil
+}
 
-	content, ok := item["content"].([]any)
-	if !ok {
-		return item, nil
-	}
-
-	loweredContent := make([]any, len(content))
-	for index, part := range content {
+func lowerContentPartsWithBlob(ctx context.Context, blob *blobstore.LocalStore, parts []any, stats *payloadLoweringStats) ([]any, error) {
+	lowered := make([]any, len(parts))
+	for index, part := range parts {
 		partMap, ok := part.(map[string]any)
 		if !ok {
-			loweredContent[index] = part
+			lowered[index] = part
 			continue
 		}
-
 		loweredPart, err := lowerMessageContentItemWithBlob(ctx, blob, partMap, stats)
 		if err != nil {
 			return nil, err
 		}
-		loweredContent[index] = loweredPart
+		lowered[index] = loweredPart
 	}
-
-	item["content"] = loweredContent
-	return item, nil
+	return lowered, nil
 }
 
 func lowerMessageContentItemWithBlob(ctx context.Context, blob *blobstore.LocalStore, item map[string]any, stats *payloadLoweringStats) (map[string]any, error) {
