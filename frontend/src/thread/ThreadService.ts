@@ -1,5 +1,5 @@
 import { appStreamManager } from "../stream/appStream";
-import { apiDelete, apiGet, apiPost, checkHealthApi, uploadImage } from "../api";
+import { apiDelete, apiGet, apiPost, checkHealthApi, sendKeepaliveApiPost, uploadImage } from "../api";
 import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "../constants";
 import type {
   AttachedCollection,
@@ -165,7 +165,21 @@ export class ThreadService {
     if (persistedThreadId) void this.loadThread(persistedThreadId);
 
     void this.fetchThreadList();
+
+    // Best-effort: when the user closes the tab, release the active thread's
+    // OpenAI sockets so we don't leave the worker holding warm child sockets
+    // for an idle conversation. The runtime allows up to 50 sockets per
+    // thread; freeing them on unload keeps the budget honest.
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", this.handlePageHide);
+    }
   }
+
+  private readonly handlePageHide = () => {
+    const threadId = this.state.threadId;
+    if (threadId === null) return;
+    sendKeepaliveApiPost(`/threads/${threadId.toString()}/disconnect_session`, {});
+  };
 
   dispose() {
     for (const url of this.previewUrls) {
@@ -249,6 +263,28 @@ export class ThreadService {
   loadThread = async (nextThreadId: number) => {
     if (nextThreadId === this.state.threadId) return;
 
+    // Single-active-thread invariant: before switching, tear down the
+    // previous root's OpenAI sockets (parent + warm doc-query children).
+    // Idle threads are released silently; in-flight turns prompt for
+    // confirmation since switching cancels them.
+    const prevThreadId = this.state.threadId;
+    if (prevThreadId !== null) {
+      const inFlight = this.state.phase === "streaming" || this.state.thinking;
+      if (inFlight) {
+        const ok = typeof window !== "undefined" ? window.confirm(
+          "This thread is still processing a request. Switching will cancel it. Continue?",
+        ) : true;
+        if (!ok) return;
+      }
+      try {
+        await apiPost(`/threads/${prevThreadId.toString()}/disconnect_session`, {});
+      } catch (err) {
+        // Don't block the switch if cascade fails — worker will sweep
+        // stale sockets eventually. Just log it.
+        console.warn("disconnect_session failed", err);
+      }
+    }
+
     this.setState((s) => ({ ...s, phase: "loading", thinking: false }));
 
     try {
@@ -306,6 +342,15 @@ export class ThreadService {
   };
 
   archiveThread = async (threadId: number) => {
+    if (threadId === this.state.threadId) {
+      const inFlight = this.state.phase === "streaming" || this.state.thinking;
+      if (inFlight) {
+        const ok = typeof window !== "undefined" ? window.confirm(
+          "This thread is still processing a request. Archiving will cancel it. Continue?",
+        ) : true;
+        if (!ok) return;
+      }
+    }
     await apiPost(`/threads/${threadId.toString()}/archive`, {});
     if (threadId === this.state.threadId) {
       this.resetConversation();

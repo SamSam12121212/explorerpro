@@ -2257,14 +2257,15 @@ func TestHandleChildResultClearsActiveSpawnGroupAfterParentTurnCompletes(t *test
 
 func testOpenAIConfig() openaiws.Config {
 	return openaiws.Config{
-		APIKey:             "test-key",
-		BaseURL:            "https://api.openai.com/v1",
-		ResponsesSocketURL: "wss://api.openai.com/v1/responses",
-		DialTimeout:        50 * time.Millisecond,
-		ReadTimeout:        50 * time.Millisecond,
-		WriteTimeout:       50 * time.Millisecond,
-		PingInterval:       50 * time.Millisecond,
-		MaxMessageBytes:    1024,
+		APIKey:               "test-key",
+		BaseURL:              "https://api.openai.com/v1",
+		ResponsesSocketURL:   "wss://api.openai.com/v1/responses",
+		DialTimeout:          50 * time.Millisecond,
+		ReadTimeout:          50 * time.Millisecond,
+		WriteTimeout:         50 * time.Millisecond,
+		PingInterval:         50 * time.Millisecond,
+		MaxMessageBytes:      1024,
+		MaxConcurrentSockets: 16,
 	}
 }
 

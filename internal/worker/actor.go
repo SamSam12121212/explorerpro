@@ -32,16 +32,22 @@ import (
 )
 
 var (
-	errOwnershipConflict = errors.New("thread is owned by another worker")
-	errCommandPrecond    = errors.New("command precondition failed")
-	errRemotePermanent   = errors.New("openai returned a permanent error")
-	errUnsupportedKind   = errors.New("unsupported command kind")
+	errOwnershipConflict   = errors.New("thread is owned by another worker")
+	errCommandPrecond      = errors.New("command precondition failed")
+	errRemotePermanent     = errors.New("openai returned a permanent error")
+	errUnsupportedKind     = errors.New("unsupported command kind")
+	errSocketBudgetExhausted = errors.New("openai socket budget exhausted")
 )
 
 const (
 	maxTransientCommandDeliveries = 5
 	transientCommandRetryBase     = 2 * time.Second
 	transientCommandRetryMax      = 30 * time.Second
+	// maxChildrenPerSpawn caps the number of children a single spawn_threads
+	// or query_document round can launch. Each child gets its own OpenAI
+	// socket, so this combined with the process-wide socket budget is what
+	// prevents a buggy turn from torching the OpenAI quota.
+	maxChildrenPerSpawn = 50
 )
 
 type threadActorConfig struct {
@@ -60,6 +66,8 @@ type threadActorConfig struct {
 	Publish           func(ctx context.Context, subject string, cmd threadcmd.Command) error
 	PublishEvent      func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 	SessionFactory    func() *openaiws.Session
+	BudgetReserve     func() error
+	BudgetRelease     func()
 }
 
 type actorStore interface {
@@ -133,6 +141,8 @@ type threadActor struct {
 	publishEvent      func(ctx context.Context, threadID int64, socketGeneration uint64, key string, eventType string, raw json.RawMessage) error
 
 	sessionFactory func() *openaiws.Session
+	budgetReserve  func() error
+	budgetRelease  func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -185,6 +195,8 @@ func newThreadActor(parentCtx context.Context, cfg threadActorConfig) *threadAct
 		publish:           cfg.Publish,
 		publishEvent:      cfg.PublishEvent,
 		sessionFactory:    cfg.SessionFactory,
+		budgetReserve:     cfg.BudgetReserve,
+		budgetRelease:     cfg.BudgetRelease,
 		ctx:               ctx,
 		cancel:            cancel,
 		commands:          make(chan queuedCommand, commandQueueSize),
@@ -241,7 +253,7 @@ func (a *threadActor) Close() error {
 	}
 
 	if session != nil {
-		errs = append(errs, session.Close())
+		errs = append(errs, a.closeAndRelease(session))
 	}
 	a.disconnectOpenAISocket(socketID, "actor_close")
 
@@ -253,7 +265,12 @@ func (a *threadActor) Close() error {
 }
 
 func (a *threadActor) run() {
+	// Defers run LIFO. Order matters: cancel ctx FIRST so Enqueue starts
+	// returning false (and the dispatcher NACKs the message back to
+	// JetStream for re-delivery) before IsClosed() flips and getActor
+	// thinks the actor is gone.
 	defer close(a.done)
+	defer a.cancel()
 
 	for {
 		select {
@@ -271,8 +288,26 @@ func (a *threadActor) run() {
 					"error", err,
 				)
 			}
+
+			if a.shouldSelfDestruct() {
+				a.logger.Info("child actor self-destructing after terminal status",
+					"thread_id", a.threadID,
+					"status", a.currentMeta().Status,
+				)
+				return
+			}
 		}
 	}
+}
+
+// shouldSelfDestruct returns true when the actor has finished its work and
+// can release its goroutine + map slot. Only child threads that have reached
+// a terminal status qualify — root threads stay alive between turns so the
+// next user message reuses the same actor (and any warm doc-query children
+// remain reusable on their own actors).
+func (a *threadActor) shouldSelfDestruct() bool {
+	meta := a.currentMeta()
+	return meta.ParentThreadID > 0 && isTerminalThreadStatus(meta.Status)
 }
 
 func (a *threadActor) handleQueuedCommand(queued queuedCommand) error {
@@ -1118,13 +1153,13 @@ func (a *threadActor) handleRotateSocket(cmd threadcmd.Command) error {
 	now := time.Now().UTC()
 	newGeneration, rotated, err := a.store.RotateOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration, now.Add(workerLeaseTTL), now.Add(socketExpiryTTL))
 	if err != nil {
-		_ = freshSession.Close()
+		_ = a.closeAndRelease(freshSession)
 		a.startLeaseLoop(meta)
 		a.startIdleLoop(meta)
 		return err
 	}
 	if !rotated {
-		_ = freshSession.Close()
+		_ = a.closeAndRelease(freshSession)
 		a.handleLeaseLoss(meta.SocketGeneration)
 		return errOwnershipConflict
 	}
@@ -1138,7 +1173,7 @@ func (a *threadActor) handleRotateSocket(cmd threadcmd.Command) error {
 	socketID := a.registerOpenAISocket(meta, freshSession, now.Add(workerLeaseTTL))
 	oldSession, oldSocketID := a.swapSessionState(freshSession, socketID)
 	if oldSession != nil {
-		if err := oldSession.Close(); err != nil {
+		if err := a.closeAndRelease(oldSession); err != nil {
 			a.logger.Warn("failed to close rotated socket", "error", err)
 		}
 	}
@@ -1251,29 +1286,10 @@ func (a *threadActor) handleCancel(cmd threadcmd.Command) error {
 		return err
 	}
 
-	a.mu.Lock()
-	if a.leaseCancel != nil {
-		a.leaseCancel()
-		a.leaseCancel = nil
-	}
-	if a.idleCancel != nil {
-		a.idleCancel()
-		a.idleCancel = nil
-	}
-	idleDone := a.idleDone
-	session := a.session
-	a.session = nil
-	a.mu.Unlock()
+	a.stopLeaseLoop()
+	a.stopIdleLoop()
+	a.resetSession("cancelled")
 
-	if idleDone != nil {
-		<-idleDone
-	}
-
-	if session != nil {
-		if err := session.Close(); err != nil {
-			return err
-		}
-	}
 	return a.store.ReleaseOwnership(a.ctx, meta.ID, a.workerID, meta.SocketGeneration)
 }
 
@@ -1513,7 +1529,7 @@ func (a *threadActor) reconnectSession() error {
 
 	oldSession, oldSocketID := a.swapSessionState(newSession, socketID)
 	if oldSession != nil {
-		if err := oldSession.Close(); err != nil {
+		if err := a.closeAndRelease(oldSession); err != nil {
 			a.logger.Warn("failed to close previous socket", "error", err)
 		}
 	}
@@ -1522,11 +1538,34 @@ func (a *threadActor) reconnectSession() error {
 }
 
 func (a *threadActor) openFreshSession() (*openaiws.Session, error) {
+	if a.budgetReserve != nil {
+		if err := a.budgetReserve(); err != nil {
+			return nil, fmt.Errorf("%w: %v", errSocketBudgetExhausted, err)
+		}
+	}
+
 	session := a.sessionFactory()
 	if err := session.Connect(a.ctx); err != nil {
+		if a.budgetRelease != nil {
+			a.budgetRelease()
+		}
 		return nil, err
 	}
 	return session, nil
+}
+
+// closeAndRelease closes a session and releases its budget slot. Use this
+// instead of calling session.Close() directly so the process-wide socket
+// budget stays accurate.
+func (a *threadActor) closeAndRelease(session *openaiws.Session) error {
+	if session == nil {
+		return nil
+	}
+	err := session.Close()
+	if a.budgetRelease != nil {
+		a.budgetRelease()
+	}
+	return err
 }
 
 func (a *threadActor) swapSessionState(next *openaiws.Session, nextSocketID string) (*openaiws.Session, string) {
@@ -1631,7 +1670,7 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 	}
 
 	if session != nil {
-		_ = session.Close()
+		_ = a.closeAndRelease(session)
 	}
 	a.disconnectOpenAISocket(socketID, "lease_lost")
 
@@ -2260,18 +2299,26 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 						pendingSpawn = &req
 						pendingSpawnCallID = call.CallID
 					} else if err == nil && call.Name == doccmd.ToolNameQueryDocument {
-						req, err := decodeDocQueryRequest(call.Arguments)
-						if err != nil {
-							a.logger.Warn("invalid document query arguments, falling back to waiting_tool",
+						if len(pendingDocQueries) >= maxChildrenPerSpawn {
+							a.logger.Warn("query_document per-turn cap exceeded, halting spawn",
+								"cap", maxChildrenPerSpawn,
 								"call_id", call.CallID,
-								"error", err,
 							)
 							waitingTool = true
 						} else {
-							pendingDocQueries = append(pendingDocQueries, docQueryCall{
-								CallID:  call.CallID,
-								Request: req,
-							})
+							req, err := decodeDocQueryRequest(call.Arguments)
+							if err != nil {
+								a.logger.Warn("invalid document query arguments, falling back to waiting_tool",
+									"call_id", call.CallID,
+									"error", err,
+								)
+								waitingTool = true
+							} else {
+								pendingDocQueries = append(pendingDocQueries, docQueryCall{
+									CallID:  call.CallID,
+									Request: req,
+								})
+							}
 						}
 					} else if err == nil && call.Name == doccmd.ToolNameReadDocumentPage {
 						req, err := decodePageReadRequest(call.Arguments)
@@ -2851,7 +2898,7 @@ func (a *threadActor) resetSession(reason string) {
 	a.mu.Unlock()
 
 	if session != nil {
-		_ = session.Close()
+		_ = a.closeAndRelease(session)
 	}
 	a.disconnectOpenAISocket(socketID, reason)
 }
@@ -3240,6 +3287,10 @@ func decodeSpawnRequest(arguments string, parentMeta threadstore.ThreadMeta) (sp
 
 	if len(request.Children) == 0 {
 		return spawnRequest{}, fmt.Errorf("spawn_threads requires at least one child")
+	}
+
+	if len(request.Children) > maxChildrenPerSpawn {
+		return spawnRequest{}, fmt.Errorf("spawn_threads requested %d children but the per-turn cap is %d", len(request.Children), maxChildrenPerSpawn)
 	}
 
 	if parentMeta.Depth >= 1 {

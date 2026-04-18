@@ -63,6 +63,10 @@ type Service struct {
 
 	recoveryAttemptsMu sync.Mutex
 	recoveryAttempts   map[int64]int
+
+	socketBudgetMu   sync.Mutex
+	socketBudgetUsed int
+	socketBudgetMax  int
 }
 
 type serviceSweepStore interface {
@@ -108,7 +112,34 @@ func New(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime, dial
 		relay:             relay,
 		actors:            map[int64]*threadActor{},
 		recoveryAttempts:  map[int64]int{},
+		socketBudgetMax:   openAIConfig.MaxConcurrentSockets,
 	}, nil
+}
+
+func (s *Service) reserveSocketSlot() error {
+	s.socketBudgetMu.Lock()
+	defer s.socketBudgetMu.Unlock()
+
+	if s.socketBudgetMax > 0 && s.socketBudgetUsed >= s.socketBudgetMax {
+		return fmt.Errorf("socket budget exhausted: %d/%d in use", s.socketBudgetUsed, s.socketBudgetMax)
+	}
+	s.socketBudgetUsed++
+	return nil
+}
+
+func (s *Service) releaseSocketSlot() {
+	s.socketBudgetMu.Lock()
+	defer s.socketBudgetMu.Unlock()
+
+	if s.socketBudgetUsed > 0 {
+		s.socketBudgetUsed--
+	}
+}
+
+func (s *Service) socketBudgetSnapshot() (int, int) {
+	s.socketBudgetMu.Lock()
+	defer s.socketBudgetMu.Unlock()
+	return s.socketBudgetUsed, s.socketBudgetMax
 }
 
 func (s *Service) Run(ctx context.Context) (runErr error) {
@@ -284,6 +315,8 @@ func (s *Service) getActor(ctx context.Context, threadID int64) *threadActor {
 		Publish:           s.publishCommand,
 		PublishEvent:      s.publishThreadEvent,
 		SessionFactory:    func() *openaiws.Session { return openaiws.NewSession(s.openAIConfig, s.dialer) },
+		BudgetReserve:     s.reserveSocketSlot,
+		BudgetRelease:     s.releaseSocketSlot,
 	})
 
 	s.actors[threadID] = actor
