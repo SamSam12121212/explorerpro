@@ -229,6 +229,18 @@ func (a *threadActor) startCitationLocatorGroup(parentMeta threadstore.ThreadMet
 	spawnMeta.Expected = len(childCommands)
 	spawnMeta.GroupKind = "citation_locator"
 	spawnMeta.StableKey = stableKey
+
+	// Citation round bindings carry ChildThreadID, which we only know after
+	// the per-call child reservations above. That forces ParentCallID to be
+	// set after LoadOrCreateSpawnGroup, unlike the document_query path which
+	// can encode bindings upfront. SaveSpawnGroup is a full upsert that
+	// propagates the post-spawn ParentCallID to the persisted row; without
+	// it, CreateSpawnGroup's ON CONFLICT (id) DO NOTHING on the group row
+	// would leave parent_call_id empty, and aggregateCitationLocatorOutputs
+	// would error with "no parent call bindings" at barrier close.
+	if err := a.store.SaveSpawnGroup(a.ctx, spawnMeta); err != nil {
+		return 0, fmt.Errorf("persist citation locator spawn group parent_call_id: %w", err)
+	}
 	if err := a.store.CreateSpawnGroup(a.ctx, spawnMeta, childThreadIDs); err != nil {
 		return 0, err
 	}
