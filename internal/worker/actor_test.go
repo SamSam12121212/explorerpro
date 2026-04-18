@@ -730,7 +730,7 @@ func TestApplyDocumentRuntimeContextUpdatesInstructionsAndTools(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(threadstore.ThreadMeta{ID: tid("thread_123")}, payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -766,7 +766,7 @@ func TestApplyDocumentRuntimeContextSkipsWhenNoDocumentsAttached(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(threadstore.ThreadMeta{ID: tid("thread_123")}, payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -802,7 +802,7 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(threadstore.ThreadMeta{ID: tid("thread_123")}, payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -812,11 +812,52 @@ func TestApplyDocumentRuntimeContextFallsBackLocallyOnClientError(t *testing.T) 
 	}
 
 	tools, ok := payload["tools"].([]responses.ToolUnionParam)
-	if !ok || len(tools) != 2 {
-		t.Fatalf("tools = %#v, want lookup plus document query tool", payload["tools"])
+	if !ok || len(tools) != 3 {
+		t.Fatalf("tools = %#v, want lookup + query_document + read_document_page", payload["tools"])
 	}
 	if toolParamName(tools[1]) != doccmd.ToolNameQueryDocument {
-		t.Fatalf("tool name = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryDocument)
+		t.Fatalf("tool name[1] = %q, want %q", toolParamName(tools[1]), doccmd.ToolNameQueryDocument)
+	}
+	if toolParamName(tools[2]) != doccmd.ToolNameReadDocumentPage {
+		t.Fatalf("tool name[2] = %q, want %q", toolParamName(tools[2]), doccmd.ToolNameReadDocumentPage)
+	}
+}
+
+func TestApplyDocumentRuntimeContextLocalFallbackOmitsReadDocumentPageForChildThreads(t *testing.T) {
+	t.Parallel()
+
+	actor := &threadActor{
+		ctx: context.Background(),
+		threadDocs: &fakeThreadDocumentStore{
+			documentsByThread: map[int64][]docstore.Document{
+				tid("thread_child"): {
+					{ID: 1, Filename: "report.pdf"},
+				},
+			},
+		},
+		docRuntime: fakeDocRuntimeContextClient(func(_ context.Context, _ doccmd.RuntimeContextRequest) (doccmd.RuntimeContextResponse, error) {
+			return doccmd.RuntimeContextResponse{}, errors.New("force fallback")
+		}),
+	}
+
+	payload := map[string]any{
+		"instructions": "Be concise.",
+		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
+	}
+
+	childMeta := threadstore.ThreadMeta{ID: tid("thread_child"), ParentThreadID: tid("thread_parent")}
+	if err := actor.applyDocumentRuntimeContext(childMeta, payload); err != nil {
+		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
+	}
+
+	tools, ok := payload["tools"].([]responses.ToolUnionParam)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools = %#v, want lookup + query_document only (no read_document_page on child threads)", payload["tools"])
+	}
+	for _, tool := range tools {
+		if toolParamName(tool) == doccmd.ToolNameReadDocumentPage {
+			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameReadDocumentPage)
+		}
 	}
 }
 
@@ -2428,7 +2469,7 @@ func TestApplyDocumentRuntimeContextDeletesEmptyFields(t *testing.T) {
 		"tools":        []any{map[string]any{"type": "function", "name": "lookup"}},
 	}
 
-	if err := actor.applyDocumentRuntimeContext(tid("thread_123"), payload); err != nil {
+	if err := actor.applyDocumentRuntimeContext(threadstore.ThreadMeta{ID: tid("thread_123")}, payload); err != nil {
 		t.Fatalf("applyDocumentRuntimeContext() error = %v", err)
 	}
 
@@ -3054,7 +3095,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildren(t *testing.T) {
 	}
 
 	meta := store.threads[tid("thread_parent")]
-	if err := actor.streamUntilTerminal(meta); err != nil {
+	if _, err := actor.streamUntilTerminal(meta); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3131,7 +3172,7 @@ func TestStreamUntilTerminalSpawnsDocumentQueryChildrenForMultipleFunctionCalls(
 	}
 
 	meta := store.threads[tid("thread_parent")]
-	if err := actor.streamUntilTerminal(meta); err != nil {
+	if _, err := actor.streamUntilTerminal(meta); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3222,7 +3263,7 @@ func TestStreamUntilTerminalDocumentWarmupPublishesAfterCleanup(t *testing.T) {
 		return parentActor.handleChildResult(cmd, "completed")
 	}
 
-	if err := childActor.streamUntilTerminal(store.threads[warmupThreadID]); err != nil {
+	if _, err := childActor.streamUntilTerminal(store.threads[warmupThreadID]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3270,7 +3311,7 @@ func TestStreamUntilTerminalClearsActiveSpawnGroupForTerminalChild(t *testing.T)
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadID = tid("thread_child")
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3325,7 +3366,7 @@ func TestStreamUntilTerminalLeavesSuccessfulDocumentQueryChildReady(t *testing.T
 	actor := newActorRecoveryHarness(t, store, conn)
 	actor.threadID = tid("thread_doc_query")
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_doc_query")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_doc_query")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3373,7 +3414,7 @@ func TestStreamUntilTerminalPublishesRootDeltaEventsButKeepsThemOutOfHistory(t *
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3436,7 +3477,7 @@ func TestStreamUntilTerminalSuppressesChildDeltaLiveEvents(t *testing.T) {
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3558,7 +3599,7 @@ func TestStreamUntilTerminalDropsReasoningDeltas(t *testing.T) {
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3616,7 +3657,7 @@ func TestStreamUntilTerminalDropsToolCallDeltas(t *testing.T) {
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_root")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 
@@ -3679,7 +3720,7 @@ func TestStreamUntilTerminalPublishesChildNonDeltaEvents(t *testing.T) {
 		return nil
 	}
 
-	if err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
+	if _, err := actor.streamUntilTerminal(store.threads[tid("thread_child")]); err != nil {
 		t.Fatalf("streamUntilTerminal() error = %v", err)
 	}
 

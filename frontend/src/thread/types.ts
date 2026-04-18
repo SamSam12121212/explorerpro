@@ -37,6 +37,9 @@ export interface ThreadState {
   // Populated as `response.output_item.added` events arrive; cleared when the
   // worker resumes (next `response.created`) or on terminal failure.
   pendingDocumentQueries: string[];
+  // call_ids of in-flight `read_document_page` tool calls. Same lifecycle as
+  // pendingDocumentQueries.
+  pendingPageReads: string[];
 }
 
 export interface ThreadActions {

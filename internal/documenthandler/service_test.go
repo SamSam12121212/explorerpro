@@ -115,6 +115,210 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 	}
 }
 
+func TestPrepareInputBuildsPageReadArtifact(t *testing.T) {
+	ctx := context.Background()
+	blob := newTestBlobStore(t)
+	const documentID int64 = 15
+
+	imageRef := blob.Ref("documents", "15", "pages", "page-0004.png")
+	if err := blob.WriteRef(ctx, imageRef, []byte("png")); err != nil {
+		t.Fatalf("WriteRef(image) error = %v", err)
+	}
+
+	manifestJSON, err := json.Marshal(docsplitter.Manifest{
+		DocumentID: documentID,
+		Filename:   "report.pdf",
+		PageCount:  10,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 4, ImageRef: imageRef, Width: 1241, Height: 1754, ContentType: "image/png"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(manifest) error = %v", err)
+	}
+
+	manifestRef := blob.Ref("documents", "15", "manifest.json")
+	if err := blob.WriteRef(ctx, manifestRef, manifestJSON); err != nil {
+		t.Fatalf("WriteRef(manifest) error = %v", err)
+	}
+
+	svc := New(nil, nil, nil, &fakeDocStore{
+		documents: map[int64]docstore.Document{
+			15: {
+				ID:          documentID,
+				Filename:    "report.pdf",
+				ManifestRef: manifestRef,
+				PageCount:   10,
+			},
+		},
+	}, &fakeThreadDocStore{}, &fakeThreadCollectionStore{}, blob)
+	svc.now = func() time.Time { return time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC) }
+
+	resp := svc.prepareInput(ctx, doccmd.PrepareInputRequest{
+		RequestID:  "req_pr_15_4",
+		Kind:       doccmd.PrepareKindPageRead,
+		ThreadID:   456,
+		DocumentID: documentID,
+		PageNumber: 4,
+		CallID:     "call_abc",
+	})
+
+	if resp.Status != doccmd.PrepareStatusOK {
+		t.Fatalf("status = %q, want %q (error=%q)", resp.Status, doccmd.PrepareStatusOK, resp.Error)
+	}
+	if resp.PreparedInputRef == "" {
+		t.Fatal("prepared_input_ref is empty")
+	}
+
+	store, err := preparedinput.NewStore(blob)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	artifact, err := store.Read(ctx, resp.PreparedInputRef)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if artifact.SourceKind != doccmd.PrepareKindPageRead {
+		t.Fatalf("source_kind = %q, want %q", artifact.SourceKind, doccmd.PrepareKindPageRead)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(artifact.Input, &items); err != nil {
+		t.Fatalf("json.Unmarshal(input) error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(items))
+	}
+	if items[0]["type"] != "function_call_output" {
+		t.Fatalf("item type = %v, want function_call_output", items[0]["type"])
+	}
+	if items[0]["call_id"] != "call_abc" {
+		t.Fatalf("call_id = %v, want call_abc", items[0]["call_id"])
+	}
+}
+
+func TestBuildReadDocumentPageInputWrapsPageInFunctionCallOutput(t *testing.T) {
+	doc := docstore.Document{ID: 15, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 15,
+		Filename:   "report.pdf",
+		PageCount:  20,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 3, ImageRef: "blob://doc15/pages/page-0003.png", Width: 1241, Height: 1754, ContentType: "image/png"},
+			{PageNumber: 4, ImageRef: "blob://doc15/pages/page-0004.png", Width: 1241, Height: 1754, ContentType: "image/png"},
+		},
+	}
+
+	raw, err := buildReadDocumentPageInput(doc, manifest, 4, "call_xyz")
+	if err != nil {
+		t.Fatalf("buildReadDocumentPageInput() error = %v", err)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(items))
+	}
+
+	item := items[0]
+	if got := item["type"]; got != "function_call_output" {
+		t.Errorf("item type = %v, want function_call_output", got)
+	}
+	if got := item["call_id"]; got != "call_xyz" {
+		t.Errorf("call_id = %v, want call_xyz", got)
+	}
+
+	output, ok := item["output"].([]any)
+	if !ok {
+		t.Fatalf("output type = %T, want []any", item["output"])
+	}
+	if len(output) != 5 {
+		t.Fatalf("output length = %d, want 5 (<pdf>, <pdf_page>, image, </pdf_page>, </pdf>)", len(output))
+	}
+
+	openTag, _ := output[0].(map[string]any)
+	if openTag["text"] != `<pdf name="report.pdf" id="15" page_count="20">` {
+		t.Errorf("output[0].text = %v, want full <pdf> open tag with page_count=20", openTag["text"])
+	}
+	pageTag, _ := output[1].(map[string]any)
+	if pageTag["text"] != `<pdf_page number="4" width="1241" height="1754">` {
+		t.Errorf("output[1].text = %v, want <pdf_page> for page 4", pageTag["text"])
+	}
+	image, _ := output[2].(map[string]any)
+	if image["type"] != "image_ref" {
+		t.Errorf("output[2].type = %v, want image_ref", image["type"])
+	}
+	if image["image_ref"] != "blob://doc15/pages/page-0004.png" {
+		t.Errorf("output[2].image_ref = %v, want page-0004 ref", image["image_ref"])
+	}
+}
+
+func TestBuildReadDocumentPageInputRejectsMissingPage(t *testing.T) {
+	doc := docstore.Document{ID: 15, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 15,
+		PageCount:  2,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: "blob://doc15/pages/page-0001.png", Width: 1241, Height: 1754},
+			{PageNumber: 2, ImageRef: "blob://doc15/pages/page-0002.png", Width: 1241, Height: 1754},
+		},
+	}
+
+	_, err := buildReadDocumentPageInput(doc, manifest, 99, "call_xyz")
+	if err == nil {
+		t.Fatal("buildReadDocumentPageInput() error = nil, want error for page out of range")
+	}
+	if !strings.Contains(err.Error(), "not found in manifest") {
+		t.Errorf("error = %v, want 'not found in manifest'", err)
+	}
+}
+
+func TestBuildWarmupInputEmitsPageDimensions(t *testing.T) {
+	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 42,
+		Filename:   "report.pdf",
+		PageCount:  2,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
+			{PageNumber: 2, ImageRef: "blob:page-2", Width: 2480, Height: 3508, ContentType: "image/png"},
+		},
+	}
+
+	raw, err := buildWarmupInput(doc, manifest)
+	if err != nil {
+		t.Fatalf("buildWarmupInput() error = %v", err)
+	}
+
+	assertPageTagsIncludeDimensions(t, raw, []string{
+		`<pdf_page number="1" width="1241" height="1754">`,
+		`<pdf_page number="2" width="2480" height="3508">`,
+	})
+}
+
+func TestBuildDocumentQueryInputEmitsPageDimensions(t *testing.T) {
+	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 42,
+		Filename:   "report.pdf",
+		PageCount:  1,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
+		},
+	}
+
+	raw, err := buildDocumentQueryInput(doc, manifest, "summarize the cat")
+	if err != nil {
+		t.Fatalf("buildDocumentQueryInput() error = %v", err)
+	}
+
+	assertPageTagsIncludeDimensions(t, raw, []string{
+		`<pdf_page number="1" width="1241" height="1754">`,
+	})
+}
+
 func TestAppendPdfEnvelopeItemsSinglePageSubset(t *testing.T) {
 	doc := docstore.Document{ID: 15, Filename: "report.pdf"}
 	manifest := docsplitter.Manifest{
@@ -168,50 +372,6 @@ func TestAppendPdfEnvelopeItemsSinglePageSubset(t *testing.T) {
 	if got := image["content_type"]; got != "image/png" {
 		t.Errorf("content_type = %v, want %q", got, "image/png")
 	}
-}
-
-func TestBuildWarmupInputEmitsPageDimensions(t *testing.T) {
-	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
-	manifest := docsplitter.Manifest{
-		DocumentID: 42,
-		Filename:   "report.pdf",
-		PageCount:  2,
-		Pages: []docsplitter.PageEntry{
-			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
-			{PageNumber: 2, ImageRef: "blob:page-2", Width: 2480, Height: 3508, ContentType: "image/png"},
-		},
-	}
-
-	raw, err := buildWarmupInput(doc, manifest)
-	if err != nil {
-		t.Fatalf("buildWarmupInput() error = %v", err)
-	}
-
-	assertPageTagsIncludeDimensions(t, raw, []string{
-		`<pdf_page number="1" width="1241" height="1754">`,
-		`<pdf_page number="2" width="2480" height="3508">`,
-	})
-}
-
-func TestBuildDocumentQueryInputEmitsPageDimensions(t *testing.T) {
-	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
-	manifest := docsplitter.Manifest{
-		DocumentID: 42,
-		Filename:   "report.pdf",
-		PageCount:  1,
-		Pages: []docsplitter.PageEntry{
-			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
-		},
-	}
-
-	raw, err := buildDocumentQueryInput(doc, manifest, "summarize the cat")
-	if err != nil {
-		t.Fatalf("buildDocumentQueryInput() error = %v", err)
-	}
-
-	assertPageTagsIncludeDimensions(t, raw, []string{
-		`<pdf_page number="1" width="1241" height="1754">`,
-	})
 }
 
 func assertPageTagsIncludeDimensions(t *testing.T, raw json.RawMessage, wantTags []string) {
@@ -299,11 +459,49 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	if err := json.Unmarshal(resp.Tools, &tools); err != nil {
 		t.Fatalf("json.Unmarshal(tools) error = %v", err)
 	}
-	if len(tools) != 2 {
-		t.Fatalf("tools length = %d, want 2", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("tools length = %d, want 3 (lookup + query_document + read_document_page for root thread)", len(tools))
 	}
 	if tools[1]["name"] != doccmd.ToolNameQueryDocument {
-		t.Fatalf("tool name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryDocument)
+		t.Fatalf("tools[1] name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryDocument)
+	}
+	if tools[2]["name"] != doccmd.ToolNameReadDocumentPage {
+		t.Fatalf("tools[2] name = %v, want %q", tools[2]["name"], doccmd.ToolNameReadDocumentPage)
+	}
+}
+
+func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
+	svc := New(nil, nil, nil, &fakeDocStore{}, &fakeThreadDocStore{
+		documentsByThread: map[int64][]docstore.Document{
+			456: {
+				{ID: 1, Filename: "report.pdf"},
+			},
+		},
+	}, &fakeThreadCollectionStore{}, newTestBlobStore(t))
+
+	resp := svc.runtimeContext(context.Background(), doccmd.RuntimeContextRequest{
+		RequestID:      "docctx_456",
+		ThreadID:       456,
+		ParentThreadID: 123,
+		Instructions:   "Be concise.",
+		Tools:          json.RawMessage(`[{"type":"function","name":"lookup"}]`),
+	})
+
+	if resp.Status != doccmd.PrepareStatusOK {
+		t.Fatalf("status = %q, want %q (error=%q)", resp.Status, doccmd.PrepareStatusOK, resp.Error)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal(resp.Tools, &tools); err != nil {
+		t.Fatalf("json.Unmarshal(tools) error = %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2 (lookup + query_document; no read_document_page on child threads)", len(tools))
+	}
+	for _, tool := range tools {
+		if tool["name"] == doccmd.ToolNameReadDocumentPage {
+			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameReadDocumentPage)
+		}
 	}
 }
 

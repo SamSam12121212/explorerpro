@@ -210,6 +210,8 @@ func (s *Service) prepareInput(ctx context.Context, req doccmd.PrepareInputReque
 		ref, err = s.prepareWarmupInput(ctx, req)
 	case doccmd.PrepareKindDocumentQuery:
 		ref, err = s.prepareDocumentQueryInput(ctx, req)
+	case doccmd.PrepareKindPageRead:
+		ref, err = s.preparePageReadInput(ctx, req)
 	default:
 		return doccmd.PrepareInputResponse{
 			RequestID: req.RequestID,
@@ -307,6 +309,43 @@ func (s *Service) prepareDocumentQueryInput(ctx context.Context, req doccmd.Prep
 	return ref, nil
 }
 
+func (s *Service) preparePageReadInput(ctx context.Context, req doccmd.PrepareInputRequest) (string, error) {
+	doc, err := s.docs.Get(ctx, req.DocumentID)
+	if err != nil {
+		return "", fmt.Errorf("load document: %w", err)
+	}
+	if strings.TrimSpace(doc.ManifestRef) == "" {
+		return "", fmt.Errorf("document has no manifest (not yet split)")
+	}
+
+	manifest, err := s.loadManifest(ctx, doc.ManifestRef)
+	if err != nil {
+		return "", err
+	}
+
+	inputJSON, err := buildReadDocumentPageInput(doc, manifest, req.PageNumber, req.CallID)
+	if err != nil {
+		return "", err
+	}
+
+	store, err := preparedinput.NewStore(s.blob)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := store.Write(ctx, req.RequestID, preparedinput.Artifact{
+		Version:    preparedinput.VersionV1,
+		Input:      inputJSON,
+		SourceKind: doccmd.PrepareKindPageRead,
+		CreatedAt:  s.now().Format(time.RFC3339),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return ref, nil
+}
+
 func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextRequest) doccmd.RuntimeContextResponse {
 	instructions := req.Instructions
 	tools := append(json.RawMessage(nil), req.Tools...)
@@ -357,6 +396,16 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 			RequestID: req.RequestID,
 			Status:    doccmd.PrepareStatusError,
 			Error:     err.Error(),
+		}
+	}
+	if req.ParentThreadID == 0 {
+		tools, err = appendReadDocumentPageTool(tools)
+		if err != nil {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusError,
+				Error:     err.Error(),
+			}
 		}
 	}
 
@@ -468,8 +517,58 @@ func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifes
 	return inputJSON, nil
 }
 
+// buildReadDocumentPageInput emits a single function_call_output item whose
+// output array wraps the <pdf>/<pdf_page> envelope around the requested page
+// image. The image is carried as a blob ref and lowered to base64 at the
+// OpenAI-bound edge (worker/prepared_payload.go).
+func buildReadDocumentPageInput(doc docstore.Document, manifest docsplitter.Manifest, pageNumber int, callID string) (json.RawMessage, error) {
+	if pageNumber <= 0 {
+		return nil, fmt.Errorf("page_number must be positive, got %d", pageNumber)
+	}
+	if strings.TrimSpace(callID) == "" {
+		return nil, fmt.Errorf("call_id is required")
+	}
+
+	var page docsplitter.PageEntry
+	found := false
+	for _, p := range manifest.Pages {
+		if p.PageNumber == pageNumber {
+			page = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("page %d not found in manifest (page_count=%d)", pageNumber, manifest.PageCount)
+	}
+
+	output := make([]any, 0, 5)
+	output = appendPdfEnvelopeItems(output, doc, manifest, []docsplitter.PageEntry{page})
+
+	inputJSON, err := json.Marshal([]any{
+		map[string]any{
+			"type":    "function_call_output",
+			"call_id": callID,
+			"output":  output,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal page read input: %w", err)
+	}
+
+	return inputJSON, nil
+}
+
 
 func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissing(raw, doccmd.ToolNameQueryDocument, doccmd.QueryDocumentToolDefinition)
+}
+
+func appendReadDocumentPageTool(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissing(raw, doccmd.ToolNameReadDocumentPage, doccmd.ReadDocumentPageToolDefinition)
+}
+
+func appendToolIfMissing(raw json.RawMessage, name string, definition func() map[string]any) (json.RawMessage, error) {
 	var tools []map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tools); err != nil {
@@ -478,13 +577,13 @@ func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 	}
 
 	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		if name == doccmd.ToolNameQueryDocument {
+		existing, _ := tool["name"].(string)
+		if existing == name {
 			return raw, nil
 		}
 	}
 
-	tools = append(tools, doccmd.QueryDocumentToolDefinition())
+	tools = append(tools, definition())
 	encoded, err := json.Marshal(tools)
 	if err != nil {
 		return nil, fmt.Errorf("marshal runtime context tools: %w", err)
