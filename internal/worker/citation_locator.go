@@ -155,7 +155,7 @@ func (a *threadActor) startCitationLocatorGroup(parentMeta threadstore.ThreadMet
 	}
 
 	stableKey := calls[0].CallID
-	spawnMeta, err := a.store.LoadOrCreateDocumentQuerySpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
+	spawnMeta, err := a.store.LoadOrCreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
 		ParentThreadID: parentMeta.ID,
 		GroupKind:      "citation_locator",
 		StableKey:      stableKey,

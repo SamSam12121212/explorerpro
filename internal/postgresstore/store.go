@@ -845,10 +845,16 @@ ON CONFLICT (spawn_group_id, child_thread_id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) LoadOrCreateDocumentQuerySpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
+// LoadOrCreateSpawnGroup idempotently creates a spawn group keyed by
+// (parent_thread_id, group_kind, stable_key). Used by both the
+// document_query and citation_locator paths to survive NAK redelivery
+// of the parent command without double-spawning children. group_kind
+// comes from meta — the caller is responsible for passing a kind
+// consistent with the aggregation path it expects at barrier close.
+func (s *Store) LoadOrCreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("begin document query spawn group tx: %w", err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("begin spawn group tx: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
@@ -872,7 +878,6 @@ INSERT INTO spawn_groups (
 ) VALUES (
     $1,
     $2,
-    'document_query',
     $3,
     $4,
     $5,
@@ -882,7 +887,8 @@ INSERT INTO spawn_groups (
     $9,
     $10,
     $11,
-    $12
+    $12,
+    $13
 )
 ON CONFLICT (parent_thread_id, group_kind, stable_key) WHERE stable_key IS NOT NULL DO NOTHING
 RETURNING
@@ -903,6 +909,7 @@ RETURNING
 `,
 		meta.ParentThreadID,
 		meta.ParentCallID,
+		meta.GroupKind,
 		meta.StableKey,
 		meta.Expected,
 		meta.Completed,
@@ -918,17 +925,17 @@ RETURNING
 	resolved, err := scanSpawnGroupScanner(row)
 	if err != nil {
 		if !isNoRows(err) {
-			return threadstore.SpawnGroupMeta{}, fmt.Errorf("insert document query spawn group for thread %d: %w", meta.ParentThreadID, err)
+			return threadstore.SpawnGroupMeta{}, fmt.Errorf("insert spawn group (kind=%s) for thread %d: %w", meta.GroupKind, meta.ParentThreadID, err)
 		}
 
-		resolved, err = loadDocumentQuerySpawnGroupTx(ctx, tx, meta.ParentThreadID, meta.StableKey)
+		resolved, err = loadSpawnGroupByKeyTx(ctx, tx, meta.ParentThreadID, meta.GroupKind, meta.StableKey)
 		if err != nil {
 			return threadstore.SpawnGroupMeta{}, err
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("commit document query spawn group tx: %w", err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("commit spawn group tx: %w", err)
 	}
 
 	return resolved, nil
@@ -1900,7 +1907,7 @@ ORDER BY sgc.updated_at ASC, sgc.child_thread_id ASC
 	return results, nil
 }
 
-func loadDocumentQuerySpawnGroupTx(ctx context.Context, tx pgx.Tx, parentThreadID int64, stableKey string) (threadstore.SpawnGroupMeta, error) {
+func loadSpawnGroupByKeyTx(ctx context.Context, tx pgx.Tx, parentThreadID int64, groupKind, stableKey string) (threadstore.SpawnGroupMeta, error) {
 	row := tx.QueryRow(ctx, `
 SELECT
     id,
@@ -1919,16 +1926,16 @@ SELECT
     updated_at
 FROM spawn_groups
 WHERE parent_thread_id = $1
-  AND group_kind = 'document_query'
-  AND stable_key = $2
-`, parentThreadID, stableKey)
+  AND group_kind = $2
+  AND stable_key = $3
+`, parentThreadID, groupKind, stableKey)
 
 	meta, err := scanSpawnGroupScanner(row)
 	if err != nil {
 		if isNoRows(err) {
 			return threadstore.SpawnGroupMeta{}, threadstore.ErrThreadNotFound
 		}
-		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load document query spawn group for thread %d/%s: %w", parentThreadID, stableKey, err)
+		return threadstore.SpawnGroupMeta{}, fmt.Errorf("load spawn group (kind=%s) for thread %d/%s: %w", groupKind, parentThreadID, stableKey, err)
 	}
 	return meta, nil
 }

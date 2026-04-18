@@ -92,7 +92,7 @@ type actorStore interface {
 	AppendItem(ctx context.Context, entry threadstore.ItemLogEntry) (threadstore.ItemRecord, error)
 	SaveResponseRaw(ctx context.Context, threadID int64, responseID string, payload json.RawMessage) error
 	ListItems(ctx context.Context, threadID int64, options threadstore.ListOptions) ([]threadstore.ItemRecord, error)
-	LoadOrCreateDocumentQuerySpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error)
+	LoadOrCreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) (threadstore.SpawnGroupMeta, error)
 	CreateSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta, childThreadIDs []int64) error
 	LoadSpawnGroup(ctx context.Context, spawnGroupID int64) (threadstore.SpawnGroupMeta, error)
 	SaveSpawnGroup(ctx context.Context, meta threadstore.SpawnGroupMeta) error
@@ -3571,7 +3571,7 @@ func (a *threadActor) startDocumentQueryGroup(parentMeta threadstore.ThreadMeta,
 		return 0, err
 	}
 
-	spawnMeta, err := a.store.LoadOrCreateDocumentQuerySpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
+	spawnMeta, err := a.store.LoadOrCreateSpawnGroup(a.ctx, threadstore.SpawnGroupMeta{
 		ParentThreadID: parentMeta.ID,
 		ParentCallID:   encodedParentCallID,
 		GroupKind:      "document_query",
