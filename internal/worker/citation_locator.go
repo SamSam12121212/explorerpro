@@ -52,36 +52,13 @@ func decodeCitationLocatorRequest(arguments string) (citationLocatorRequest, err
 	if req.DocumentID <= 0 {
 		return citationLocatorRequest{}, fmt.Errorf("%s requires a positive document_id", doccmd.ToolNameStoreCitation)
 	}
-	if err := validateCitationLocatorPages(req.Pages); err != nil {
-		return citationLocatorRequest{}, err
+	if err := doccmd.ValidateCitationPages(req.Pages); err != nil {
+		return citationLocatorRequest{}, fmt.Errorf("%s: %w", doccmd.ToolNameStoreCitation, err)
 	}
 	if strings.TrimSpace(req.Instruction) == "" {
 		return citationLocatorRequest{}, fmt.Errorf("%s requires a non-empty instruction", doccmd.ToolNameStoreCitation)
 	}
 	return req, nil
-}
-
-// validateCitationLocatorPages enforces the structural invariant for citations:
-// 1 or 2 pages, positive, consecutive (N, N+1) when 2. Same rule the
-// documenthandler applies downstream — we check here too so bad calls surface
-// as per-call errors on the main thread rather than spawning doomed children.
-func validateCitationLocatorPages(pages []int) error {
-	switch len(pages) {
-	case 1:
-		if pages[0] <= 0 {
-			return fmt.Errorf("%s pages[0] must be positive, got %d", doccmd.ToolNameStoreCitation, pages[0])
-		}
-	case 2:
-		if pages[0] <= 0 || pages[1] <= 0 {
-			return fmt.Errorf("%s pages must be positive, got %v", doccmd.ToolNameStoreCitation, pages)
-		}
-		if pages[1] != pages[0]+1 {
-			return fmt.Errorf("%s pages must be consecutive (N, N+1), got %v", doccmd.ToolNameStoreCitation, pages)
-		}
-	default:
-		return fmt.Errorf("%s requires 1 or 2 pages, got %d", doccmd.ToolNameStoreCitation, len(pages))
-	}
-	return nil
 }
 
 func encodeCitationRoundCalls(calls []citationRoundCall) (string, error) {

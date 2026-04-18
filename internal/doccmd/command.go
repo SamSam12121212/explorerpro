@@ -241,7 +241,7 @@ func validatePrepareInputRequest(req PrepareInputRequest) error {
 			return fmt.Errorf("prepare input request missing call_id for kind %q", req.Kind)
 		}
 	case PrepareKindStoreCitationSpawn:
-		if err := validateCitationPages(req.Pages); err != nil {
+		if err := ValidateCitationPages(req.Pages); err != nil {
 			return fmt.Errorf("%s: %w", req.Kind, err)
 		}
 		if strings.TrimSpace(req.Instruction) == "" {
@@ -254,7 +254,7 @@ func validatePrepareInputRequest(req PrepareInputRequest) error {
 			return fmt.Errorf("prepare input request missing thread_id for kind %q", req.Kind)
 		}
 	case PrepareKindStoreCitationFinalize:
-		if err := validateCitationPages(req.Pages); err != nil {
+		if err := ValidateCitationPages(req.Pages); err != nil {
 			return fmt.Errorf("%s: %w", req.Kind, err)
 		}
 		if strings.TrimSpace(req.CallID) == "" {
@@ -270,12 +270,17 @@ func validatePrepareInputRequest(req PrepareInputRequest) error {
 	return nil
 }
 
-// validateCitationPages enforces the structural invariant: 1 or 2 pages,
+// ValidateCitationPages enforces the structural invariant: 1 or 2 pages,
 // positive, and when 2 they must be consecutive (N, N+1). The 2-page rule
 // captures paragraphs and values that flow across a page break without
 // allowing the model to stitch together unrelated evidence from
 // arbitrary pages under one citation.
-func validateCitationPages(pages []int) error {
+//
+// Exported because the worker's tool-call decoder needs the same check
+// at an earlier boundary (before the PrepareInput request is built) so
+// bad page arrays surface as per-call errors on the main thread rather
+// than spawning children doomed to fail at documenthandler.
+func ValidateCitationPages(pages []int) error {
 	switch len(pages) {
 	case 1:
 		if pages[0] <= 0 {
