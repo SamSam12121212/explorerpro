@@ -2573,6 +2573,77 @@ func TestFilterChildThreadToolsRemovesDocumentQueryTool(t *testing.T) {
 	}
 }
 
+func TestFilterChildThreadToolsRemovesReadDocumentPageTool(t *testing.T) {
+	t.Parallel()
+
+	filtered, err := filterChildThreadTools(`[{"type":"function","name":"read_document_page"},{"type":"function","name":"query_document"},{"type":"function","name":"lookup"}]`)
+	if err != nil {
+		t.Fatalf("filterChildThreadTools() error = %v", err)
+	}
+
+	var tools []map[string]any
+	if err := json.Unmarshal([]byte(filtered), &tools); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(tools) != 1 || tools[0]["name"] != "lookup" {
+		t.Fatalf("tools = %v, want only lookup (read_document_page + query_document should both be stripped from child)", tools)
+	}
+}
+
+func TestStreamUntilTerminalDoesNotReturnPendingPageReadsOnResponseFailed(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeActorStore(t)
+	store.threads[tid("thread_root")] = threadstore.ThreadMeta{
+		ID:               tid("thread_root"),
+		Status:           threadstore.ThreadStatusRunning,
+		OwnerWorkerID:    tid("worker-local-1"),
+		SocketGeneration: 1,
+	}
+
+	conn := &actorTestConn{
+		reads: [][]byte{
+			[]byte(`{"type":"response.output_item.done","response":{"id":"resp_1"},"item":{"id":"fc_1","type":"function_call","call_id":"call_pr_1","name":"read_document_page","arguments":"{\"document_id\":15,\"page_number\":4}"}}`),
+			[]byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed"}}`),
+		},
+	}
+
+	actor := newActorRecoveryHarness(t, store, conn)
+	actor.threadID = tid("thread_root")
+
+	pending, err := actor.streamUntilTerminal(store.threads[tid("thread_root")])
+	if err != nil {
+		t.Fatalf("streamUntilTerminal() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending page reads = %d, want 0 (must not return pending on response.failed — thread is already Failed and cannot accept a follow-up response.create)", len(pending))
+	}
+
+	final := store.threads[tid("thread_root")]
+	if final.Status != threadstore.ThreadStatusFailed {
+		t.Fatalf("final.Status = %q, want failed", final.Status)
+	}
+}
+
+func TestSubmitResponseCreateEventIDIsUniquePerTurn(t *testing.T) {
+	t.Parallel()
+
+	first := submitResponseCreateEventID(42, 0)
+	second := submitResponseCreateEventID(42, 1)
+	third := submitResponseCreateEventID(42, 2)
+
+	if first == second || first == third || second == third {
+		t.Fatalf("event IDs not unique per turn: turn0=%q turn1=%q turn2=%q", first, second, third)
+	}
+	if first != "42" {
+		t.Errorf("turn 0 eventID = %q, want %q (backwards-compat with pre-loop behavior)", first, "42")
+	}
+	if second != "42-turn-1" {
+		t.Errorf("turn 1 eventID = %q, want %q", second, "42-turn-1")
+	}
+}
+
 func TestStartDocumentQueryGroupUsesLatestCompletedDocumentChildLineage(t *testing.T) {
 	t.Parallel()
 

@@ -1639,8 +1639,9 @@ func (a *threadActor) handleLeaseLoss(socketGeneration uint64) {
 }
 
 func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, payload map[string]any, trigger string) error {
+	turn := 0
 	for {
-		if err := a.submitResponseCreate(meta, cmdID, payload, trigger); err != nil {
+		if err := a.submitResponseCreate(meta, cmdID, turn, payload, trigger); err != nil {
 			return err
 		}
 
@@ -1680,11 +1681,27 @@ func (a *threadActor) sendAndStream(meta threadstore.ThreadMeta, cmdID int64, pa
 			return err
 		}
 		trigger = "page_read_followup"
+		turn++
 	}
 }
 
-func (a *threadActor) submitResponseCreate(meta threadstore.ThreadMeta, cmdID int64, payload map[string]any, trigger string) error {
-	eventID := formatCommandIDLocal(cmdID)
+// submitResponseCreateEventID derives a unique event identifier per submit
+// within a single sendAndStream invocation. The first turn reuses the raw
+// command id for backwards compatibility with existing telemetry; follow-up
+// turns (sync-tool resume) append a turn suffix so JetStream dedup on
+// Nats-Msg-Id doesn't silently drop the follow-up checkpoint / event-log
+// entries in threadhistory (see threadhistory/store.go — CheckpointMsgID and
+// EventMsgID both hash the passed-in id).
+func submitResponseCreateEventID(cmdID int64, turn int) string {
+	base := formatCommandIDLocal(cmdID)
+	if turn == 0 {
+		return base
+	}
+	return base + "-turn-" + strconv.Itoa(turn)
+}
+
+func (a *threadActor) submitResponseCreate(meta threadstore.ThreadMeta, cmdID int64, turn int, payload map[string]any, trigger string) error {
+	eventID := submitResponseCreateEventID(cmdID, turn)
 
 	logPayload, err := marshalResponseCreatePayload(payload)
 	if err != nil {
@@ -2373,8 +2390,16 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 				}, meta)...,
 			)
 			// Continuing with sync tool outputs — skip terminal cleanup and let
-			// sendAndStream fire the follow-up response.create.
-			if len(pendingPageReads) > 0 && pendingSpawn == nil && len(pendingDocQueries) == 0 && !waitingTool {
+			// sendAndStream fire the follow-up response.create. Gated on
+			// response.completed: if the response failed or incomplete'd mid-
+			// stream we must not execute the tool calls it emitted, because
+			// meta.Status is already Failed/Incomplete and we'd be firing a
+			// new response.create on a terminated thread.
+			if event.Type == openaiws.EventTypeResponseCompleted &&
+				len(pendingPageReads) > 0 &&
+				pendingSpawn == nil &&
+				len(pendingDocQueries) == 0 &&
+				!waitingTool {
 				return pendingPageReads, nil
 			}
 			publishMeta := meta
