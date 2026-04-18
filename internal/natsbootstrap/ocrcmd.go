@@ -11,8 +11,13 @@ import (
 
 func EnsureDocOCRStream(js nats.JetStreamContext) error {
 	cfg := &nats.StreamConfig{
-		Name:      ocrcmd.StreamName,
-		Subjects:  []string{ocrcmd.SplitDoneSubject, ocrcmd.OCRDoneSubject},
+		Name: ocrcmd.StreamName,
+		Subjects: []string{
+			ocrcmd.SplitDoneSubject,
+			ocrcmd.OCRDoneSubject,
+			ocrcmd.ImageOCRRequestedSubject,
+			ocrcmd.ImageOCRDoneSubject,
+		},
 		Storage:   nats.FileStorage,
 		Retention: nats.LimitsPolicy,
 		Discard:   nats.DiscardOld,

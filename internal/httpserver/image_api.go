@@ -9,6 +9,9 @@ import (
 	"strings"
 
 	"explorer/internal/idgen"
+	"explorer/internal/ocrcmd"
+
+	"github.com/nats-io/nats.go"
 )
 
 const maxImageUploadBytes = 20 << 20
@@ -97,6 +100,11 @@ func (a *commandAPI) handleImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := a.publishImageOCRRequested(imageID, ref, contentType); err != nil {
+		writeErrorJSON(w, http.StatusServiceUnavailable, fmt.Sprintf("request image ocr: %v", err))
+		return
+	}
+
 	image := map[string]any{
 		"image_id":     imageID,
 		"image_ref":    ref,
@@ -110,4 +118,27 @@ func (a *commandAPI) handleImages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"image": image,
 	})
+}
+
+func (a *commandAPI) publishImageOCRRequested(imageID, imageRef, contentType string) error {
+	payload, err := ocrcmd.EncodeImageOCRRequested(ocrcmd.ImageOCRRequestedEvent{
+		ImageID:     imageID,
+		ImageRef:    imageRef,
+		ContentType: contentType,
+	})
+	if err != nil {
+		return fmt.Errorf("encode image ocr requested event: %w", err)
+	}
+
+	msg := &nats.Msg{
+		Subject: ocrcmd.ImageOCRRequestedSubject,
+		Header:  nats.Header{},
+		Data:    payload,
+	}
+	msg.Header.Set("Nats-Msg-Id", imageID)
+
+	if _, err := a.runtime.NATS().JetStream().PublishMsg(msg); err != nil {
+		return fmt.Errorf("publish %s: %w", ocrcmd.ImageOCRRequestedSubject, err)
+	}
+	return nil
 }
