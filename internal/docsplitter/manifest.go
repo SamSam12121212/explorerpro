@@ -25,4 +25,5 @@ type PageEntry struct {
 	Height      int    `json:"height"`
 	ContentType string `json:"content_type"`
 	SHA256      string `json:"sha256"`
+	OCRRef      string `json:"ocr_ref,omitempty"`
 }

@@ -22,6 +22,7 @@ import (
 	"explorer/internal/doccmd"
 	"explorer/internal/docstore"
 	"explorer/internal/natsbootstrap"
+	"explorer/internal/ocrcmd"
 
 	"github.com/nats-io/nats.go"
 )
@@ -45,6 +46,9 @@ func New(logger *slog.Logger, js nats.JetStreamContext, docs *docstore.Store, bl
 func (s *Service) Run(ctx context.Context) error {
 	if err := natsbootstrap.EnsureDocCommandStream(s.js); err != nil {
 		return fmt.Errorf("bootstrap doc command stream: %w", err)
+	}
+	if err := natsbootstrap.EnsureDocOCRStream(s.js); err != nil {
+		return fmt.Errorf("bootstrap doc ocr stream: %w", err)
 	}
 
 	ch := make(chan *nats.Msg, 64)
@@ -118,7 +122,31 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 		"page_count", pageCount,
 	)
 
+	s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount)
+
 	_ = msg.Ack()
+}
+
+func (s *Service) publishSplitDone(documentID int64, manifestRef string, pageCount int) {
+	data, err := ocrcmd.EncodeSplitDone(ocrcmd.SplitDoneEvent{
+		DocumentID:  documentID,
+		ManifestRef: manifestRef,
+		PageCount:   pageCount,
+	})
+	if err != nil {
+		s.logger.Error("failed to encode split done event",
+			"document_id", documentID,
+			"error", err,
+		)
+		return
+	}
+	if _, err := s.js.Publish(ocrcmd.SplitDoneSubject, data); err != nil {
+		s.logger.Error("failed to publish split done event",
+			"document_id", documentID,
+			"subject", ocrcmd.SplitDoneSubject,
+			"error", err,
+		)
+	}
 }
 
 func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string, int, error) {
@@ -205,7 +233,7 @@ func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string
 	}
 
 	manifest := Manifest{
-		Version:              "v1",
+		Version:              "v2",
 		DocumentID:           cmd.DocumentID,
 		Filename:             doc.Filename,
 		CreatedAt:            now.Format(time.RFC3339),
