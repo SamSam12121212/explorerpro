@@ -173,6 +173,36 @@ export interface ThreadItemsResponse {
   };
 }
 
+// A citation is one or two pages of highlighted evidence on a document,
+// produced by the store_citation tool and materialized by the evidence
+// locator agent. The model embeds [display text][citation_id] markers
+// in its reply; the frontend resolves the id against this payload to
+// paint bounding boxes on the PDF and jump to the first cited page.
+export interface CitationBbox {
+  id: number;
+  page: number;
+  line_indices: number[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  poly_json?: unknown;
+}
+
+export interface CitationPayload {
+  id: number;
+  root_thread_id: number;
+  document_id: number;
+  instruction: string;
+  created_at: string;
+  bboxes: CitationBbox[];
+}
+
+export interface CitationsResponse {
+  thread_id?: number;
+  citations?: CitationPayload[];
+}
+
 export interface ThreadStreamHeartbeatMessage {
   type: "thread.heartbeat";
   time?: string;

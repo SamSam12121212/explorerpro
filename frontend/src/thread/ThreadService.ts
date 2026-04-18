@@ -4,6 +4,8 @@ import { DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, EXPLORER_TOOLS } from "../constant
 import type {
   AttachedCollection,
   AttachedDocument,
+  CitationPayload,
+  CitationsResponse,
   MessageRole,
   ThreadCreateResponse,
   ThreadItemsResponse,
@@ -136,6 +138,7 @@ const initialState: ThreadState = {
   uploadCount: 0,
   pendingDocumentQueries: [],
   pendingPageReads: [],
+  citations: {},
 };
 
 export class ThreadService {
@@ -311,9 +314,10 @@ export class ThreadService {
     this.setState((s) => (isStale() ? s : { ...s, phase: "loading", thinking: false }));
 
     try {
-      const [threadInfo, payload] = await Promise.all([
+      const [threadInfo, payload, citations] = await Promise.all([
         apiGet<ThreadResponse>(`/threads/${nextThreadId.toString()}`),
         apiGet<ThreadItemsResponse>(`/threads/${nextThreadId.toString()}/items?limit=200`),
+        apiGet<CitationsResponse>(`/threads/${nextThreadId.toString()}/citations`),
       ]);
 
       if (isStale()) return;
@@ -337,6 +341,7 @@ export class ThreadService {
         pendingImages: [],
         pendingDocumentQueries: [],
         pendingPageReads: [],
+        citations: indexCitations(citations.citations),
         draft: "",
       }));
     } catch (error) {
@@ -363,6 +368,7 @@ export class ThreadService {
         attachedCollections: [],
         pendingDocumentQueries: [],
         pendingPageReads: [],
+        citations: {},
       }));
     }
   };
@@ -537,6 +543,19 @@ export class ThreadService {
     }
   }
 
+  private async fetchCitations(threadID: number) {
+    try {
+      const payload = await apiGet<CitationsResponse>(`/threads/${threadID.toString()}/citations`);
+      if (this.state.threadId !== threadID) return;
+      const indexed = indexCitations(payload.citations);
+      this.setState((s) => (s.threadId !== threadID ? s : { ...s, citations: indexed }));
+    } catch (err) {
+      // Citation fetch failing is non-fatal — the response text is still
+      // rendered, just without chip resolution. Log and move on.
+      console.warn("fetchCitations failed", err);
+    }
+  }
+
   private async fetchThreadList() {
     try {
       const payload = await apiGet<ThreadListResponse>("/threads?limit=100");
@@ -693,6 +712,20 @@ export class ThreadService {
       }
 
       void this.fetchThreadList();
+
+      // Citations may have been materialized during the turn (the finalize
+      // RPC runs between the locator barrier close and the follow-up turn).
+      // Refresh the thread-scoped map so [text][id] chips resolve.
+      if (this.state.threadId) void this.fetchCitations(this.state.threadId);
     }
   }
+}
+
+function indexCitations(citations: CitationPayload[] | undefined): Record<number, CitationPayload> {
+  const out: Record<number, CitationPayload> = {};
+  for (const citation of citations ?? []) {
+    if (!citation.id) continue;
+    out[citation.id] = citation;
+  }
+  return out;
 }
