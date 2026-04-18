@@ -459,14 +459,17 @@ func TestRuntimeContextAppendsAvailableDocumentsAndTool(t *testing.T) {
 	if err := json.Unmarshal(resp.Tools, &tools); err != nil {
 		t.Fatalf("json.Unmarshal(tools) error = %v", err)
 	}
-	if len(tools) != 3 {
-		t.Fatalf("tools length = %d, want 3 (lookup + query_document + read_document_page for root thread)", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("tools length = %d, want 4 (lookup + query_document + read_document_page + store_citation for root thread)", len(tools))
 	}
 	if tools[1]["name"] != doccmd.ToolNameQueryDocument {
 		t.Fatalf("tools[1] name = %v, want %q", tools[1]["name"], doccmd.ToolNameQueryDocument)
 	}
 	if tools[2]["name"] != doccmd.ToolNameReadDocumentPage {
 		t.Fatalf("tools[2] name = %v, want %q", tools[2]["name"], doccmd.ToolNameReadDocumentPage)
+	}
+	if tools[3]["name"] != doccmd.ToolNameStoreCitation {
+		t.Fatalf("tools[3] name = %v, want %q", tools[3]["name"], doccmd.ToolNameStoreCitation)
 	}
 }
 
@@ -496,11 +499,14 @@ func TestRuntimeContextOmitsReadDocumentPageForChildThreads(t *testing.T) {
 		t.Fatalf("json.Unmarshal(tools) error = %v", err)
 	}
 	if len(tools) != 2 {
-		t.Fatalf("tools length = %d, want 2 (lookup + query_document; no read_document_page on child threads)", len(tools))
+		t.Fatalf("tools length = %d, want 2 (lookup + query_document; no read_document_page or store_citation on child threads)", len(tools))
 	}
 	for _, tool := range tools {
 		if tool["name"] == doccmd.ToolNameReadDocumentPage {
 			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameReadDocumentPage)
+		}
+		if tool["name"] == doccmd.ToolNameStoreCitation {
+			t.Fatalf("child thread should not receive %q tool", doccmd.ToolNameStoreCitation)
 		}
 	}
 }

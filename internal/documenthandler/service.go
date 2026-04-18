@@ -413,6 +413,14 @@ func (s *Service) runtimeContext(ctx context.Context, req doccmd.RuntimeContextR
 				Error:     err.Error(),
 			}
 		}
+		tools, err = appendStoreCitationTool(tools)
+		if err != nil {
+			return doccmd.RuntimeContextResponse{
+				RequestID: req.RequestID,
+				Status:    doccmd.PrepareStatusError,
+				Error:     err.Error(),
+			}
+		}
 	}
 
 	return doccmd.RuntimeContextResponse{
@@ -572,6 +580,10 @@ func appendQueryDocumentTool(raw json.RawMessage) (json.RawMessage, error) {
 
 func appendReadDocumentPageTool(raw json.RawMessage) (json.RawMessage, error) {
 	return appendToolIfMissing(raw, doccmd.ToolNameReadDocumentPage, doccmd.ReadDocumentPageToolDefinition)
+}
+
+func appendStoreCitationTool(raw json.RawMessage) (json.RawMessage, error) {
+	return appendToolIfMissing(raw, doccmd.ToolNameStoreCitation, doccmd.StoreCitationToolDefinition)
 }
 
 func appendToolIfMissing(raw json.RawMessage, name string, definition func() map[string]any) (json.RawMessage, error) {
