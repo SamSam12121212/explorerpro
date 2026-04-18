@@ -179,7 +179,14 @@ func (s *Service) handleSplitDone(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	s.publishOCRDone(evt.DocumentID, len(manifest.Pages))
+	if err := s.publishOCRDone(evt.DocumentID, len(manifest.Pages)); err != nil {
+		s.logger.Error("failed to signal ocr done; will retry on redelivery",
+			"document_id", evt.DocumentID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
 
 	s.logger.Info("ocr complete",
 		"document_id", evt.DocumentID,
@@ -246,25 +253,18 @@ func (s *Service) callPaddleOCR(ctx context.Context, pngBytes []byte, pageNumber
 	return data, time.Since(started), nil
 }
 
-func (s *Service) publishOCRDone(documentID int64, pageCount int) {
+func (s *Service) publishOCRDone(documentID int64, pageCount int) error {
 	data, err := ocrcmd.EncodeOCRDone(ocrcmd.OCRDoneEvent{
 		DocumentID: documentID,
 		PageCount:  pageCount,
 	})
 	if err != nil {
-		s.logger.Error("failed to encode ocr done event",
-			"document_id", documentID,
-			"error", err,
-		)
-		return
+		return fmt.Errorf("encode ocr done event: %w", err)
 	}
 	if _, err := s.js.Publish(ocrcmd.OCRDoneSubject, data); err != nil {
-		s.logger.Error("failed to publish ocr done event",
-			"document_id", documentID,
-			"subject", ocrcmd.OCRDoneSubject,
-			"error", err,
-		)
+		return fmt.Errorf("publish %s: %w", ocrcmd.OCRDoneSubject, err)
 	}
+	return nil
 }
 
 func trimForLog(data []byte) string {

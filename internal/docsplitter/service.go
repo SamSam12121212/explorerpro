@@ -122,31 +122,31 @@ func (s *Service) handleSplit(ctx context.Context, msg *nats.Msg) {
 		"page_count", pageCount,
 	)
 
-	s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount)
+	if err := s.publishSplitDone(cmd.DocumentID, manifestRef, pageCount); err != nil {
+		s.logger.Error("failed to signal ocr pipeline; will retry on redelivery",
+			"document_id", cmd.DocumentID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
 
 	_ = msg.Ack()
 }
 
-func (s *Service) publishSplitDone(documentID int64, manifestRef string, pageCount int) {
+func (s *Service) publishSplitDone(documentID int64, manifestRef string, pageCount int) error {
 	data, err := ocrcmd.EncodeSplitDone(ocrcmd.SplitDoneEvent{
 		DocumentID:  documentID,
 		ManifestRef: manifestRef,
 		PageCount:   pageCount,
 	})
 	if err != nil {
-		s.logger.Error("failed to encode split done event",
-			"document_id", documentID,
-			"error", err,
-		)
-		return
+		return fmt.Errorf("encode split done event: %w", err)
 	}
 	if _, err := s.js.Publish(ocrcmd.SplitDoneSubject, data); err != nil {
-		s.logger.Error("failed to publish split done event",
-			"document_id", documentID,
-			"subject", ocrcmd.SplitDoneSubject,
-			"error", err,
-		)
+		return fmt.Errorf("publish %s: %w", ocrcmd.SplitDoneSubject, err)
 	}
+	return nil
 }
 
 func (s *Service) splitPDF(ctx context.Context, cmd doccmd.SplitCommand) (string, int, error) {
