@@ -382,9 +382,11 @@ func (s *Service) loadManifest(ctx context.Context, manifestRef string) (docspli
 	return manifest, nil
 }
 
-func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (json.RawMessage, error) {
-	content := make([]any, 0, len(manifest.Pages)*3+2)
-
+// appendPdfEnvelopeItems appends the <pdf>...<pdf_page>...</pdf_page>...</pdf>
+// content items for the given pages. page_count on the outer tag reflects the
+// manifest total so the model can reason about the document as a whole even
+// when only a subset of pages is included.
+func appendPdfEnvelopeItems(content []any, doc docstore.Document, manifest docsplitter.Manifest, pages []docsplitter.PageEntry) []any {
 	content = append(content, map[string]any{
 		"type": "input_text",
 		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
@@ -393,10 +395,10 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 			manifest.PageCount),
 	})
 
-	for _, page := range manifest.Pages {
+	for _, page := range pages {
 		content = append(content, map[string]any{
 			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
+			"text": fmt.Sprintf(`<pdf_page number="%d" width="%d" height="%d">`, page.PageNumber, page.Width, page.Height),
 		})
 
 		image := map[string]any{
@@ -419,6 +421,13 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 		"type": "input_text",
 		"text": "</pdf>",
 	})
+
+	return content
+}
+
+func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (json.RawMessage, error) {
+	content := make([]any, 0, len(manifest.Pages)*3+2)
+	content = appendPdfEnvelopeItems(content, doc, manifest, manifest.Pages)
 
 	inputJSON, err := json.Marshal([]any{
 		map[string]any{
@@ -436,41 +445,7 @@ func buildWarmupInput(doc docstore.Document, manifest docsplitter.Manifest) (jso
 
 func buildDocumentQueryInput(doc docstore.Document, manifest docsplitter.Manifest, task string) (json.RawMessage, error) {
 	content := make([]any, 0, len(manifest.Pages)*3+3)
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": fmt.Sprintf(`<pdf name="%s" id="%s" page_count="%d">`,
-			docprompt.EscapeAttribute(doc.Filename),
-			docprompt.EscapeAttribute(strconv.FormatInt(doc.ID, 10)),
-			manifest.PageCount),
-	})
-
-	for _, page := range manifest.Pages {
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": fmt.Sprintf(`<pdf_page number="%d">`, page.PageNumber),
-		})
-
-		image := map[string]any{
-			"type":      "image_ref",
-			"image_ref": page.ImageRef,
-			"detail":    "high",
-		}
-		if strings.TrimSpace(page.ContentType) != "" {
-			image["content_type"] = page.ContentType
-		}
-		content = append(content, image)
-
-		content = append(content, map[string]any{
-			"type": "input_text",
-			"text": "</pdf_page>",
-		})
-	}
-
-	content = append(content, map[string]any{
-		"type": "input_text",
-		"text": "</pdf>",
-	})
+	content = appendPdfEnvelopeItems(content, doc, manifest, manifest.Pages)
 
 	if strings.TrimSpace(task) != "" {
 		content = append(content, map[string]any{

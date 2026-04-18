@@ -3,6 +3,7 @@ package documenthandler
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,142 @@ func TestPrepareInputBuildsWarmupArtifact(t *testing.T) {
 	}
 	if got := imageItem["detail"]; got != "high" {
 		t.Fatalf("detail = %v, want %q", got, "high")
+	}
+}
+
+func TestAppendPdfEnvelopeItemsSinglePageSubset(t *testing.T) {
+	doc := docstore.Document{ID: 15, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 15,
+		Filename:   "report.pdf",
+		PageCount:  20,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 4, ImageRef: "blob://doc15/pages/page-0004.png", Width: 1241, Height: 1754, ContentType: "image/png"},
+		},
+	}
+
+	content := appendPdfEnvelopeItems(nil, doc, manifest, manifest.Pages)
+
+	if len(content) != 5 {
+		t.Fatalf("content length = %d, want 5 (<pdf>, <pdf_page>, image, </pdf_page>, </pdf>)", len(content))
+	}
+
+	wantTexts := []string{
+		`<pdf name="report.pdf" id="15" page_count="20">`,
+		`<pdf_page number="4" width="1241" height="1754">`,
+		"", // image item, asserted separately
+		"</pdf_page>",
+		"</pdf>",
+	}
+	for i, want := range wantTexts {
+		if want == "" {
+			continue
+		}
+		m, ok := content[i].(map[string]any)
+		if !ok {
+			t.Fatalf("content[%d] type = %T, want map[string]any", i, content[i])
+		}
+		if got, _ := m["text"].(string); got != want {
+			t.Errorf("content[%d].text = %q, want %q", i, got, want)
+		}
+	}
+
+	image, ok := content[2].(map[string]any)
+	if !ok {
+		t.Fatalf("content[2] type = %T, want map[string]any (image item)", content[2])
+	}
+	if got := image["type"]; got != "image_ref" {
+		t.Errorf("image type = %v, want %q", got, "image_ref")
+	}
+	if got := image["image_ref"]; got != "blob://doc15/pages/page-0004.png" {
+		t.Errorf("image_ref = %v, want blob://doc15/pages/page-0004.png", got)
+	}
+	if got := image["detail"]; got != "high" {
+		t.Errorf("detail = %v, want %q", got, "high")
+	}
+	if got := image["content_type"]; got != "image/png" {
+		t.Errorf("content_type = %v, want %q", got, "image/png")
+	}
+}
+
+func TestBuildWarmupInputEmitsPageDimensions(t *testing.T) {
+	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 42,
+		Filename:   "report.pdf",
+		PageCount:  2,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
+			{PageNumber: 2, ImageRef: "blob:page-2", Width: 2480, Height: 3508, ContentType: "image/png"},
+		},
+	}
+
+	raw, err := buildWarmupInput(doc, manifest)
+	if err != nil {
+		t.Fatalf("buildWarmupInput() error = %v", err)
+	}
+
+	assertPageTagsIncludeDimensions(t, raw, []string{
+		`<pdf_page number="1" width="1241" height="1754">`,
+		`<pdf_page number="2" width="2480" height="3508">`,
+	})
+}
+
+func TestBuildDocumentQueryInputEmitsPageDimensions(t *testing.T) {
+	doc := docstore.Document{ID: 42, Filename: "report.pdf"}
+	manifest := docsplitter.Manifest{
+		DocumentID: 42,
+		Filename:   "report.pdf",
+		PageCount:  1,
+		Pages: []docsplitter.PageEntry{
+			{PageNumber: 1, ImageRef: "blob:page-1", Width: 1241, Height: 1754, ContentType: "image/png"},
+		},
+	}
+
+	raw, err := buildDocumentQueryInput(doc, manifest, "summarize the cat")
+	if err != nil {
+		t.Fatalf("buildDocumentQueryInput() error = %v", err)
+	}
+
+	assertPageTagsIncludeDimensions(t, raw, []string{
+		`<pdf_page number="1" width="1241" height="1754">`,
+	})
+}
+
+func assertPageTagsIncludeDimensions(t *testing.T, raw json.RawMessage, wantTags []string) {
+	t.Helper()
+
+	var input []map[string]any
+	if err := json.Unmarshal(raw, &input); err != nil {
+		t.Fatalf("json.Unmarshal(input) error = %v", err)
+	}
+	if len(input) != 1 {
+		t.Fatalf("input length = %d, want 1", len(input))
+	}
+	content, ok := input[0]["content"].([]any)
+	if !ok {
+		t.Fatalf("content type = %T, want []any", input[0]["content"])
+	}
+
+	var pageTags []string
+	for _, item := range content {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, _ := m["text"].(string)
+		if strings.HasPrefix(text, "<pdf_page ") {
+			pageTags = append(pageTags, text)
+		}
+	}
+
+	if len(pageTags) != len(wantTags) {
+		t.Fatalf("pdf_page tags = %d (%v), want %d", len(pageTags), pageTags, len(wantTags))
+	}
+	for i, want := range wantTags {
+		if pageTags[i] != want {
+			t.Errorf("pdf_page[%d] = %q, want %q", i, pageTags[i], want)
+		}
 	}
 }
 
