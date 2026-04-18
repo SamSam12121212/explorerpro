@@ -25,6 +25,9 @@ func NewServer(cfg config.Config, logger *slog.Logger, runtime *platform.Runtime
 	if err := natsbootstrap.EnsureDocCommandStream(runtime.NATS().JetStream()); err != nil {
 		return nil, fmt.Errorf("bootstrap doc command stream: %w", err)
 	}
+	if err := natsbootstrap.EnsureDocOCRStream(runtime.NATS().JetStream()); err != nil {
+		return nil, fmt.Errorf("bootstrap doc ocr stream: %w", err)
+	}
 	if err := natsbootstrap.EnsureThreadHistoryStream(runtime.NATS().JetStream()); err != nil {
 		return nil, fmt.Errorf("bootstrap thread history stream: %w", err)
 	}

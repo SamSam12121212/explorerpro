@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"strings"
+	"sync"
 	"time"
 
 	"explorer/internal/blobstore"
@@ -53,11 +54,11 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("bootstrap doc ocr stream: %w", err)
 	}
 
-	ch := make(chan *nats.Msg, 16)
-	sub, err := s.js.ChanQueueSubscribe(
+	splitCh := make(chan *nats.Msg, 16)
+	splitSub, err := s.js.ChanQueueSubscribe(
 		ocrcmd.SplitDoneSubject,
 		ocrcmd.SplitDoneQueue,
-		ch,
+		splitCh,
 		nats.BindStream(ocrcmd.StreamName),
 		nats.ManualAck(),
 		nats.AckWait(30*time.Minute),
@@ -67,19 +68,51 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("subscribe %s: %w", ocrcmd.SplitDoneSubject, err)
 	}
 
+	imageCh := make(chan *nats.Msg, 16)
+	imageSub, err := s.js.ChanQueueSubscribe(
+		ocrcmd.ImageOCRRequestedSubject,
+		ocrcmd.ImageOCRRequestedQueue,
+		imageCh,
+		nats.BindStream(ocrcmd.StreamName),
+		nats.ManualAck(),
+		nats.AckWait(5*time.Minute),
+		nats.MaxDeliver(3),
+	)
+	if err != nil {
+		_ = splitSub.Drain()
+		return fmt.Errorf("subscribe %s: %w", ocrcmd.ImageOCRRequestedSubject, err)
+	}
+
 	s.logger.Info("dococr service started",
-		"subject", ocrcmd.SplitDoneSubject,
+		"split_subject", ocrcmd.SplitDoneSubject,
+		"image_subject", ocrcmd.ImageOCRRequestedSubject,
 		"paddleocr_url", s.cfg.PaddleOCRURL,
 	)
 
+	// Each subscription drains on its own goroutine so a slow multi-page
+	// document OCR doesn't block image OCR messages (or vice versa) from being
+	// consumed within their AckWait windows.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go s.runHandlerLoop(ctx, &wg, splitCh, s.handleSplitDone)
+	go s.runHandlerLoop(ctx, &wg, imageCh, s.handleImageOCRRequested)
+
+	<-ctx.Done()
+	_ = splitSub.Drain()
+	_ = imageSub.Drain()
+	wg.Wait()
+	s.logger.Info("dococr service stopping", "reason", ctx.Err())
+	return nil
+}
+
+func (s *Service) runHandlerLoop(ctx context.Context, wg *sync.WaitGroup, ch <-chan *nats.Msg, handle func(context.Context, *nats.Msg)) {
+	defer wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
-			_ = sub.Drain()
-			s.logger.Info("dococr service stopping", "reason", ctx.Err())
-			return nil
+			return
 		case msg := <-ch:
-			s.handleSplitDone(ctx, msg)
+			handle(ctx, msg)
 		}
 	}
 }
@@ -131,7 +164,8 @@ func (s *Service) handleSplitDone(ctx context.Context, msg *nats.Msg) {
 			return
 		}
 
-		ocrBytes, duration, err := s.callPaddleOCR(ctx, pageBytes, page.PageNumber)
+		pageFilename := fmt.Sprintf("page-%04d.png", page.PageNumber)
+		ocrBytes, duration, err := s.callPaddleOCR(ctx, pageBytes, pageFilename, "image/png")
 		if err != nil {
 			s.logger.Error("paddleocr call failed",
 				"document_id", evt.DocumentID,
@@ -197,18 +231,25 @@ func (s *Service) handleSplitDone(ctx context.Context, msg *nats.Msg) {
 	_ = msg.Ack()
 }
 
-func (s *Service) callPaddleOCR(ctx context.Context, pngBytes []byte, pageNumber int) ([]byte, time.Duration, error) {
+func (s *Service) callPaddleOCR(ctx context.Context, imageBytes []byte, filename, contentType string) ([]byte, time.Duration, error) {
+	if strings.TrimSpace(filename) == "" {
+		filename = "image"
+	}
+	if strings.TrimSpace(contentType) == "" {
+		contentType = "application/octet-stream"
+	}
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
 	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="page-%04d.png"`, pageNumber))
-	header.Set("Content-Type", "image/png")
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename=%q`, filename))
+	header.Set("Content-Type", contentType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
 		return nil, 0, fmt.Errorf("build multipart part: %w", err)
 	}
-	if _, err := part.Write(pngBytes); err != nil {
+	if _, err := part.Write(imageBytes); err != nil {
 		return nil, 0, fmt.Errorf("write multipart body: %w", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -265,6 +306,127 @@ func (s *Service) publishOCRDone(documentID int64, pageCount int) error {
 		return fmt.Errorf("publish %s: %w", ocrcmd.OCRDoneSubject, err)
 	}
 	return nil
+}
+
+func (s *Service) handleImageOCRRequested(ctx context.Context, msg *nats.Msg) {
+	evt, err := ocrcmd.DecodeImageOCRRequested(msg.Data)
+	if err != nil {
+		s.logger.Error("invalid image ocr requested event", "error", err)
+		_ = msg.Term()
+		return
+	}
+
+	s.logger.Info("processing image ocr",
+		"image_id", evt.ImageID,
+		"image_ref", evt.ImageRef,
+	)
+
+	ocrRef := s.blob.Ref("images", evt.ImageID, "ocr.json")
+
+	// Cache short-circuit: if OCR already landed (redelivery, manual retrigger),
+	// skip the PaddleOCR call but still re-publish image.ocr.done so any
+	// downstream consumer waiting on the first publish isn't stuck.
+	if existing, err := s.blob.ReadRef(ctx, ocrRef); err == nil && len(existing) > 0 {
+		s.logger.Info("image ocr already present; skipping paddleocr call",
+			"image_id", evt.ImageID,
+			"ocr_ref", ocrRef,
+		)
+		if err := s.publishImageOCRDone(evt.ImageID, ocrRef); err != nil {
+			s.logger.Error("failed to re-publish image ocr done; will retry on redelivery",
+				"image_id", evt.ImageID,
+				"error", err,
+			)
+			_ = msg.Nak()
+			return
+		}
+		_ = msg.Ack()
+		return
+	}
+
+	imageBytes, err := s.blob.ReadRef(ctx, evt.ImageRef)
+	if err != nil {
+		s.logger.Error("failed to read image blob",
+			"image_id", evt.ImageID,
+			"image_ref", evt.ImageRef,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
+	start := time.Now()
+	ocrBytes, duration, err := s.callPaddleOCR(ctx, imageBytes, imageUploadFilename(evt.ImageID, evt.ContentType), evt.ContentType)
+	if err != nil {
+		s.logger.Error("paddleocr call failed for image",
+			"image_id", evt.ImageID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
+	if err := s.blob.WriteRef(ctx, ocrRef, ocrBytes); err != nil {
+		s.logger.Error("failed to write image ocr blob",
+			"image_id", evt.ImageID,
+			"ocr_ref", ocrRef,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
+	// Publish BEFORE ack so a Nak from publish failure redelivers the request;
+	// redelivery hits the cache branch and re-publishes without redoing OCR.
+	if err := s.publishImageOCRDone(evt.ImageID, ocrRef); err != nil {
+		s.logger.Error("failed to signal image ocr done; will retry on redelivery",
+			"image_id", evt.ImageID,
+			"error", err,
+		)
+		_ = msg.Nak()
+		return
+	}
+
+	s.logger.Info("image ocr complete",
+		"image_id", evt.ImageID,
+		"ocr_ref", ocrRef,
+		"paddleocr_ms", duration.Milliseconds(),
+		"elapsed_ms", time.Since(start).Milliseconds(),
+	)
+
+	_ = msg.Ack()
+}
+
+func (s *Service) publishImageOCRDone(imageID, ocrRef string) error {
+	data, err := ocrcmd.EncodeImageOCRDone(ocrcmd.ImageOCRDoneEvent{
+		ImageID: imageID,
+		OCRRef:  ocrRef,
+	})
+	if err != nil {
+		return fmt.Errorf("encode image ocr done event: %w", err)
+	}
+	if _, err := s.js.Publish(ocrcmd.ImageOCRDoneSubject, data); err != nil {
+		return fmt.Errorf("publish %s: %w", ocrcmd.ImageOCRDoneSubject, err)
+	}
+	return nil
+}
+
+func imageUploadFilename(imageID, contentType string) string {
+	ext := ""
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "image/png":
+		ext = ".png"
+	case "image/jpeg", "image/jpg":
+		ext = ".jpg"
+	case "image/gif":
+		ext = ".gif"
+	case "image/webp":
+		ext = ".webp"
+	case "image/bmp":
+		ext = ".bmp"
+	case "image/tiff":
+		ext = ".tiff"
+	}
+	return imageID + ext
 }
 
 func trimForLog(data []byte) string {
