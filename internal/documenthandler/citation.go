@@ -316,9 +316,12 @@ func decodeEmitBboxesArguments(raw string) (emitBboxesArguments, error) {
 
 // materializeCitationBboxes validates the locator's line indices against
 // the OCR for each page (structural hallucination gate: the model can
-// only return indices that exist) and builds one bbox row per page with
-// the unioned envelope across the named lines plus a poly list for
-// future rotation-aware rendering.
+// only return indices that exist) and emits one bbox row per OCR line.
+//
+// Earlier versions produced a single unioned envelope per page, which
+// rendered as one giant rectangle that swallowed the whitespace between
+// a heading and its paragraphs. Per-line rows paint as stacked text-
+// sized highlights — the standard marker look.
 func materializeCitationBboxes(output emitBboxesArguments, ocrPages map[int]ocrPage, allowedPages []int) ([]citationstore.Bbox, error) {
 	allowed := make(map[int]bool, len(allowedPages))
 	for _, p := range allowedPages {
@@ -338,99 +341,38 @@ func materializeCitationBboxes(output emitBboxesArguments, ocrPages map[int]ocrP
 			return nil, fmt.Errorf("locator returned empty line_indices for page %d", page.Page)
 		}
 
-		bbox, polyJSON, err := unionOCRLines(data.Lines, page.LineIndices, page.Page)
-		if err != nil {
-			return nil, err
-		}
-
-		indicesInt32 := make([]int32, 0, len(page.LineIndices))
 		for _, idx := range page.LineIndices {
-			indicesInt32 = append(indicesInt32, int32(idx))
-		}
+			if idx < 0 || idx >= len(data.Lines) {
+				return nil, fmt.Errorf("locator returned line index %d for page %d but only %d lines exist", idx, page.Page, len(data.Lines))
+			}
+			line := data.Lines[idx]
+			if len(line.Bbox) < 4 {
+				return nil, fmt.Errorf("page %d line %d has malformed bbox (len=%d)", page.Page, idx, len(line.Bbox))
+			}
 
-		out = append(out, citationstore.Bbox{
-			Page:        page.Page,
-			LineIndices: indicesInt32,
-			X:           bbox.X,
-			Y:           bbox.Y,
-			Width:       bbox.Width,
-			Height:      bbox.Height,
-			PolyJSON:    polyJSON,
-		})
+			var polyJSON json.RawMessage
+			if len(line.Poly) > 0 {
+				raw, err := json.Marshal(line.Poly)
+				if err != nil {
+					return nil, fmt.Errorf("marshal poly for page %d line %d: %w", page.Page, idx, err)
+				}
+				polyJSON = raw
+			}
+
+			out = append(out, citationstore.Bbox{
+				Page:        page.Page,
+				LineIndices: []int32{int32(idx)},
+				X:           line.Bbox[0],
+				Y:           line.Bbox[1],
+				Width:       line.Bbox[2] - line.Bbox[0],
+				Height:      line.Bbox[3] - line.Bbox[1],
+				PolyJSON:    polyJSON,
+			})
+		}
 	}
 
 	if len(out) == 0 {
 		return nil, fmt.Errorf("locator produced no usable bboxes")
 	}
 	return out, nil
-}
-
-type bboxEnvelope struct {
-	X      int
-	Y      int
-	Width  int
-	Height int
-}
-
-// unionOCRLines validates each index is in-range then computes the
-// axis-aligned envelope covering all cited lines. Returns the union
-// bbox plus a JSON array of the per-line polys (preserved for later
-// rotation-aware paint if needed).
-func unionOCRLines(lines []ocrLine, indices []int, page int) (bboxEnvelope, json.RawMessage, error) {
-	if len(lines) == 0 {
-		return bboxEnvelope{}, nil, fmt.Errorf("page %d has no OCR lines", page)
-	}
-
-	var minX, minY, maxX, maxY int
-	var initialized bool
-	polys := make([][][]int, 0, len(indices))
-
-	for _, idx := range indices {
-		if idx < 0 || idx >= len(lines) {
-			return bboxEnvelope{}, nil, fmt.Errorf("locator returned line index %d for page %d but only %d lines exist", idx, page, len(lines))
-		}
-		line := lines[idx]
-		if len(line.Bbox) < 4 {
-			return bboxEnvelope{}, nil, fmt.Errorf("page %d line %d has malformed bbox (len=%d)", page, idx, len(line.Bbox))
-		}
-		x0, y0, x1, y1 := line.Bbox[0], line.Bbox[1], line.Bbox[2], line.Bbox[3]
-		if !initialized {
-			minX, minY, maxX, maxY = x0, y0, x1, y1
-			initialized = true
-		} else {
-			if x0 < minX {
-				minX = x0
-			}
-			if y0 < minY {
-				minY = y0
-			}
-			if x1 > maxX {
-				maxX = x1
-			}
-			if y1 > maxY {
-				maxY = y1
-			}
-		}
-		if len(line.Poly) > 0 {
-			polys = append(polys, line.Poly)
-		}
-	}
-
-	envelope := bboxEnvelope{
-		X:      minX,
-		Y:      minY,
-		Width:  maxX - minX,
-		Height: maxY - minY,
-	}
-
-	var polyJSON json.RawMessage
-	if len(polys) > 0 {
-		raw, err := json.Marshal(polys)
-		if err != nil {
-			return bboxEnvelope{}, nil, fmt.Errorf("marshal poly list for page %d: %w", page, err)
-		}
-		polyJSON = raw
-	}
-
-	return envelope, polyJSON, nil
 }

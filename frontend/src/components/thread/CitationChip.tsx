@@ -30,7 +30,7 @@ export function CitationChip({
 
   return (
     <button
-      className="inline rounded border border-[#4a4a4a] bg-[#2d2d2d] px-1.5 py-0.5 text-[#ffcc00] underline-offset-2 hover:border-[#ffcc00] hover:underline"
+      className="inline cursor-pointer bg-transparent p-0 text-[#ffcc00] underline underline-offset-2 hover:text-[#ffdd33]"
       onClick={() => { navigate(href); }}
       title={citation.instruction}
       type="button"
