@@ -333,20 +333,25 @@ func (a *threadActor) buildCitationLocatorChildStartCommand(parentMeta threadsto
 
 	now := time.Now().UTC()
 	if err := a.store.CreateThreadIfAbsent(a.ctx, threadstore.ThreadMeta{
-		ID:             threadID,
-		RootThreadID:   parentMeta.RootThreadID,
-		ParentThreadID: parentMeta.ID,
-		ParentCallID:   call.CallID,
-		Depth:          parentMeta.Depth + 1,
-		Status:         threadstore.ThreadStatusNew,
-		Model:          "gpt-5.4-mini",
-		Instructions:   doccmd.CitationLocatorInstructions,
-		MetadataJSON:   string(metadataJSON),
-		ChildKind:      "citation_locator",
-		DocumentID:     call.Request.DocumentID,
-		OneShot:        true,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:                 threadID,
+		RootThreadID:       parentMeta.RootThreadID,
+		ParentThreadID:     parentMeta.ID,
+		ParentCallID:       call.CallID,
+		Depth:              parentMeta.Depth + 1,
+		Status:             threadstore.ThreadStatusNew,
+		Model:              "gpt-5.4-mini",
+		Instructions:       doccmd.CitationLocatorInstructions,
+		MetadataJSON:       string(metadataJSON),
+		ChildKind:          "citation_locator",
+		DocumentID:         call.Request.DocumentID,
+		OneShot:            true,
+		// Without this, shouldPublishChildInvocationResult gates the child_completed
+		// publish on ActiveSpawnGroupID > 0 and drops the message, so the parent's
+		// barrier never closes when all N locators finish. Query/spawn children set
+		// this too — was just missed on the citation_locator path.
+		ActiveSpawnGroupID: spawnGroupID,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}); err != nil {
 		return 0, threadcmd.Command{}, err
 	}
