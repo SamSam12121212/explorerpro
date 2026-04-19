@@ -2383,6 +2383,14 @@ func (a *threadActor) streamUntilTerminal(meta threadstore.ThreadMeta) ([]pageRe
 								})
 							}
 						}
+					} else if meta.OneShot {
+						// One-shot children (e.g. the evidence locator) are forced
+						// via tool_choice to emit a single function_call that IS
+						// their terminal output — the parent barrier reads the
+						// args via loadLatestToolCallArgs. There's no app loop to
+						// submit a function_call_output, so flipping to
+						// waiting_tool would strand the thread and the spawn
+						// group's barrier would never close.
 					} else {
 						waitingTool = true
 					}
