@@ -1,4 +1,4 @@
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Link } from "react-router";
 import remarkGfm from "remark-gfm";
 import { CitationChip } from "./CitationChip";
@@ -33,6 +33,18 @@ function parseCitationHref(href: string | undefined): number | null {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
   return parsed;
+}
+
+// react-markdown sanitizes link URLs via defaultUrlTransform against a
+// safelist (http/https/mailto/tel/xmpp/irc/ircs). Custom schemes get
+// stripped to an empty string — which then resolves to the current URL
+// when rendered as `<a href="">`, so clicking a citation chip reloaded
+// the page on whatever doc route the user happened to be viewing.
+// Allowlist `citation:` so our preprocessed hrefs survive, fall through
+// to the default for everything else.
+function citationAwareUrlTransform(url: string): string {
+  if (url.startsWith(CITATION_HREF_PREFIX)) return url;
+  return defaultUrlTransform(url);
 }
 
 // `[display text][citation_id]` → `[display text](citation:citation_id)`.
@@ -119,7 +131,7 @@ const COMPONENTS: Components = {
 export function MarkdownContent({ text }: { text: string }) {
   return (
     <div className="markdown-content">
-      <Markdown components={COMPONENTS} remarkPlugins={REMARK_PLUGINS}>
+      <Markdown components={COMPONENTS} remarkPlugins={REMARK_PLUGINS} urlTransform={citationAwareUrlTransform}>
         {preprocessCitations(text)}
       </Markdown>
     </div>
