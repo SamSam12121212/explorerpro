@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -98,13 +99,95 @@ func NormalizeTools(raw json.RawMessage) (json.RawMessage, error) {
 	return normalized, nil
 }
 
+// DecodeToolChoice parses a raw tool_choice payload into the typed union.
+//
+// The SDK's ResponseNewParamsToolChoiceUnion has a broken JSON unmarshaler:
+// none of the Of* variant pointers get populated, and re-marshalling drops
+// every field except `type`. That silently corrupted anything object-shaped
+// (function/mcp/custom/allowed_tools/hosted) — a payload like
+// `{"type":"function","name":"emit_bboxes"}` round-tripped to
+// `{"type":"function"}`, which OpenAI then rejected on the wire as an
+// invalid hosted-tool type. Bypass the union's unmarshaler and dispatch on
+// the `type` discriminator ourselves, loading each concrete Param struct
+// directly (which unmarshals correctly) and setting the matching Of* field.
 func DecodeToolChoice(raw json.RawMessage) (responses.ResponseNewParamsToolChoiceUnion, error) {
-	var toolChoice responses.ResponseNewParamsToolChoiceUnion
-	if err := json.Unmarshal(raw, &toolChoice); err != nil {
-		return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice payload: %w", err)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return responses.ResponseNewParamsToolChoiceUnion{}, nil
 	}
 
-	return normalizeToolChoiceParam(toolChoice), nil
+	// Mode form: "none" | "auto" | "required" as a bare JSON string.
+	if trimmed[0] == '"' {
+		var mode string
+		if err := json.Unmarshal(trimmed, &mode); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice mode: %w", err)
+		}
+		switch responses.ToolChoiceOptions(mode) {
+		case responses.ToolChoiceOptionsNone, responses.ToolChoiceOptionsAuto, responses.ToolChoiceOptionsRequired:
+			return responses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptions(mode)),
+			}, nil
+		default:
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("unsupported tool_choice mode %q", mode)
+		}
+	}
+
+	var discriminator struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &discriminator); err != nil {
+		return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice type discriminator: %w", err)
+	}
+
+	switch discriminator.Type {
+	case "function":
+		var choice responses.ToolChoiceFunctionParam
+		if err := json.Unmarshal(trimmed, &choice); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice function: %w", err)
+		}
+		return responses.ResponseNewParamsToolChoiceUnion{OfFunctionTool: &choice}, nil
+	case "allowed_tools":
+		var choice responses.ToolChoiceAllowedParam
+		if err := json.Unmarshal(trimmed, &choice); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice allowed_tools: %w", err)
+		}
+		return responses.ResponseNewParamsToolChoiceUnion{OfAllowedTools: &choice}, nil
+	case "mcp":
+		var choice responses.ToolChoiceMcpParam
+		if err := json.Unmarshal(trimmed, &choice); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice mcp: %w", err)
+		}
+		return responses.ResponseNewParamsToolChoiceUnion{OfMcpTool: &choice}, nil
+	case "custom":
+		var choice responses.ToolChoiceCustomParam
+		if err := json.Unmarshal(trimmed, &choice); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice custom: %w", err)
+		}
+		return responses.ResponseNewParamsToolChoiceUnion{OfCustomTool: &choice}, nil
+	case "apply_patch":
+		return responses.ResponseNewParamsToolChoiceUnion{
+			OfSpecificApplyPatchToolChoice: &responses.ToolChoiceApplyPatchParam{},
+		}, nil
+	case "shell":
+		shellParam := responses.NewToolChoiceShellParam()
+		return responses.ResponseNewParamsToolChoiceUnion{OfSpecificShellToolChoice: &shellParam}, nil
+	case
+		string(responses.ToolChoiceTypesTypeFileSearch),
+		string(responses.ToolChoiceTypesTypeWebSearchPreview),
+		string(responses.ToolChoiceTypesTypeComputer),
+		string(responses.ToolChoiceTypesTypeComputerUsePreview),
+		string(responses.ToolChoiceTypesTypeComputerUse),
+		string(responses.ToolChoiceTypesTypeWebSearchPreview2025_03_11),
+		string(responses.ToolChoiceTypesTypeImageGeneration),
+		string(responses.ToolChoiceTypesTypeCodeInterpreter):
+		var choice responses.ToolChoiceTypesParam
+		if err := json.Unmarshal(trimmed, &choice); err != nil {
+			return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("decode tool_choice hosted tool: %w", err)
+		}
+		return responses.ResponseNewParamsToolChoiceUnion{OfHostedTool: &choice}, nil
+	default:
+		return responses.ResponseNewParamsToolChoiceUnion{}, fmt.Errorf("unsupported tool_choice type %q", discriminator.Type)
+	}
 }
 
 func DecodeTools(raw json.RawMessage) ([]responses.ToolUnionParam, error) {
@@ -152,10 +235,6 @@ func NormalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 	reasoning.Summary = ""
 	reasoning.GenerateSummary = ""
 	return reasoning
-}
-
-func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {
-	return toolChoice
 }
 
 func normalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
