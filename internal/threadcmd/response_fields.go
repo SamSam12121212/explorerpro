@@ -237,10 +237,6 @@ func NormalizeReasoningParam(reasoning shared.ReasoningParam) shared.ReasoningPa
 	return reasoning
 }
 
-func normalizeToolChoiceParam(toolChoice responses.ResponseNewParamsToolChoiceUnion) responses.ResponseNewParamsToolChoiceUnion {
-	return toolChoice
-}
-
 func normalizeToolsParam(tools []responses.ToolUnionParam) []responses.ToolUnionParam {
 	cloned := make([]responses.ToolUnionParam, len(tools))
 	copy(cloned, tools)
